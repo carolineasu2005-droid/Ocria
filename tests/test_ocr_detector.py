@@ -1,21 +1,50 @@
-from dataclasses import fields
+from dataclasses import FrozenInstanceError, fields, replace
+from datetime import datetime, timezone
+import hashlib
+import random
 import unittest
 from unittest.mock import Mock, patch
 
+import numpy as np
+
 from ocr_calibration import ScreenRegion
 from ocr_detector import (
+    FINGERPRINT_HASH_PATTERN,
+    FINGERPRINT_VERSION,
+    FingerprintBuildError,
     OCRKeywordDetector,
     RapidOCRBackend,
     ScanObservation,
+    ScreenFingerprint,
     accepted_ocr_items,
+    bind_fingerprint_screen_index,
+    build_fingerprint_normalized_text,
+    build_fingerprint_raw_text,
+    build_screen_fingerprint,
     calculate_load_metrics,
+    compare_screen_fingerprints,
     evaluate_detail_page_load,
+    fingerprint_box_bounds,
+    log_fingerprint_comparison,
+    normalize_fingerprint_item_text,
+    order_fingerprint_items,
+    sha256_normalized_text,
 )
-from ocr_text import OCRItem, matching_keyword_rule, parse_keyword_rules
+from ocr_text import (
+    OCRItem,
+    matching_keyword_rule,
+    parse_keyword_rules,
+    searchable_text,
+)
 
 
 def single_rule(keyword):
     return parse_keyword_rules(f'"{keyword}"')
+
+
+def render_parameterized_log(call):
+    message, *arguments = call.args
+    return message % tuple(arguments)
 
 
 class FakeCapture:
@@ -138,9 +167,442 @@ class DetailPageLoadHelperTests(unittest.TestCase):
         self.assertEqual(result, (False, "low_box_count_and_short_text"))
 
 
+class ScreenFingerprintTests(unittest.TestCase):
+    @staticmethod
+    def make_item(text, left, top, width=10.0, height=10.0):
+        right = left + width
+        bottom = top + height
+        return OCRItem(
+            text,
+            0.99,
+            [
+                [left, top],
+                [right, top],
+                [right, bottom],
+                [left, bottom],
+            ],
+        )
+
+    @staticmethod
+    def captured_at():
+        return datetime(2026, 7, 29, 8, 30, tzinfo=timezone.utc)
+
+    def test_box_bounds_supports_rotated_and_numpy_boxes(self):
+        rotated = [[10, 0], [20, 5], [15, 15], [5, 10]]
+        expected = (5.0, 0.0, 20.0, 15.0, 15.0, 15.0, 7.5)
+
+        self.assertEqual(fingerprint_box_bounds(rotated), expected)
+        self.assertEqual(
+            fingerprint_box_bounds(np.asarray(rotated)),
+            expected,
+        )
+        self.assertEqual(
+            fingerprint_box_bounds([[3, 4], [3, 4]]),
+            (3.0, 4.0, 3.0, 4.0, 0.0, 0.0, 4.0),
+        )
+
+    def test_invalid_boxes_raise_fingerprint_build_error(self):
+        invalid_boxes = (
+            None,
+            [],
+            [[1]],
+            [["x", 2]],
+            [[float("nan"), 2]],
+            [[float("inf"), 2]],
+            "not-a-nested-box",
+        )
+
+        for box in invalid_boxes:
+            with self.subTest(box=box):
+                with self.assertRaises(FingerprintBuildError):
+                    fingerprint_box_bounds(box)
+
+        with self.assertRaises(FingerprintBuildError):
+            build_screen_fingerprint([OCRItem("bad", 0.99, None)])
+
+    def test_order_is_stable_when_non_tied_input_is_shuffled(self):
+        items = [
+            self.make_item("bottom", 20, 30),
+            self.make_item("right", 50, 0),
+            self.make_item("left", 0, 0),
+        ]
+        expected_text = "left\nright\nbottom"
+        expected_hash = build_screen_fingerprint(
+            items,
+            captured_at=self.captured_at(),
+        ).exact_hash
+
+        for seed in (3, 17, 41):
+            shuffled = list(items)
+            random.Random(seed).shuffle(shuffled)
+            ordered = order_fingerprint_items(shuffled)
+            fingerprint = build_screen_fingerprint(
+                shuffled,
+                captured_at=self.captured_at(),
+            )
+
+            self.assertEqual([item.text for item in ordered], [
+                "left",
+                "right",
+                "bottom",
+            ])
+            self.assertEqual(fingerprint.raw_text, expected_text)
+            self.assertEqual(fingerprint.exact_hash, expected_hash)
+
+    def test_order_groups_small_y_variation_by_frozen_tolerance(self):
+        right = self.make_item("right", 100, 0)
+        left_at_tolerance = self.make_item("left", 0, 8)
+
+        ordered = order_fingerprint_items([right, left_at_tolerance])
+
+        self.assertEqual([item.text for item in ordered], ["left", "right"])
+
+    def test_order_uses_new_line_outside_frozen_tolerance(self):
+        upper_right = self.make_item("upper", 100, 0)
+        lower_left = self.make_item("lower", 0, 8.1)
+
+        ordered = order_fingerprint_items([upper_right, lower_left])
+
+        self.assertEqual([item.text for item in ordered], ["upper", "lower"])
+
+    def test_order_uses_source_index_for_complete_coordinate_tie(self):
+        first = self.make_item("first", 0, 0)
+        second = self.make_item("second", 0, 0)
+
+        first_order = order_fingerprint_items([first, second])
+        reversed_order = order_fingerprint_items([second, first])
+
+        self.assertEqual([item.text for item in first_order], [
+            "first",
+            "second",
+        ])
+        self.assertEqual([item.text for item in reversed_order], [
+            "second",
+            "first",
+        ])
+        self.assertNotEqual(
+            build_screen_fingerprint(
+                [first, second],
+                captured_at=self.captured_at(),
+            ).exact_hash,
+            build_screen_fingerprint(
+                [second, first],
+                captured_at=self.captured_at(),
+            ).exact_hash,
+        )
+
+    def test_raw_and_normalized_text_follow_the_fixed_contract(self):
+        ordered_items = [
+            OCRItem(" \t ", 0.99),
+            OCRItem("  A\t B  ", 0.99),
+            OCRItem("Ｆoo!  ", 0.99),
+        ]
+
+        raw_text, raw_length = build_fingerprint_raw_text(ordered_items)
+        normalized_text, normalized_length = (
+            build_fingerprint_normalized_text(ordered_items)
+        )
+
+        self.assertEqual(raw_text, " \t \n  A\t B  \nＦoo!  ")
+        self.assertEqual(
+            raw_length,
+            sum(len(item.text) for item in ordered_items),
+        )
+        self.assertEqual(normalized_text, "A B\nＦoo!")
+        self.assertEqual(normalized_length, len(normalized_text))
+        self.assertEqual(
+            normalize_fingerprint_item_text(" \n Alpha\t\tBeta \r\n "),
+            "Alpha Beta",
+        )
+
+    def test_normalization_preserves_non_whitespace_characters(self):
+        text = "  AbC，１２３!  "
+
+        self.assertEqual(
+            normalize_fingerprint_item_text(text),
+            "AbC，１２３!",
+        )
+
+    def test_empty_normalized_text_has_valid_empty_sha256(self):
+        items = [
+            self.make_item(" \t ", 0, 0),
+            self.make_item("", 20, 0),
+        ]
+
+        fingerprint = build_screen_fingerprint(
+            items,
+            captured_at=self.captured_at(),
+        )
+
+        self.assertEqual(fingerprint.ocr_box_count, 2)
+        self.assertEqual(fingerprint.raw_text, " \t \n")
+        self.assertEqual(fingerprint.raw_text_length, len(" \t "))
+        self.assertEqual(fingerprint.normalized_text, "")
+        self.assertEqual(fingerprint.normalized_text_length, 0)
+        self.assertEqual(
+            fingerprint.exact_hash,
+            hashlib.sha256(b"").hexdigest(),
+        )
+
+    def test_hash_is_lowercase_sha256_of_utf8_normalized_text(self):
+        normalized_text = "中文\nPython!"
+
+        exact_hash = sha256_normalized_text(normalized_text)
+
+        self.assertEqual(
+            exact_hash,
+            hashlib.sha256(normalized_text.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(len(exact_hash), 64)
+        self.assertIsNotNone(FINGERPRINT_HASH_PATTERN.fullmatch(exact_hash))
+
+    def test_metadata_does_not_change_exact_hash(self):
+        items = [self.make_item("metadata", 0, 0)]
+        first = build_screen_fingerprint(
+            items,
+            captured_at=datetime(2026, 7, 29, 8, 30, tzinfo=timezone.utc),
+        )
+        second = build_screen_fingerprint(
+            items,
+            captured_at=datetime(2026, 7, 29, 8, 31, tzinfo=timezone.utc),
+        )
+        changed_metadata = replace(
+            first,
+            captured_at="2030-01-01T00:00:00+00:00",
+            ocr_box_count=99,
+            raw_text_length=0,
+            normalized_text_length=0,
+            screen_index=7,
+        )
+
+        self.assertEqual(first.exact_hash, second.exact_hash)
+        self.assertEqual(first.exact_hash, changed_metadata.exact_hash)
+        self.assertTrue(compare_screen_fingerprints(first, changed_metadata))
+
+    def test_small_text_change_changes_exact_hash(self):
+        original = build_screen_fingerprint(
+            [self.make_item("A", 0, 0)],
+            captured_at=self.captured_at(),
+        )
+        punctuation_changed = build_screen_fingerprint(
+            [self.make_item("A!", 0, 0)],
+            captured_at=self.captured_at(),
+        )
+
+        self.assertNotEqual(original.exact_hash, punctuation_changed.exact_hash)
+
+    def test_builder_uses_injected_time_and_samples_automatic_time_last(self):
+        injected = datetime(2026, 7, 29, 8, 30, tzinfo=timezone.utc)
+        items = [self.make_item("clock", 0, 0)]
+        with_injected_time = build_screen_fingerprint(
+            items,
+            captured_at=injected,
+        )
+        self.assertEqual(with_injected_time.captured_at, injected.isoformat())
+
+        events = []
+        original_hash = sha256_normalized_text
+
+        def record_hash(normalized_text):
+            events.append("hash")
+            return original_hash(normalized_text)
+
+        class ControlledDatetime:
+            @classmethod
+            def now(cls):
+                events.append("now")
+                return injected
+
+        with patch(
+            "ocr_detector.sha256_normalized_text",
+            side_effect=record_hash,
+        ), patch("ocr_detector.datetime", ControlledDatetime):
+            automatic_time = build_screen_fingerprint(items)
+
+        self.assertEqual(events, ["hash", "now"])
+        self.assertEqual(
+            automatic_time.captured_at,
+            injected.astimezone().isoformat(),
+        )
+        with self.assertRaises(FingerprintBuildError):
+            build_screen_fingerprint(
+                items,
+                captured_at=datetime(2026, 7, 29, 8, 30),
+            )
+
+        clock = Mock()
+        with patch("ocr_detector.datetime", clock):
+            with self.assertRaises(FingerprintBuildError):
+                build_screen_fingerprint([OCRItem("bad", 0.99, None)])
+        clock.now.assert_not_called()
+
+    def test_compare_screen_fingerprints_is_three_state(self):
+        fingerprint = build_screen_fingerprint(
+            [self.make_item("same", 0, 0)],
+            captured_at=self.captured_at(),
+        )
+        same = replace(fingerprint)
+        different = replace(
+            fingerprint,
+            exact_hash=sha256_normalized_text("different"),
+        )
+        version_mismatch = replace(
+            fingerprint,
+            fingerprint_version="r03-v2",
+        )
+        invalid_hash = replace(fingerprint, exact_hash="not-a-hash")
+        invalid_version = replace(fingerprint, fingerprint_version="")
+
+        self.assertIs(compare_screen_fingerprints(fingerprint, same), True)
+        self.assertIs(compare_screen_fingerprints(fingerprint, different), False)
+        self.assertIsNone(compare_screen_fingerprints(fingerprint, None))
+        self.assertIsNone(compare_screen_fingerprints(None, None))
+        self.assertIsNone(
+            compare_screen_fingerprints(fingerprint, version_mismatch)
+        )
+        self.assertIsNone(
+            compare_screen_fingerprints(fingerprint, invalid_hash)
+        )
+        self.assertIsNone(
+            compare_screen_fingerprints(fingerprint, invalid_version)
+        )
+
+    def test_comparison_log_maps_all_three_states_without_body(self):
+        private_marker = "PRIVATE_R03_OCR_BODY_9F3A"
+        fingerprint = build_screen_fingerprint(
+            [self.make_item(private_marker, 0, 0)],
+            captured_at=self.captured_at(),
+        )
+        different = replace(
+            fingerprint,
+            exact_hash=sha256_normalized_text("different"),
+        )
+
+        with patch(
+            "ocr_detector.compare_screen_fingerprints",
+        ) as compare, patch("ocr_detector.logger.info") as comparison_log:
+            log_fingerprint_comparison(fingerprint, fingerprint, True)
+            log_fingerprint_comparison(fingerprint, different, False)
+            log_fingerprint_comparison(None, None, None)
+
+        compare.assert_not_called()
+        rendered = [
+            render_parameterized_log(call)
+            for call in comparison_log.call_args_list
+        ]
+        self.assertEqual(rendered, [
+            "event=ocr_fingerprint_comparison comparison=same "
+            f"left_version={FINGERPRINT_VERSION} "
+            f"right_version={FINGERPRINT_VERSION} "
+            f"left_hash={fingerprint.exact_hash} "
+            f"right_hash={fingerprint.exact_hash}",
+            "event=ocr_fingerprint_comparison comparison=different "
+            f"left_version={FINGERPRINT_VERSION} "
+            f"right_version={FINGERPRINT_VERSION} "
+            f"left_hash={fingerprint.exact_hash} "
+            f"right_hash={different.exact_hash}",
+            "event=ocr_fingerprint_comparison comparison=not_comparable "
+            "left_version=- right_version=- left_hash=- right_hash=-",
+        ])
+        for message in rendered:
+            for forbidden in (
+                private_marker,
+                fingerprint.raw_text,
+                fingerprint.normalized_text,
+                "OCRItem(",
+                "ScreenFingerprint(",
+                "FingerprintBuildError(",
+                "[",
+                "box=",
+                "point=",
+                "bounds=",
+                "width=",
+                "height=",
+                "center_y=",
+                "confidence=",
+            ):
+                self.assertNotIn(forbidden, message)
+
+    def test_screen_fingerprint_is_frozen_and_observation_defaults_none(self):
+        fingerprint = build_screen_fingerprint(
+            [self.make_item("frozen", 0, 0)],
+            captured_at=self.captured_at(),
+        )
+
+        with self.assertRaises(FrozenInstanceError):
+            fingerprint.raw_text = "changed"
+
+        fingerprint_field_names = [
+            field.name for field in fields(ScreenFingerprint)
+        ]
+        self.assertEqual(fingerprint_field_names, [
+            "raw_text",
+            "normalized_text",
+            "raw_text_length",
+            "normalized_text_length",
+            "ocr_box_count",
+            "captured_at",
+            "exact_hash",
+            "fingerprint_version",
+            "screen_index",
+        ])
+        self.assertEqual(fingerprint.fingerprint_version, FINGERPRINT_VERSION)
+        self.assertIsNone(fingerprint.screen_index)
+        self.assertFalse(
+            {"ocr_items", "raw_items", "accepted_items", "boxes"}
+            & set(fingerprint_field_names)
+        )
+        observation = ScanObservation(1, "", 0, 0.0)
+        self.assertIsNone(observation.fingerprint)
+
+    def test_binding_replaces_index_without_rehash_or_recapture(self):
+        fingerprint = build_screen_fingerprint(
+            [self.make_item("bound", 0, 0)],
+            captured_at=self.captured_at(),
+        )
+        observation = ScanObservation(
+            1,
+            "bound",
+            1,
+            0.0,
+            fingerprint=fingerprint,
+        )
+
+        bind_fingerprint_screen_index(observation, 1)
+
+        self.assertIsNot(observation.fingerprint, fingerprint)
+        self.assertEqual(observation.fingerprint.screen_index, 1)
+        self.assertEqual(observation.fingerprint.exact_hash, fingerprint.exact_hash)
+        self.assertEqual(observation.fingerprint.raw_text, fingerprint.raw_text)
+        self.assertEqual(
+            observation.fingerprint.normalized_text,
+            fingerprint.normalized_text,
+        )
+        self.assertEqual(
+            observation.fingerprint.captured_at,
+            fingerprint.captured_at,
+        )
+        with self.assertRaises(ValueError):
+            bind_fingerprint_screen_index(observation, 0)
+        with self.assertRaises(ValueError):
+            bind_fingerprint_screen_index(observation, -1)
+
+        observation_without_fingerprint = ScanObservation(1, "", 0, 0.0)
+        bind_fingerprint_screen_index(observation_without_fingerprint, 1)
+        self.assertIsNone(observation_without_fingerprint.fingerprint)
+
+
 class DetectorTests(unittest.TestCase):
     def setUp(self):
         self.region = ScreenRegion(10, 20, 800, 600)
+
+    @staticmethod
+    def make_box_item(text):
+        return OCRItem(
+            text,
+            0.99,
+            [[0, 0], [20, 0], [20, 10], [0, 10]],
+        )
 
     def make_detector(self, pages, max_scans=8, scroll=None):
         return OCRKeywordDetector(
@@ -150,6 +612,587 @@ class DetectorTests(unittest.TestCase):
             max_scans=max_scans,
             scroll=scroll,
             wait=lambda _seconds: None,
+        )
+
+    def test_unpromoted_load_observations_remain_without_screen_index(self):
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.side_effect = [
+            [self.make_box_item(f"load-{attempt}")]
+            for attempt in range(4)
+        ]
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=self.region,
+            wait=lambda _seconds: None,
+        )
+
+        load_observations = [
+            detector.capture_observation(1)
+            for _ in range(4)
+        ]
+
+        self.assertEqual(capture.calls, 4)
+        self.assertEqual(backend.recognize.call_count, 4)
+        self.assertTrue(
+            all(
+                observation.fingerprint is not None
+                and observation.fingerprint.screen_index is None
+                for observation in load_observations
+            )
+        )
+
+    def test_direct_detection_assigns_one_through_eight_to_formal_scans(
+        self,
+    ):
+        class BoxBackend:
+            def __init__(self):
+                self.calls = 0
+
+            def recognize(self, _image):
+                self.calls += 1
+                return [
+                    DetectorTests.make_box_item(f"formal-{self.calls}"),
+                ]
+
+        capture = FakeCapture()
+        backend = BoxBackend()
+        scroll_calls = []
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=self.region,
+            max_scans=8,
+            scroll=lambda: scroll_calls.append(True),
+            wait=lambda _seconds: None,
+        )
+
+        with patch(
+            "ocr_detector.matching_keyword_rule",
+            wraps=matching_keyword_rule,
+        ) as matcher:
+            result = detector.detect(single_rule("not-present"))
+        formal_indexes = [
+            observation.fingerprint.screen_index
+            for observation in result.observations
+            if observation.fingerprint is not None
+        ]
+
+        self.assertEqual(formal_indexes, list(range(1, 9)))
+        self.assertEqual(len(set(formal_indexes)), 8)
+        self.assertNotIn(0, formal_indexes)
+        self.assertNotIn(9, formal_indexes)
+        self.assertEqual(capture.calls, 8)
+        self.assertEqual(backend.calls, 8)
+        self.assertEqual(len(scroll_calls), 7)
+        self.assertEqual(matcher.call_count, 8)
+
+    def test_confirmation_fingerprint_has_no_formal_screen_index(self):
+        class BoxBackend:
+            def __init__(self):
+                self.calls = 0
+
+            def recognize(self, _image):
+                self.calls += 1
+                return [DetectorTests.make_box_item("Python")]
+
+        capture = FakeCapture()
+        backend = BoxBackend()
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=self.region,
+            max_scans=8,
+            wait=Mock(),
+        )
+
+        with patch(
+            "ocr_detector.matching_keyword_rule",
+            wraps=matching_keyword_rule,
+        ) as matcher:
+            result = detector.detect(single_rule("Python"))
+
+        self.assertTrue(result.confirmed_match)
+        self.assertEqual(result.scans_completed, 1)
+        self.assertEqual(capture.calls, 2)
+        self.assertEqual(backend.calls, 2)
+        self.assertEqual(len(result.observations), 2)
+        self.assertEqual(result.observations[0].fingerprint.screen_index, 1)
+        self.assertIsNone(result.observations[1].fingerprint.screen_index)
+        self.assertEqual(matcher.call_count, 2)
+        self.assertEqual(
+            sum(
+                observation.fingerprint is not None
+                and observation.fingerprint.screen_index is not None
+                for observation in result.observations
+            ),
+            1,
+        )
+
+    def test_sequential_detection_results_do_not_retain_prior_fingerprints(
+        self,
+    ):
+        class BoxBackend:
+            def __init__(self):
+                self.calls = 0
+
+            def recognize(self, _image):
+                self.calls += 1
+                return [
+                    DetectorTests.make_box_item(f"candidate-{self.calls}"),
+                ]
+
+        detector = OCRKeywordDetector(
+            backend=BoxBackend(),
+            capture=FakeCapture(),
+            region=self.region,
+            max_scans=1,
+            wait=lambda _seconds: None,
+        )
+
+        first_result = detector.detect(single_rule("not-present"))
+        second_result = detector.detect(single_rule("not-present"))
+
+        self.assertIsNot(first_result.observations, second_result.observations)
+        self.assertIsNot(
+            first_result.observations[0],
+            second_result.observations[0],
+        )
+        self.assertIsNot(
+            first_result.observations[0].fingerprint,
+            second_result.observations[0].fingerprint,
+        )
+        self.assertEqual(
+            first_result.observations[0].fingerprint.screen_index,
+            1,
+        )
+        self.assertEqual(
+            second_result.observations[0].fingerprint.screen_index,
+            1,
+        )
+        self.assertFalse(hasattr(detector, "observations"))
+
+    def test_capture_observation_builds_fingerprint_from_same_accepted_items_once(
+        self,
+    ):
+        capture = FakeCapture()
+        backend = Mock()
+        raw_items = [
+            OCRItem(
+                "  Visible\tText  ",
+                0.99,
+                [[50, 0], [70, 0], [70, 10], [50, 10]],
+            ),
+            OCRItem(
+                "below threshold",
+                0.84,
+                [[0, 20], [20, 20], [20, 30], [0, 30]],
+            ),
+            OCRItem(
+                " \t ",
+                0.99,
+                [[0, 0], [20, 0], [20, 10], [0, 10]],
+            ),
+        ]
+        backend.recognize.return_value = raw_items
+        scroll = Mock()
+        wait = Mock()
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=self.region,
+            min_confidence=0.85,
+            scroll=scroll,
+            wait=wait,
+        )
+        seen = {}
+        original_filter = accepted_ocr_items
+        original_metrics = calculate_load_metrics
+        original_searchable_text = searchable_text
+        original_builder = build_screen_fingerprint
+
+        def record_filter(items, min_confidence):
+            accepted = original_filter(items, min_confidence)
+            seen["accepted"] = accepted
+            return accepted
+
+        def record_metrics(items):
+            seen["metrics_items"] = items
+            return original_metrics(items)
+
+        def record_searchable_text(items):
+            seen["text_items"] = items
+            return original_searchable_text(items)
+
+        def record_builder(items):
+            seen["fingerprint_items"] = items
+            return original_builder(items)
+
+        with patch(
+            "ocr_detector.accepted_ocr_items",
+            side_effect=record_filter,
+        ) as filter_call, patch(
+            "ocr_detector.calculate_load_metrics",
+            side_effect=record_metrics,
+        ) as metrics_call, patch(
+            "ocr_detector.searchable_text",
+            side_effect=record_searchable_text,
+        ) as text_call, patch(
+            "ocr_detector.build_screen_fingerprint",
+            side_effect=record_builder,
+        ) as builder_call, patch(
+            "ocr_detector.matching_keyword_rule",
+        ) as matcher:
+            observation = detector.capture_observation(1)
+
+        self.assertEqual(capture.calls, 1)
+        backend.recognize.assert_called_once_with(1)
+        filter_call.assert_called_once()
+        metrics_call.assert_called_once()
+        text_call.assert_called_once()
+        builder_call.assert_called_once()
+        matcher.assert_not_called()
+        scroll.assert_not_called()
+        wait.assert_not_called()
+        self.assertIs(seen["metrics_items"], seen["accepted"])
+        self.assertIs(seen["text_items"], seen["accepted"])
+        self.assertIs(seen["fingerprint_items"], seen["accepted"])
+        self.assertEqual(observation.item_count, len(raw_items))
+        self.assertEqual(
+            (observation.ocr_box_count, observation.ocr_text_length),
+            original_metrics(seen["accepted"]),
+        )
+        self.assertEqual(
+            observation.text,
+            original_searchable_text(seen["accepted"]),
+        )
+        self.assertIsNotNone(observation.fingerprint)
+        self.assertEqual(
+            observation.fingerprint.ocr_box_count,
+            observation.ocr_box_count,
+        )
+        self.assertIsNone(observation.fingerprint.screen_index)
+        self.assertIsNotNone(
+            datetime.fromisoformat(observation.fingerprint.captured_at).tzinfo
+        )
+
+    def test_fingerprint_generated_log_has_only_allowed_metadata(self):
+        private_marker = "PRIVATE_R03_OCR_BODY_9F3A"
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.return_value = [
+            OCRItem(
+                private_marker,
+                0.99,
+                [[0, 0], [20, 0], [20, 10], [0, 10]],
+            ),
+        ]
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=self.region,
+            wait=lambda _seconds: None,
+        )
+
+        with patch("ocr_detector.logger.info") as generated_log:
+            observation = detector.capture_observation(7)
+
+        fingerprint = observation.fingerprint
+        self.assertIsNotNone(fingerprint)
+        generated_log.assert_called_once()
+        rendered = render_parameterized_log(generated_log.call_args)
+        self.assertEqual(
+            rendered,
+            "event=ocr_fingerprint_generated "
+            f"fingerprint_version={FINGERPRINT_VERSION} "
+            f"exact_hash={fingerprint.exact_hash} "
+            f"ocr_box_count={fingerprint.ocr_box_count} "
+            f"raw_text_length={fingerprint.raw_text_length} "
+            f"normalized_text_length={fingerprint.normalized_text_length} "
+            "screen_index=- "
+            f"captured_at={fingerprint.captured_at} scan_number=7",
+        )
+        for forbidden in (
+            private_marker,
+                fingerprint.raw_text,
+                fingerprint.normalized_text,
+                "OCRItem(",
+                "ScreenFingerprint(",
+                "FingerprintBuildError(",
+                "[",
+                "box=",
+                "point=",
+            "bounds=",
+            "width=",
+            "height=",
+            "center_y=",
+            "confidence=",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_binding_does_not_repeat_fingerprint_generated_log(self):
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.return_value = [self.make_box_item("prefetched")]
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=self.region,
+            max_scans=1,
+            wait=lambda _seconds: None,
+        )
+
+        with patch("ocr_detector.logger.info") as generated_log:
+            first_observation = detector.capture_observation(1)
+            generated_log.assert_called_once()
+            generated_log.reset_mock()
+            result = detector.detect(
+                single_rule("not-present"),
+                first_observation=first_observation,
+            )
+
+        self.assertEqual(result.observations[0].fingerprint.screen_index, 1)
+        generated_log.assert_not_called()
+
+    def test_fingerprint_failure_log_is_sanitised_and_fail_open(self):
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.return_value = [
+            OCRItem(
+                "PRIVATE_R03_OCR_BODY_9F3A",
+                0.99,
+                [[0, 0], [20, 0], [20, 10], [0, 10]],
+            ),
+            OCRItem(
+                "low",
+                0.84,
+                [[0, 20], [20, 20], [20, 30], [0, 30]],
+            ),
+        ]
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=self.region,
+            min_confidence=0.85,
+            scroll=Mock(),
+            wait=Mock(),
+        )
+        original_filter = accepted_ocr_items
+
+        with patch(
+            "ocr_detector.accepted_ocr_items",
+            wraps=original_filter,
+        ) as filter_call, patch(
+            "ocr_detector.build_screen_fingerprint",
+            side_effect=FingerprintBuildError("PRIVATE_R03_OCR_BODY_9F3A"),
+        ) as builder, patch("ocr_detector.logger.warning") as failure_log:
+            observation = detector.capture_observation(1)
+
+        self.assertEqual(capture.calls, 1)
+        backend.recognize.assert_called_once_with(1)
+        filter_call.assert_called_once()
+        builder.assert_called_once()
+        self.assertIsNone(observation.fingerprint)
+        self.assertEqual(observation.item_count, 2)
+        self.assertEqual(observation.ocr_box_count, 1)
+        self.assertEqual(
+            observation.ocr_text_length,
+            len("PRIVATE_R03_OCR_BODY_9F3A"),
+        )
+        self.assertEqual(observation.text, "private_r03_ocr_body_9f3a")
+        failure_log.assert_called_once()
+        rendered = render_parameterized_log(failure_log.call_args)
+        self.assertEqual(
+            rendered,
+            "event=ocr_fingerprint_generation_failed "
+            f"fingerprint_version={FINGERPRINT_VERSION} "
+            "scan_number=1 error_type=FingerprintBuildError",
+        )
+        for forbidden in (
+            "PRIVATE_R03_OCR_BODY_9F3A",
+            observation.text,
+            "OCRItem(",
+            "ScreenFingerprint(",
+            "FingerprintBuildError(",
+            "[",
+            "box=",
+            "point=",
+            "bounds=",
+            "width=",
+            "height=",
+            "center_y=",
+            "confidence=",
+        ):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_backend_failure_does_not_attempt_fingerprint_build(self):
+        class BrokenBackend:
+            def recognize(self, _image):
+                raise RuntimeError("OCR unavailable")
+
+        detector = OCRKeywordDetector(
+            backend=BrokenBackend(),
+            capture=FakeCapture(),
+            region=self.region,
+            wait=lambda _seconds: None,
+        )
+
+        with patch("ocr_detector.build_screen_fingerprint") as builder, patch(
+            "ocr_detector.logger.warning",
+        ) as failure_log:
+            result = detector.detect(single_rule("关键词"))
+
+        builder.assert_not_called()
+        failure_log.assert_not_called()
+        self.assertFalse(result.success)
+        self.assertFalse(result.confirmed_match)
+        self.assertIn("OCR unavailable", result.error)
+
+    def test_capture_and_searchable_errors_do_not_log_fingerprint_failure(self):
+        private_marker = "PRIVATE_R03_OCR_BODY_9F3A"
+
+        class BrokenCapture:
+            def capture(self, _region):
+                raise RuntimeError(private_marker)
+
+        capture_detector = OCRKeywordDetector(
+            backend=Mock(),
+            capture=BrokenCapture(),
+            region=self.region,
+            wait=lambda _seconds: None,
+        )
+        with patch("ocr_detector.build_screen_fingerprint") as builder, patch(
+            "ocr_detector.logger.warning",
+        ) as failure_log:
+            with self.assertRaisesRegex(RuntimeError, private_marker):
+                capture_detector.capture_observation(1)
+        builder.assert_not_called()
+        failure_log.assert_not_called()
+
+        backend = Mock()
+        backend.recognize.return_value = [self.make_box_item(private_marker)]
+        text_detector = OCRKeywordDetector(
+            backend=backend,
+            capture=FakeCapture(),
+            region=self.region,
+            wait=lambda _seconds: None,
+        )
+        with patch(
+            "ocr_detector.searchable_text",
+            side_effect=RuntimeError(private_marker),
+        ), patch("ocr_detector.build_screen_fingerprint") as builder, patch(
+            "ocr_detector.logger.warning",
+        ) as failure_log:
+            with self.assertRaisesRegex(RuntimeError, private_marker):
+                text_detector.capture_observation(1)
+        builder.assert_not_called()
+        failure_log.assert_not_called()
+
+    def test_capture_and_detect_do_not_call_comparison_helpers(self):
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.return_value = [self.make_box_item("no compare")]
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=self.region,
+            max_scans=1,
+            wait=lambda _seconds: None,
+        )
+
+        with patch(
+            "ocr_detector.compare_screen_fingerprints",
+        ) as compare, patch(
+            "ocr_detector.log_fingerprint_comparison",
+        ) as comparison_log:
+            result = detector.detect(single_rule("not-present"))
+
+        compare.assert_not_called()
+        comparison_log.assert_not_called()
+        self.assertTrue(result.success)
+        self.assertEqual(result.scans_completed, 1)
+
+    def test_fingerprint_failure_does_not_change_confirmation_flow(self):
+        detector = self.make_detector(["Python", "Python"], max_scans=1)
+
+        with patch(
+            "ocr_detector.build_screen_fingerprint",
+            side_effect=FingerprintBuildError("PRIVATE_OCR_BODY"),
+        ) as builder:
+            result = detector.detect(single_rule("Python"))
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.confirmed_match)
+        self.assertEqual(result.scans_completed, 1)
+        self.assertEqual(detector.capture.calls, 2)
+        self.assertEqual(detector.backend.calls, 2)
+        self.assertEqual(builder.call_count, 2)
+        self.assertTrue(
+            all(observation.fingerprint is None for observation in result.observations)
+        )
+
+    def test_empty_ocr_result_has_valid_empty_fingerprint(self):
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.return_value = []
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=self.region,
+            wait=lambda _seconds: None,
+        )
+
+        observation = detector.capture_observation(1)
+
+        self.assertEqual(capture.calls, 1)
+        backend.recognize.assert_called_once_with(1)
+        self.assertEqual(observation.item_count, 0)
+        self.assertEqual(observation.ocr_box_count, 0)
+        self.assertEqual(observation.ocr_text_length, 0)
+        self.assertEqual(observation.text, "")
+        self.assertIsNotNone(observation.fingerprint)
+        self.assertEqual(observation.fingerprint.normalized_text, "")
+        self.assertEqual(observation.fingerprint.ocr_box_count, 0)
+
+    def test_prefetched_fingerprint_is_reused_without_second_ocr(self):
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.return_value = [
+            OCRItem(
+                "prefetched",
+                0.99,
+                [[0, 0], [20, 0], [20, 10], [0, 10]],
+            ),
+        ]
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=self.region,
+            max_scans=1,
+            wait=Mock(),
+        )
+
+        first_observation = detector.capture_observation(1)
+        first_fingerprint = first_observation.fingerprint
+        result = detector.detect(
+            single_rule("not-present"),
+            first_observation=first_observation,
+        )
+
+        self.assertEqual(capture.calls, 1)
+        backend.recognize.assert_called_once_with(1)
+        self.assertEqual(result.scans_completed, 1)
+        self.assertIs(result.observations[0], first_observation)
+        self.assertIsNot(result.observations[0].fingerprint, first_fingerprint)
+        self.assertEqual(result.observations[0].fingerprint.screen_index, 1)
+        self.assertEqual(
+            result.observations[0].fingerprint.exact_hash,
+            first_fingerprint.exact_hash,
+        )
+        self.assertEqual(
+            result.observations[0].fingerprint.captured_at,
+            first_fingerprint.captured_at,
         )
 
     def test_capture_observation_collects_once_without_matching_or_motion(self):
@@ -184,7 +1227,9 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(observation.ocr_text_length, 8)
         self.assertEqual(observation.text, "accepted")
 
-    def test_scan_observation_only_adds_two_load_metric_fields(self):
+    def test_scan_observation_uses_only_r02_and_fingerprint_metadata_fields(
+        self,
+    ):
         field_names = [field.name for field in fields(ScanObservation)]
 
         self.assertEqual(field_names, [
@@ -196,6 +1241,7 @@ class DetectorTests(unittest.TestCase):
             "matched_rule",
             "ocr_box_count",
             "ocr_text_length",
+            "fingerprint",
         ])
         for forbidden_name in (
             "ocr_items",
