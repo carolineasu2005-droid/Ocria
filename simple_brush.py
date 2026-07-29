@@ -47,7 +47,12 @@ from calibration_profiles import (
     screen_region_from_dict,
 )
 from calibration_template import main as calibration_template_main
-from ocr_detector import MSSScreenCapture, OCRKeywordDetector, RapidOCRBackend
+from ocr_detector import (
+    MSSScreenCapture,
+    OCRKeywordDetector,
+    RapidOCRBackend,
+    evaluate_detail_page_load,
+)
 from ocr_text import parse_keyword_rules
 from mouse_motion import (
     move_to_observable,
@@ -154,6 +159,11 @@ CALIBRATION_PROFILE_OFFSET_RISK_NOTICE = (
 # OCR 关键词检测
 OCR_MAX_SCANS = 8
 OCR_MIN_CONFIDENCE = 0.85
+OCR_BOX_COUNT_THRESHOLD = 5
+OCR_TEXT_LENGTH_THRESHOLD = 30
+LOAD_RETRY_WAIT_SECONDS = 1.5
+MAX_LOAD_RETRIES = 3
+MAX_CONSECUTIVE_LOAD_RECOVERIES = 1
 OCR_SCROLL_MIN_STEPS = 100
 OCR_SCROLL_MAX_STEPS = 140
 OCR_SETTLE_SECONDS = 0.6
@@ -275,6 +285,7 @@ logger.addHandler(console)
 
 # ─── 运行时状态 ─────────────────────────────────────
 stop_event = False
+stop_reason = None
 paused = False
 run_duration_seconds = 0
 simple_mouse_enabled = False
@@ -326,7 +337,7 @@ ocr_calibration_in_progress = False
 _programmatic_esc = False  # 程序按的 ESC，不触发停止
 
 def on_press(key):
-    global stop_event, paused
+    global stop_event, stop_reason, paused
     if key == keyboard.Key.esc:
         if _programmatic_esc:
             return True  # 程序触发的 ESC，忽略
@@ -337,8 +348,10 @@ def on_press(key):
             or batch_filter_calibration_in_progress
         ):
             return True  # 交给 Tk 校准窗口处理，只取消校准，不停止浏览
+        if stop_reason is None:
+            stop_reason = 'esc'
+            logger.info('⚡ 收到 ESC，准备停止')
         stop_event = True
-        logger.info('⚡ 收到 ESC，准备停止')
         return False
     if key == keyboard.Key.space:
         paused = not paused
@@ -882,7 +895,40 @@ def safe_wait(seconds):
 
 def request_timed_stop():
     """Request a normal stop when the configured run duration expires."""
-    global stop_event
+    global stop_event, stop_reason
+    if stop_reason is None:
+        stop_reason = 'run_duration_elapsed'
+    stop_event = True
+
+
+def request_load_failed_stop(
+    candidate_in_batch,
+    total_viewed,
+    retry_number,
+    reason,
+    recovery_count,
+    ocr_box_count='-',
+    ocr_text_length='-',
+):
+    """Record an unrecoverable detail-load failure and request a safe stop."""
+    global stop_event, stop_reason
+    if stop_reason is not None:
+        return
+    logger.error(
+        'event=detail_load_failed candidate_in_batch=%s total_viewed=%s '
+        'attempt=retry retry_number=%s ocr_box_count=%s '
+        'ocr_text_length=%s decision=error reason=%s state=load_failed '
+        'recovery_count=%s next_action=safe_stop',
+        candidate_in_batch,
+        total_viewed,
+        retry_number,
+        ocr_box_count,
+        ocr_text_length,
+        reason,
+        recovery_count,
+    )
+    if stop_reason is None:
+        stop_reason = 'load_failed'
     stop_event = True
 
 
@@ -1578,7 +1624,84 @@ def ensure_favorite_button_region_calibrated():
         return None
 
 
-def detect_keywords():
+def run_detail_load_gate(
+    candidate_in_batch,
+    total_viewed,
+    recovery_count,
+    recovery_available,
+):
+    """Run the bounded detail-page load checks at the current position."""
+    for retry_number in range(MAX_LOAD_RETRIES + 1):
+        state = 'loading' if retry_number == 0 else 'load_retrying'
+        attempt = 'initial' if retry_number == 0 else 'retry'
+
+        if retry_number > 0:
+            if not safe_wait(LOAD_RETRY_WAIT_SECONDS):
+                return None, None, retry_number, 'stopped'
+
+        if stop_event:
+            return None, None, retry_number, 'stopped'
+
+        try:
+            if ocr_detector is None:
+                raise RuntimeError('OCR detector is not ready')
+            observation = ocr_detector.capture_observation(1)
+        except Exception:
+            if stop_event:
+                return None, None, retry_number, 'stopped'
+            reason = 'ocr_error'
+            ocr_box_count = '-'
+            ocr_text_length = '-'
+            decision = 'error'
+            log = logger.warning
+        else:
+            if stop_event:
+                return None, None, retry_number, 'stopped'
+            loaded, reason = evaluate_detail_page_load(
+                observation.ocr_box_count,
+                observation.ocr_text_length,
+                OCR_BOX_COUNT_THRESHOLD,
+                OCR_TEXT_LENGTH_THRESHOLD,
+            )
+            if loaded:
+                return 'loaded', observation, retry_number, reason
+            ocr_box_count = observation.ocr_box_count
+            ocr_text_length = observation.ocr_text_length
+            decision = 'not_loaded'
+            log = logger.info
+
+        has_retry = retry_number < MAX_LOAD_RETRIES
+        can_recover = (
+            recovery_available
+            and recovery_count < MAX_CONSECUTIVE_LOAD_RECOVERIES
+        )
+        log(
+            'event=detail_load_check candidate_in_batch=%s total_viewed=%s '
+            'attempt=%s retry_number=%s ocr_box_count=%s '
+            'ocr_text_length=%s decision=%s reason=%s state=%s '
+            'recovery_count=%s next_action=%s',
+            candidate_in_batch,
+            total_viewed,
+            attempt,
+            retry_number,
+            ocr_box_count,
+            ocr_text_length,
+            decision,
+            reason,
+            state,
+            recovery_count,
+            (
+                'wait_and_retry'
+                if has_retry
+                else 'hard_refresh' if can_recover else 'safe_stop'
+            ),
+        )
+
+    outcome = 'load_recovering' if can_recover else 'retries_exhausted'
+    return outcome, None, MAX_LOAD_RETRIES, reason
+
+
+def detect_keywords(first_observation=None):
     """
     截取已校准的屏幕区域并执行最多 8 屏 OCR 精确匹配。
     OCR 失败、空结果、低置信度或二次确认失败均返回 False。
@@ -1591,8 +1714,13 @@ def detect_keywords():
         return False
 
     logger.info(f'🔍 OCR 关键词规则检测中... 目标: {keyword_rule_sources()}')
-    result = ocr_detector.detect(forward_keywords)
+    result = ocr_detector.detect(
+        forward_keywords,
+        first_observation=first_observation,
+    )
     for sequence, observation in enumerate(result.observations, start=1):
+        if observation is first_observation:
+            continue
         phase = '二次确认' if sequence > 1 and (
             observation.scan_number == result.observations[sequence - 2].scan_number
         ) else '扫描'
@@ -1812,7 +1940,7 @@ def human_scroll_once():
         time.sleep(random.uniform(0.3, 1.0))
 
 
-def view_candidate(index_in_batch):
+def view_candidate(index_in_batch, first_observation=None):
     """
     浏览当前候选人。
     流程：检测关键词 → 命中则转发 → 停留 12-18 秒 + 滚动。
@@ -1826,7 +1954,7 @@ def view_candidate(index_in_batch):
     # ── 关键词检测（在浏览开始前） ──
     keyword_hit = False
     if forward_enabled and forward_keywords:
-        keyword_hit = detect_keywords()
+        keyword_hit = detect_keywords(first_observation=first_observation)
 
         if stop_event:
             return False
@@ -1881,20 +2009,84 @@ def next_candidate():
     return safe_wait(0.5)
 
 
-def refresh_page():
+def refresh_page(reason='已查看 100 位'):
     """按 F5 刷新页面"""
     if stop_event:
         return False
-    logger.info('🔄 已查看 100 位，按 F5 刷新页面')
+    logger.info(f'🔄 {reason}，按 F5 刷新页面')
     pyautogui.press('f5')
     return safe_wait(REFRESH_WAIT_SECONDS)
+
+
+def recover_detail_page():
+    """Refresh, reapply the calibrated filter, and reopen the first candidate."""
+    if stop_event:
+        return None, 'stopped'
+
+    try:
+        logger.info(
+            'event=detail_load_recovery_step step=refresh decision=started'
+        )
+        refreshed = refresh_page(reason='详情页加载检测重试耗尽')
+    except Exception as exc:
+        if stop_event:
+            return None, 'stopped'
+        logger.error(
+            'event=detail_load_recovery_step step=refresh '
+            'decision=failed reason=refresh_failed error=%s',
+            exc,
+        )
+        return False, 'refresh_failed'
+
+    if not refreshed:
+        if stop_event:
+            return None, 'stopped'
+        logger.error(
+            'event=detail_load_recovery_step step=refresh '
+            'decision=failed reason=refresh_failed'
+        )
+        return False, 'refresh_failed'
+
+    logger.info(
+        'event=detail_load_recovery_step step=refresh decision=completed'
+    )
+    try:
+        logger.info(
+            'event=detail_load_recovery_step step=batch_reopen decision=started'
+        )
+        reopened = apply_batch_filter_and_open_first_candidate()
+    except Exception as exc:
+        if stop_event:
+            return None, 'stopped'
+        logger.error(
+            'event=detail_load_recovery_step step=batch_reopen '
+            'decision=failed reason=batch_reopen_failed error=%s',
+            exc,
+        )
+        return False, 'batch_reopen_failed'
+
+    if not reopened:
+        if stop_event:
+            return None, 'stopped'
+        logger.error(
+            'event=detail_load_recovery_step step=batch_reopen '
+            'decision=failed reason=batch_reopen_failed'
+        )
+        return False, 'batch_reopen_failed'
+
+    logger.info(
+        'event=detail_load_recovery_reopen_completed '
+        'reason=reopen_completed next_action=retry_load_gate'
+    )
+    return True, 'reopen_completed'
 
 
 # ─── 主循环 ─────────────────────────────────────────
 
 def run():
-    global stop_event, forward_consecutive, no_forward_mode, simple_mouse_enabled, action_mode
+    global stop_event, stop_reason, forward_consecutive, no_forward_mode, simple_mouse_enabled, action_mode
     stop_event = False
+    stop_reason = None
     simple_mouse_enabled = False
     action_mode = ACTION_MODE_FORWARD
     reset_focus_restore_calibration()
@@ -1947,6 +2139,7 @@ def run():
     run_timer = None
     total_viewed = 0
     forward_consecutive = 0
+    consecutive_load_recovery_count = 0
 
     try:
         if batch_filter_calibration_requested:
@@ -1979,7 +2172,8 @@ def run():
             if ensure_favorite_button_region_calibrated() is None:
                 return 0
         if forward_enabled and forward_keywords:
-            ensure_ocr_region_calibrated()
+            if not ensure_ocr_region_calibrated():
+                return 0
 
         if stop_event:
             return 0
@@ -1988,6 +2182,7 @@ def run():
         first_candidate_opened = True
 
         while not stop_event:
+            restart_current_batch = False
             if not first_candidate_opened:
                 if not open_first_candidate_for_batch(legacy_point):
                     break
@@ -1998,9 +2193,117 @@ def run():
                 if stop_event:
                     break
 
-                total_viewed += 1
-                if not view_candidate(i):
-                    break
+                if forward_enabled and forward_keywords:
+                    recovery_available = (
+                        batch_filter_enabled
+                        and batch_filter_regions is not None
+                    )
+                    (
+                        load_outcome,
+                        first_observation,
+                        load_retry_number,
+                        load_reason,
+                    ) = run_detail_load_gate(
+                        candidate_in_batch=i + 1,
+                        total_viewed=total_viewed,
+                        recovery_count=consecutive_load_recovery_count,
+                        recovery_available=recovery_available,
+                    )
+                    if load_outcome == 'load_recovering':
+                        consecutive_load_recovery_count += 1
+                        logger.warning(
+                            'event=detail_load_recovery_start '
+                            'candidate_in_batch=%s total_viewed=%s '
+                            'retry_number=%s reason=%s '
+                            'state=load_recovering recovery_count=%s '
+                            'next_action=hard_refresh',
+                            i + 1,
+                            total_viewed,
+                            load_retry_number,
+                            load_reason,
+                            consecutive_load_recovery_count,
+                        )
+                        recovery_success, _recovery_reason = recover_detail_page()
+                        if recovery_success is not True:
+                            if recovery_success is False:
+                                request_load_failed_stop(
+                                    candidate_in_batch=i + 1,
+                                    total_viewed=total_viewed,
+                                    retry_number=load_retry_number,
+                                    reason=_recovery_reason,
+                                    recovery_count=(
+                                        consecutive_load_recovery_count
+                                    ),
+                                )
+                            break
+                        first_candidate_opened = True
+                        restart_current_batch = True
+                        break
+                    if load_outcome != 'loaded':
+                        if load_outcome == 'retries_exhausted':
+                            if not recovery_available:
+                                load_reason = 'hard_recovery_unavailable'
+                            else:
+                                load_reason = (
+                                    'max_consecutive_load_recoveries_reached'
+                                )
+                            request_load_failed_stop(
+                                candidate_in_batch=i + 1,
+                                total_viewed=total_viewed,
+                                retry_number=load_retry_number,
+                                reason=load_reason,
+                                recovery_count=(
+                                    consecutive_load_recovery_count
+                                ),
+                            )
+                        break
+                    total_viewed += 1
+                    logger.info(
+                        'event=detail_load_check candidate_in_batch=%s '
+                        'total_viewed=%s attempt=%s retry_number=%s '
+                        'ocr_box_count=%s ocr_text_length=%s decision=ready '
+                        'reason=%s state=loaded recovery_count=%s '
+                        'next_action=reuse_first_scan',
+                        i + 1,
+                        total_viewed,
+                        'initial' if load_retry_number == 0 else 'retry',
+                        load_retry_number,
+                        first_observation.ocr_box_count,
+                        first_observation.ocr_text_length,
+                        load_reason,
+                        consecutive_load_recovery_count,
+                    )
+                    if consecutive_load_recovery_count > 0:
+                        logger.info(
+                            'event=detail_load_recovery_confirmed '
+                            'candidate_in_batch=%s total_viewed=%s '
+                            'attempt=%s retry_number=%s ocr_box_count=%s '
+                            'ocr_text_length=%s decision=ready reason=%s '
+                            'state=loaded recovery_count=%s '
+                            'next_action=reuse_first_scan',
+                            i + 1,
+                            total_viewed,
+                            (
+                                'initial'
+                                if load_retry_number == 0
+                                else 'retry'
+                            ),
+                            load_retry_number,
+                            first_observation.ocr_box_count,
+                            first_observation.ocr_text_length,
+                            load_reason,
+                            consecutive_load_recovery_count,
+                        )
+                        consecutive_load_recovery_count = 0
+                    if not view_candidate(
+                        i,
+                        first_observation=first_observation,
+                    ):
+                        break
+                else:
+                    total_viewed += 1
+                    if not view_candidate(i):
+                        break
 
                 if i < BATCH_SIZE - 1:
                     if not next_candidate():
@@ -2008,6 +2311,8 @@ def run():
 
             if stop_event:
                 break
+            if restart_current_batch:
+                continue
 
             # 每 100 位刷新
             forward_consecutive = 0  # 刷新后重置连续计数
@@ -2022,6 +2327,7 @@ def run():
         if run_timer is not None:
             run_timer.cancel()
         logger.info(f'\n🏁 停止运行。累计查看 {total_viewed} 位候选人。')
+        logger.info(f'event=run_stopped stop_reason={stop_reason or "none"}')
         logger.info(f'日志文件: logs/simple_brush.log\n')
     return 0
 

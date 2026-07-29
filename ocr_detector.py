@@ -3,13 +3,56 @@
 from dataclasses import dataclass, field
 import logging
 import time
-from typing import Callable, Iterable, List, Optional, Protocol, Sequence
+from typing import Callable, Iterable, List, Optional, Protocol, Sequence, Tuple
 
 from ocr_calibration import ScreenRegion
 from ocr_text import KeywordRule, OCRItem, matching_keyword_rule, searchable_text
 
 
 logger = logging.getLogger(__name__)
+
+
+def accepted_ocr_items(
+    items: Iterable[OCRItem],
+    min_confidence: float,
+) -> List[OCRItem]:
+    """Return OCR items accepted by the existing confidence threshold."""
+
+    return [item for item in items if item.confidence >= min_confidence]
+
+
+def calculate_load_metrics(
+    accepted_items: Iterable[OCRItem],
+) -> Tuple[int, int]:
+    """Return box count and stripped text length for accepted OCR items."""
+
+    accepted_items = list(accepted_items)
+    return (
+        len(accepted_items),
+        sum(
+            len(item.text.strip())
+            for item in accepted_items
+            if item.text.strip()
+        ),
+    )
+
+
+def evaluate_detail_page_load(
+    ocr_box_count: int,
+    ocr_text_length: int,
+    box_count_threshold: int,
+    text_length_threshold: int,
+) -> Tuple[bool, str]:
+    """Return whether OCR metrics meet the minimum detail-page threshold."""
+
+    if ocr_box_count == 0:
+        return False, "zero_ocr_boxes"
+    if (
+        ocr_box_count <= box_count_threshold
+        and ocr_text_length < text_length_threshold
+    ):
+        return False, "low_box_count_and_short_text"
+    return True, "threshold_passed"
 
 
 class OCRBackend(Protocol):
@@ -30,6 +73,8 @@ class ScanObservation:
     elapsed_seconds: float
     matched_keyword: Optional[str] = None
     matched_rule: Optional[KeywordRule] = None
+    ocr_box_count: Optional[int] = None
+    ocr_text_length: Optional[int] = None
 
 
 @dataclass
@@ -132,22 +177,41 @@ class OCRKeywordDetector:
         self.settle_seconds = settle_seconds
         self.confirmation_seconds = confirmation_seconds
 
-    def _observe(self, scan_number: int, rules: Iterable[KeywordRule]):
+    def capture_observation(self, scan_number: int) -> ScanObservation:
         started = time.perf_counter()
         image = self.capture.capture(self.region)
-        items = list(self.backend.recognize(image))
-        text = searchable_text(items, min_confidence=self.min_confidence)
-        matched_rule = matching_keyword_rule(text, rules)
+        raw_items = list(self.backend.recognize(image))
+        accepted_items = accepted_ocr_items(raw_items, self.min_confidence)
+        ocr_box_count, ocr_text_length = calculate_load_metrics(accepted_items)
+        text = searchable_text(accepted_items)
         return ScanObservation(
             scan_number=scan_number,
             text=text,
-            item_count=len(items),
+            item_count=len(raw_items),
             elapsed_seconds=time.perf_counter() - started,
-            matched_keyword=matched_rule.source if matched_rule else None,
-            matched_rule=matched_rule,
+            ocr_box_count=ocr_box_count,
+            ocr_text_length=ocr_text_length,
         )
 
-    def detect(self, rules: Iterable[KeywordRule]) -> DetectionResult:
+    def _match_observation(
+        self,
+        observation: ScanObservation,
+        rules: Iterable[KeywordRule],
+    ) -> ScanObservation:
+        matched_rule = matching_keyword_rule(observation.text, rules)
+        observation.matched_keyword = matched_rule.source if matched_rule else None
+        observation.matched_rule = matched_rule
+        return observation
+
+    def _observe(self, scan_number: int, rules: Iterable[KeywordRule]):
+        observation = self.capture_observation(scan_number)
+        return self._match_observation(observation, rules)
+
+    def detect(
+        self,
+        rules: Iterable[KeywordRule],
+        first_observation: Optional[ScanObservation] = None,
+    ) -> DetectionResult:
         rules = list(rules)
         if not rules:
             return DetectionResult(success=True, confirmed_match=False)
@@ -161,16 +225,20 @@ class OCRKeywordDetector:
                     self.scroll()
                     self.wait(self.settle_seconds)
 
-                first = self._observe(scan_number, rules)
+                if scan_number == 1 and first_observation is not None:
+                    first = self._match_observation(first_observation, rules)
+                else:
+                    first = self._observe(scan_number, rules)
                 observations.append(first)
-                logger.info(
-                    "OCR scan %s/%s: %s items, %.3fs, match=%r",
-                    scan_number,
-                    self.max_scans,
-                    first.item_count,
-                    first.elapsed_seconds,
-                    first.matched_keyword,
-                )
+                if first is not first_observation:
+                    logger.info(
+                        "OCR scan %s/%s: %s items, %.3fs, match=%r",
+                        scan_number,
+                        self.max_scans,
+                        first.item_count,
+                        first.elapsed_seconds,
+                        first.matched_keyword,
+                    )
                 if first.matched_rule is None:
                     continue
 

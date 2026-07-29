@@ -1,4 +1,5 @@
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
@@ -35,6 +36,37 @@ def sample_profile(*, missing=()):
     )
 
 
+def loaded_observation():
+    return ScanObservation(
+        1,
+        "loaded detail text",
+        6,
+        0.01,
+        ocr_box_count=6,
+        ocr_text_length=30,
+    )
+
+
+def not_loaded_observation():
+    return ScanObservation(
+        1,
+        "short",
+        2,
+        0.01,
+        ocr_box_count=2,
+        ocr_text_length=5,
+    )
+
+
+def sample_batch_filter_regions():
+    return simple_brush.BatchFilterRegions(
+        first_candidate=simple_brush.ScreenRegion(10, 20, 30, 40),
+        open_filter=simple_brush.ScreenRegion(50, 60, 12, 12),
+        unseen_filter=simple_brush.ScreenRegion(70, 80, 12, 12),
+        confirm_filter=simple_brush.ScreenRegion(90, 100, 12, 12),
+    )
+
+
 class SimpleBrushOCRTests(unittest.TestCase):
     def setUp(self):
         self.saved = {
@@ -68,6 +100,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "ocr_calibration_attempted",
                 "ocr_calibration_in_progress",
                 "stop_event",
+                "stop_reason",
                 "paused",
                 "run_duration_seconds",
                 "_programmatic_esc",
@@ -85,6 +118,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         simple_brush.favorite_button_region = None
         simple_brush.selected_calibration_profile = None
         simple_brush.stop_event = False
+        simple_brush.stop_reason = None
         simple_brush.paused = False
         simple_brush.run_duration_seconds = 0
         simple_brush._programmatic_esc = False
@@ -92,6 +126,209 @@ class SimpleBrushOCRTests(unittest.TestCase):
     def tearDown(self):
         for name, value in self.saved.items():
             setattr(simple_brush, name, value)
+
+    def run_load_gate_candidate(
+        self,
+        *,
+        observation=None,
+        capture_error=None,
+        capture_sequence=None,
+        keywords=True,
+        action_mode=None,
+        no_forward=False,
+        batch_filter_enabled=True,
+        recovery_available=False,
+        recovery_result=(True, "reopen_completed"),
+        recovery_side_effect=None,
+        real_recovery=False,
+        view_side_effect=None,
+        info_side_effect=None,
+    ):
+        timer = Mock()
+        detector = Mock()
+        if capture_sequence is not None:
+            detector.capture_observation.side_effect = capture_sequence
+        elif capture_error is not None:
+            detector.capture_observation.side_effect = capture_error
+        else:
+            detector.capture_observation.return_value = (
+                observation or loaded_observation()
+            )
+        simple_brush.ocr_detector = detector
+
+        def configure_input(**_kwargs):
+            simple_brush.forward_enabled = keywords
+            simple_brush.forward_keywords = (
+                simple_brush.parse_keyword_rules('"Python"') if keywords else []
+            )
+            simple_brush.batch_filter_enabled = batch_filter_enabled
+            simple_brush.batch_filter_regions = (
+                sample_batch_filter_regions()
+                if recovery_available
+                else None
+            )
+            simple_brush.action_mode = (
+                action_mode or simple_brush.ACTION_MODE_FORWARD
+            )
+            simple_brush.no_forward_mode = no_forward
+
+        def stop_after_view(*_args, **_kwargs):
+            simple_brush.stop_event = True
+            return False
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(
+                simple_brush,
+                "parse_args",
+                return_value={
+                    "keywords": "",
+                    "email": "",
+                    "duration_seconds": "",
+                    "no_forward": no_forward,
+                    "auto": False,
+                },
+            ))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "get_user_input",
+                side_effect=configure_input,
+            ))
+            initialize_ocr = stack.enter_context(
+                patch.object(simple_brush, "initialize_ocr")
+            )
+            stack.enter_context(patch.object(simple_brush.listener, "start"))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "bring_edge_foreground",
+                return_value=True,
+            ))
+            position = stack.enter_context(patch.object(
+                simple_brush.pyautogui,
+                "position",
+                return_value=(10, 20),
+            ))
+            press = stack.enter_context(
+                patch.object(simple_brush.pyautogui, "press")
+            )
+            open_first = stack.enter_context(patch.object(
+                simple_brush,
+                "open_first_candidate_for_batch",
+                return_value=True,
+            ))
+            wait = stack.enter_context(patch.object(
+                simple_brush,
+                "safe_wait",
+                return_value=True,
+            ))
+            ensure_ocr = stack.enter_context(patch.object(
+                simple_brush,
+                "ensure_ocr_region_calibrated",
+                return_value=True,
+            ))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "ensure_favorite_button_region_calibrated",
+                return_value=simple_brush.ScreenRegion(10, 20, 30, 40),
+            ))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "start_run_timer",
+                return_value=timer,
+            ))
+            detect_keywords = stack.enter_context(
+                patch.object(simple_brush, "detect_keywords")
+            )
+            ocr_scroll = stack.enter_context(
+                patch.object(simple_brush, "ocr_scroll_down")
+            )
+            human_scroll = stack.enter_context(
+                patch.object(simple_brush, "human_scroll_once")
+            )
+            favorite_action = stack.enter_context(
+                patch.object(simple_brush, "perform_favorite_action")
+            )
+            forward_action = stack.enter_context(
+                patch.object(simple_brush, "forward_one_candidate")
+            )
+            favorite_focus_restore = stack.enter_context(patch.object(
+                simple_brush,
+                "restore_candidate_page_focus_after_favorite",
+            ))
+            view = stack.enter_context(patch.object(
+                simple_brush,
+                "view_candidate",
+                side_effect=view_side_effect or stop_after_view,
+            ))
+            next_candidate = stack.enter_context(
+                patch.object(simple_brush, "next_candidate")
+            )
+            if real_recovery:
+                refresh = stack.enter_context(patch.object(
+                    simple_brush,
+                    "refresh_page",
+                    wraps=simple_brush.refresh_page,
+                ))
+                apply_reopen = stack.enter_context(patch.object(
+                    simple_brush,
+                    "apply_batch_filter_and_open_first_candidate",
+                    return_value=True,
+                ))
+                recover = stack.enter_context(patch.object(
+                    simple_brush,
+                    "recover_detail_page",
+                    wraps=simple_brush.recover_detail_page,
+                ))
+            else:
+                refresh = stack.enter_context(
+                    patch.object(simple_brush, "refresh_page")
+                )
+                apply_reopen = None
+                recover = stack.enter_context(patch.object(
+                    simple_brush,
+                    "recover_detail_page",
+                    return_value=recovery_result,
+                    side_effect=recovery_side_effect,
+                ))
+            info = stack.enter_context(
+                patch.object(
+                    simple_brush.logger,
+                    "info",
+                    side_effect=info_side_effect,
+                )
+            )
+            warning = stack.enter_context(
+                patch.object(simple_brush.logger, "warning")
+            )
+            error = stack.enter_context(
+                patch.object(simple_brush.logger, "error")
+            )
+            result = simple_brush.run()
+
+        return {
+            "result": result,
+            "timer": timer,
+            "detector": detector,
+            "initialize_ocr": initialize_ocr,
+            "ensure_ocr": ensure_ocr,
+            "position": position,
+            "press": press,
+            "open_first": open_first,
+            "wait": wait,
+            "detect_keywords": detect_keywords,
+            "ocr_scroll": ocr_scroll,
+            "human_scroll": human_scroll,
+            "favorite_action": favorite_action,
+            "forward_action": forward_action,
+            "favorite_focus_restore": favorite_focus_restore,
+            "view": view,
+            "next_candidate": next_candidate,
+            "refresh": refresh,
+            "apply_reopen": apply_reopen,
+            "recover": recover,
+            "info": info,
+            "warning": warning,
+            "error": error,
+        }
 
     def test_detect_keywords_uses_ocr_without_clipboard(self):
         observation = ScanObservation(1, "python", 1, 0.05, "Python")
@@ -108,7 +345,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
         with patch.object(simple_brush, "get_clipboard_text") as clipboard:
             self.assertTrue(simple_brush.detect_keywords())
         clipboard.assert_not_called()
-        detector.detect.assert_called_once_with(simple_brush.forward_keywords)
+        detector.detect.assert_called_once_with(
+            simple_brush.forward_keywords,
+            first_observation=None,
+        )
 
     def test_detect_keywords_passes_the_complete_not_rule_to_ocr(self):
         rules = simple_brush.parse_keyword_rules('"短剧" and not "销售"')
@@ -124,7 +364,998 @@ class SimpleBrushOCRTests(unittest.TestCase):
         simple_brush.ocr_detector = detector
 
         self.assertTrue(simple_brush.detect_keywords())
-        detector.detect.assert_called_once_with(rules)
+        detector.detect.assert_called_once_with(rules, first_observation=None)
+
+    def test_detect_keywords_reuses_prefetched_observation_without_relogging_it(self):
+        first_observation = loaded_observation()
+        confirmation = ScanObservation(1, "python", 1, 0.02, "Python")
+        detector = Mock()
+        detector.detect.return_value = DetectionResult(
+            success=True,
+            confirmed_match=True,
+            matched_keyword="Python",
+            scans_completed=1,
+            observations=[first_observation, confirmation],
+        )
+        simple_brush.ocr_detector = detector
+
+        with patch.object(simple_brush.logger, "info") as info:
+            self.assertTrue(simple_brush.detect_keywords(first_observation))
+
+        detector.detect.assert_called_once_with(
+            simple_brush.forward_keywords,
+            first_observation=first_observation,
+        )
+        observation_logs = [
+            log_call
+            for log_call in info.call_args_list
+            if log_call.args and log_call.args[0].startswith('  OCR %s:')
+        ]
+        self.assertEqual(len(observation_logs), 1)
+        self.assertEqual(observation_logs[0].args[1], '二次确认')
+
+    def test_single_load_gate_does_not_wait_or_retry(self):
+        observation = loaded_observation()
+        detector = Mock()
+        detector.capture_observation.return_value = observation
+        simple_brush.ocr_detector = detector
+
+        with patch.object(simple_brush, "safe_wait") as wait:
+            result = simple_brush.run_detail_load_gate(1, 0, 0, False)
+
+        self.assertEqual(
+            result,
+            ("loaded", observation, 0, "threshold_passed"),
+        )
+        detector.capture_observation.assert_called_once_with(1)
+        wait.assert_not_called()
+
+    def assert_load_gate_succeeds_on_retry(self, retry_number):
+        failed_observations = [
+            not_loaded_observation()
+            for _ in range(retry_number)
+        ]
+        success_observation = loaded_observation()
+        detector = Mock()
+        detector.capture_observation.side_effect = [
+            *failed_observations,
+            success_observation,
+        ]
+        simple_brush.ocr_detector = detector
+
+        with patch.object(
+            simple_brush,
+            "safe_wait",
+            return_value=True,
+        ) as wait:
+            result = simple_brush.run_detail_load_gate(1, 0, 0, False)
+
+        self.assertEqual(
+            result,
+            ("loaded", success_observation, retry_number, "threshold_passed"),
+        )
+        self.assertEqual(
+            detector.capture_observation.call_args_list,
+            [call(1)] * (retry_number + 1),
+        )
+        self.assertEqual(
+            wait.call_args_list,
+            [call(simple_brush.LOAD_RETRY_WAIT_SECONDS)] * retry_number,
+        )
+
+    def test_retry_one_success_uses_two_ocr_calls_and_one_wait(self):
+        self.assertEqual(simple_brush.LOAD_RETRY_WAIT_SECONDS, 1.5)
+        self.assert_load_gate_succeeds_on_retry(1)
+
+    def test_retry_two_success_uses_three_ocr_calls_and_two_waits(self):
+        self.assert_load_gate_succeeds_on_retry(2)
+
+    def test_retry_three_success_uses_four_ocr_calls_and_three_waits(self):
+        self.assert_load_gate_succeeds_on_retry(3)
+
+    def test_four_failures_exhaust_budget_without_fifth_ocr(self):
+        self.assertEqual(simple_brush.MAX_LOAD_RETRIES, 3)
+        detector = Mock()
+        detector.capture_observation.side_effect = [
+            not_loaded_observation()
+            for _ in range(simple_brush.MAX_LOAD_RETRIES + 1)
+        ]
+        simple_brush.ocr_detector = detector
+
+        with (
+            patch.object(
+                simple_brush,
+                "safe_wait",
+                return_value=True,
+            ) as wait,
+            patch("ocr_detector.matching_keyword_rule") as matcher,
+        ):
+            result = simple_brush.run_detail_load_gate(1, 0, 0, False)
+
+        self.assertEqual(
+            result,
+            (
+                "retries_exhausted",
+                None,
+                simple_brush.MAX_LOAD_RETRIES,
+                "low_box_count_and_short_text",
+            ),
+        )
+        self.assertEqual(
+            detector.capture_observation.call_count,
+            simple_brush.MAX_LOAD_RETRIES + 1,
+        )
+        self.assertEqual(
+            wait.call_args_list,
+            [call(simple_brush.LOAD_RETRY_WAIT_SECONDS)] * 3,
+        )
+        matcher.assert_not_called()
+
+    def test_exhausted_gate_returns_load_recovering_when_available(self):
+        detector = Mock()
+        detector.capture_observation.return_value = not_loaded_observation()
+        simple_brush.ocr_detector = detector
+
+        with (
+            patch.object(simple_brush, "safe_wait", return_value=True),
+            patch.object(simple_brush.logger, "info") as info,
+        ):
+            result = simple_brush.run_detail_load_gate(1, 0, 0, True)
+
+        self.assertEqual(
+            result,
+            (
+                "load_recovering",
+                None,
+                simple_brush.MAX_LOAD_RETRIES,
+                "low_box_count_and_short_text",
+            ),
+        )
+        self.assertEqual(detector.capture_observation.call_count, 4)
+        self.assertEqual(info.call_args.args[-1], "hard_refresh")
+
+    def test_exhausted_gate_respects_consecutive_recovery_limit(self):
+        detector = Mock()
+        detector.capture_observation.return_value = not_loaded_observation()
+        simple_brush.ocr_detector = detector
+
+        with patch.object(simple_brush, "safe_wait", return_value=True):
+            result = simple_brush.run_detail_load_gate(
+                1,
+                0,
+                simple_brush.MAX_CONSECUTIVE_LOAD_RECOVERIES,
+                True,
+            )
+
+        self.assertEqual(result[0], "retries_exhausted")
+        self.assertEqual(detector.capture_observation.call_count, 4)
+
+    def test_threshold_failures_and_ocr_error_share_one_budget(self):
+        success_observation = loaded_observation()
+        detector = Mock()
+        detector.capture_observation.side_effect = [
+            not_loaded_observation(),
+            RuntimeError("OCR unavailable"),
+            not_loaded_observation(),
+            success_observation,
+        ]
+        simple_brush.ocr_detector = detector
+
+        with (
+            patch.object(simple_brush, "safe_wait", return_value=True) as wait,
+            patch.object(simple_brush.logger, "warning") as warning,
+        ):
+            result = simple_brush.run_detail_load_gate(1, 0, 0, False)
+
+        self.assertEqual(
+            result,
+            ("loaded", success_observation, 3, "threshold_passed"),
+        )
+        self.assertEqual(detector.capture_observation.call_count, 4)
+        self.assertEqual(
+            wait.call_args_list,
+            [call(simple_brush.LOAD_RETRY_WAIT_SECONDS)] * 3,
+        )
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.args[5:9], ('-', '-', 'error', 'ocr_error'))
+
+    def test_empty_ocr_metrics_are_zero_not_ocr_error(self):
+        empty_observation = ScanObservation(
+            1,
+            "",
+            0,
+            0.01,
+            ocr_box_count=0,
+            ocr_text_length=0,
+        )
+        detector = Mock()
+        detector.capture_observation.side_effect = [
+            empty_observation,
+            loaded_observation(),
+        ]
+        simple_brush.ocr_detector = detector
+
+        with (
+            patch.object(simple_brush, "safe_wait", return_value=True),
+            patch.object(simple_brush.logger, "info") as info,
+            patch.object(simple_brush.logger, "warning") as warning,
+        ):
+            result = simple_brush.run_detail_load_gate(1, 0, 0, False)
+
+        self.assertEqual(result[0], "loaded")
+        warning.assert_not_called()
+        self.assertEqual(
+            info.call_args.args[5:9],
+            (0, 0, 'not_loaded', 'zero_ocr_boxes'),
+        )
+
+    def test_detail_load_check_logs_frozen_fields_without_ocr_text(self):
+        private_observation = ScanObservation(
+            1,
+            "PRIVATE_OCR_BODY",
+            2,
+            0.01,
+            ocr_box_count=2,
+            ocr_text_length=5,
+        )
+        detector = Mock()
+        detector.capture_observation.side_effect = [
+            private_observation,
+            loaded_observation(),
+        ]
+        simple_brush.ocr_detector = detector
+
+        with (
+            patch.object(simple_brush, "safe_wait", return_value=True),
+            patch.object(simple_brush.logger, "info") as info,
+        ):
+            result = simple_brush.run_detail_load_gate(7, 12, 1, False)
+
+        self.assertEqual(result[0], "loaded")
+        self.assertEqual(len(info.call_args_list), 1)
+        rendered = info.call_args.args[0] % info.call_args.args[1:]
+        for expected in (
+            "event=detail_load_check",
+            "candidate_in_batch=7",
+            "total_viewed=12",
+            "attempt=initial",
+            "retry_number=0",
+            "ocr_box_count=2",
+            "ocr_text_length=5",
+            "decision=not_loaded",
+            "reason=low_box_count_and_short_text",
+            "state=loading",
+            "recovery_count=1",
+            "next_action=wait_and_retry",
+        ):
+            self.assertIn(expected, rendered)
+        self.assertNotIn("PRIVATE_OCR_BODY", rendered)
+        self.assertNotIn("not_ready", rendered)
+
+    def test_all_retries_use_the_same_ocr_region(self):
+        region = simple_brush.ScreenRegion(10, 20, 800, 600)
+
+        class RegionRecordingDetector:
+            def __init__(self):
+                self.region = region
+                self.regions = []
+                self.observations = [
+                    not_loaded_observation(),
+                    not_loaded_observation(),
+                    not_loaded_observation(),
+                    loaded_observation(),
+                ]
+
+            def capture_observation(self, _scan_number):
+                self.regions.append(self.region)
+                return self.observations.pop(0)
+
+        detector = RegionRecordingDetector()
+        simple_brush.ocr_detector = detector
+
+        with patch.object(simple_brush, "safe_wait", return_value=True):
+            result = simple_brush.run_detail_load_gate(1, 0, 0, False)
+
+        self.assertEqual(result[0], "loaded")
+        self.assertEqual(len(detector.regions), 4)
+        self.assertTrue(all(item is region for item in detector.regions))
+
+    def test_stop_during_retry_wait_prevents_next_ocr(self):
+        detector = Mock()
+        detector.capture_observation.return_value = not_loaded_observation()
+        simple_brush.ocr_detector = detector
+
+        def stop_wait(_seconds):
+            simple_brush.stop_event = True
+            return False
+
+        with patch.object(simple_brush, "safe_wait", side_effect=stop_wait) as wait:
+            result = simple_brush.run_detail_load_gate(1, 0, 0, False)
+
+        self.assertEqual(result, (None, None, 1, "stopped"))
+        detector.capture_observation.assert_called_once_with(1)
+        wait.assert_called_once_with(simple_brush.LOAD_RETRY_WAIT_SECONDS)
+
+    def test_stop_during_synchronous_ocr_is_not_counted_as_ocr_error(self):
+        detector = Mock()
+
+        def capture_and_stop(_scan_number):
+            simple_brush.stop_event = True
+            return loaded_observation()
+
+        detector.capture_observation.side_effect = capture_and_stop
+        simple_brush.ocr_detector = detector
+
+        with (
+            patch.object(simple_brush, "evaluate_detail_page_load") as evaluate,
+            patch.object(simple_brush.logger, "warning") as warning,
+        ):
+            result = simple_brush.run_detail_load_gate(1, 0, 0, False)
+
+        self.assertEqual(result, (None, None, 0, "stopped"))
+        evaluate.assert_not_called()
+        warning.assert_not_called()
+
+    def test_refresh_page_default_call_keeps_normal_message_and_wait(self):
+        with (
+            patch.object(simple_brush.pyautogui, "press") as press,
+            patch.object(simple_brush, "safe_wait", return_value=True) as wait,
+            patch.object(simple_brush.logger, "info") as info,
+        ):
+            self.assertTrue(simple_brush.refresh_page())
+
+        info.assert_called_once_with('🔄 已查看 100 位，按 F5 刷新页面')
+        press.assert_called_once_with('f5')
+        wait.assert_called_once_with(simple_brush.REFRESH_WAIT_SECONDS)
+
+    def test_recover_detail_page_preserves_navigation_event_order(self):
+        regions = sample_batch_filter_regions()
+        simple_brush.batch_filter_enabled = True
+        simple_brush.batch_filter_regions = regions
+        events = []
+        region_names = {
+            regions.open_filter: "open_filter",
+            regions.unseen_filter: "unseen_filter",
+            regions.confirm_filter: "confirm_filter",
+            regions.first_candidate: "first_candidate",
+        }
+
+        def press(key):
+            self.assertEqual(key, 'f5')
+            events.append('f5')
+
+        def wait(seconds):
+            if seconds == simple_brush.REFRESH_WAIT_SECONDS:
+                events.append('refresh_wait')
+            else:
+                self.assertEqual(seconds, simple_brush.CLICK_WAIT_SECONDS)
+                events.append('candidate_wait')
+            return True
+
+        def delay(minimum, maximum):
+            if (
+                minimum == simple_brush.FILTER_RESULTS_DELAY_MIN
+                and maximum == simple_brush.FILTER_RESULTS_DELAY_MAX
+            ):
+                events.append('results_wait')
+            else:
+                events.append('filter_wait')
+            return True
+
+        def click(region):
+            events.append(region_names[region])
+
+        with (
+            patch.object(simple_brush.pyautogui, "press", side_effect=press),
+            patch.object(simple_brush, "safe_wait", side_effect=wait),
+            patch.object(simple_brush, "human_delay", side_effect=delay),
+            patch.object(simple_brush, "click_in_region", side_effect=click),
+        ):
+            result = simple_brush.recover_detail_page()
+
+        self.assertEqual(result, (True, "reopen_completed"))
+        self.assertEqual(
+            events,
+            [
+                'f5',
+                'refresh_wait',
+                'open_filter',
+                'filter_wait',
+                'unseen_filter',
+                'filter_wait',
+                'confirm_filter',
+                'results_wait',
+                'first_candidate',
+                'candidate_wait',
+            ],
+        )
+
+    def test_recover_detail_page_reuses_existing_helpers_once(self):
+        with (
+            patch.object(simple_brush, "refresh_page", return_value=True) as refresh,
+            patch.object(
+                simple_brush,
+                "apply_batch_filter_and_open_first_candidate",
+                return_value=True,
+            ) as reopen,
+            patch.object(simple_brush.logger, "info") as info,
+        ):
+            result = simple_brush.recover_detail_page()
+
+        self.assertEqual(result, (True, "reopen_completed"))
+        refresh.assert_called_once_with(reason='详情页加载检测重试耗尽')
+        reopen.assert_called_once_with()
+        reopen_logs = [
+            log_call.args[0]
+            for log_call in info.call_args_list
+            if log_call.args
+            and 'event=detail_load_recovery_reopen_completed' in log_call.args[0]
+        ]
+        self.assertEqual(len(reopen_logs), 1)
+        self.assertNotIn('detail_load_recovery_confirmed', '\n'.join(reopen_logs))
+
+    def test_recover_detail_page_non_stop_failures_are_controlled(self):
+        cases = (
+            (RuntimeError("refresh failed"), True, (False, "refresh_failed")),
+            (False, True, (False, "refresh_failed")),
+            (True, RuntimeError("reopen failed"), (False, "batch_reopen_failed")),
+            (True, False, (False, "batch_reopen_failed")),
+        )
+        for refresh_result, reopen_result, expected in cases:
+            with self.subTest(expected=expected, refresh_result=refresh_result):
+                simple_brush.stop_event = False
+                refresh_effect = (
+                    refresh_result
+                    if isinstance(refresh_result, Exception)
+                    else None
+                )
+                reopen_effect = (
+                    reopen_result
+                    if isinstance(reopen_result, Exception)
+                    else None
+                )
+                with (
+                    patch.object(
+                        simple_brush,
+                        "refresh_page",
+                        return_value=refresh_result,
+                        side_effect=refresh_effect,
+                    ),
+                    patch.object(
+                        simple_brush,
+                        "apply_batch_filter_and_open_first_candidate",
+                        return_value=reopen_result,
+                        side_effect=reopen_effect,
+                    ),
+                ):
+                    self.assertEqual(simple_brush.recover_detail_page(), expected)
+
+    def test_recover_detail_page_stop_is_not_recorded_as_failure(self):
+        def stop_during_step(*_args, **_kwargs):
+            simple_brush.stop_event = True
+            return False
+
+        for stopped_step in ('refresh', 'reopen'):
+            with self.subTest(stopped_step=stopped_step):
+                simple_brush.stop_event = False
+                refresh_side_effect = (
+                    stop_during_step if stopped_step == 'refresh' else None
+                )
+                reopen_side_effect = (
+                    stop_during_step if stopped_step == 'reopen' else None
+                )
+                with (
+                    patch.object(
+                        simple_brush,
+                        "refresh_page",
+                        return_value=True,
+                        side_effect=refresh_side_effect,
+                    ),
+                    patch.object(
+                        simple_brush,
+                        "apply_batch_filter_and_open_first_candidate",
+                        return_value=True,
+                        side_effect=reopen_side_effect,
+                    ),
+                    patch.object(simple_brush.logger, "error") as error,
+                ):
+                    self.assertEqual(
+                        simple_brush.recover_detail_page(),
+                        (None, "stopped"),
+                    )
+                error.assert_not_called()
+
+    def test_hard_recovery_does_not_clear_forward_consecutive(self):
+        simple_brush.forward_consecutive = 4
+        with (
+            patch.object(simple_brush, "refresh_page", return_value=True),
+            patch.object(
+                simple_brush,
+                "apply_batch_filter_and_open_first_candidate",
+                return_value=True,
+            ),
+        ):
+            self.assertEqual(
+                simple_brush.recover_detail_page(),
+                (True, "reopen_completed"),
+            )
+
+        self.assertEqual(simple_brush.forward_consecutive, 4)
+
+    def test_request_load_failed_stop_logs_complete_safe_stop_fields(self):
+        simple_brush.forward_consecutive = 4
+        with patch.object(simple_brush.logger, "error") as error:
+            simple_brush.request_load_failed_stop(
+                candidate_in_batch=3,
+                total_viewed=12,
+                retry_number=3,
+                reason="hard_recovery_unavailable",
+                recovery_count=0,
+            )
+
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "load_failed")
+        self.assertEqual(simple_brush.forward_consecutive, 4)
+        error.assert_called_once()
+        rendered = error.call_args.args[0] % error.call_args.args[1:]
+        for expected in (
+            "event=detail_load_failed",
+            "candidate_in_batch=3",
+            "total_viewed=12",
+            "attempt=retry",
+            "retry_number=3",
+            "ocr_box_count=-",
+            "ocr_text_length=-",
+            "decision=error",
+            "reason=hard_recovery_unavailable",
+            "state=load_failed",
+            "recovery_count=0",
+            "next_action=safe_stop",
+        ):
+            self.assertIn(expected, rendered)
+        self.assertNotIn("loaded detail text", rendered)
+
+    def test_first_stop_reason_is_not_overwritten(self):
+        with (
+            patch.object(simple_brush.logger, "info") as info,
+            patch.object(simple_brush.logger, "error") as error,
+        ):
+            simple_brush.on_press(simple_brush.keyboard.Key.esc)
+            simple_brush.request_timed_stop()
+            simple_brush.request_load_failed_stop(1, 0, 3, "refresh_failed", 1)
+
+        self.assertEqual(simple_brush.stop_reason, "esc")
+        self.assertTrue(simple_brush.stop_event)
+        info.assert_called_once_with('⚡ 收到 ESC，准备停止')
+        error.assert_not_called()
+
+        simple_brush.stop_event = False
+        simple_brush.stop_reason = None
+        with (
+            patch.object(simple_brush.logger, "info") as info,
+            patch.object(simple_brush.logger, "error") as error,
+        ):
+            simple_brush.request_timed_stop()
+            simple_brush.on_press(simple_brush.keyboard.Key.esc)
+            simple_brush.request_load_failed_stop(1, 0, 3, "refresh_failed", 1)
+
+        self.assertEqual(simple_brush.stop_reason, "run_duration_elapsed")
+        info.assert_not_called()
+        error.assert_not_called()
+
+        simple_brush.stop_event = False
+        simple_brush.stop_reason = None
+        with (
+            patch.object(simple_brush.logger, "info") as info,
+            patch.object(simple_brush.logger, "error") as error,
+        ):
+            simple_brush.request_load_failed_stop(1, 0, 3, "refresh_failed", 1)
+            simple_brush.request_timed_stop()
+            simple_brush.on_press(simple_brush.keyboard.Key.esc)
+
+        self.assertEqual(simple_brush.stop_reason, "load_failed")
+        info.assert_not_called()
+        error.assert_called_once()
+
+    def test_keyword_modes_all_pass_through_single_load_gate(self):
+        modes = (
+            (simple_brush.ACTION_MODE_FAVORITE, False),
+            (simple_brush.ACTION_MODE_FORWARD, False),
+            (simple_brush.ACTION_MODE_FORWARD, True),
+        )
+        for action_mode, no_forward in modes:
+            with self.subTest(action_mode=action_mode, no_forward=no_forward):
+                observation = loaded_observation()
+                calls = self.run_load_gate_candidate(
+                    observation=observation,
+                    action_mode=action_mode,
+                    no_forward=no_forward,
+                )
+
+                self.assertEqual(calls["result"], 0)
+                calls["detector"].capture_observation.assert_called_once_with(1)
+                calls["wait"].assert_not_called()
+                calls["view"].assert_called_once_with(
+                    0,
+                    first_observation=observation,
+                )
+                calls["next_candidate"].assert_not_called()
+                calls["refresh"].assert_not_called()
+                calls["timer"].cancel.assert_called_once_with()
+                loaded_logs = [
+                    log_call
+                    for log_call in calls["info"].call_args_list
+                    if log_call.args and 'state=loaded' in log_call.args[0]
+                ]
+                self.assertEqual(len(loaded_logs), 1)
+                self.assertEqual(loaded_logs[0].args[2], 1)
+
+    def test_retry_success_is_reused_once_and_counted_once_by_run(self):
+        success_observation = loaded_observation()
+        calls = self.run_load_gate_candidate(capture_sequence=[
+            not_loaded_observation(),
+            RuntimeError("OCR unavailable"),
+            success_observation,
+        ])
+
+        self.assertEqual(calls["result"], 0)
+        self.assertEqual(
+            calls["detector"].capture_observation.call_args_list,
+            [call(1)] * 3,
+        )
+        self.assertEqual(
+            calls["wait"].call_args_list,
+            [call(simple_brush.LOAD_RETRY_WAIT_SECONDS)] * 2,
+        )
+        calls["view"].assert_called_once_with(
+            0,
+            first_observation=success_observation,
+        )
+        calls["next_candidate"].assert_not_called()
+        calls["refresh"].assert_not_called()
+        loaded_logs = [
+            log_call
+            for log_call in calls["info"].call_args_list
+            if log_call.args and 'state=loaded' in log_call.args[0]
+        ]
+        self.assertEqual(len(loaded_logs), 1)
+        self.assertEqual(loaded_logs[0].args[2:5], (1, 'retry', 2))
+
+    def test_no_keyword_run_bypasses_load_gate_and_ocr_setup(self):
+        calls = self.run_load_gate_candidate(keywords=False)
+
+        self.assertEqual(calls["result"], 0)
+        calls["initialize_ocr"].assert_not_called()
+        calls["ensure_ocr"].assert_not_called()
+        calls["detector"].capture_observation.assert_not_called()
+        calls["view"].assert_called_once_with(0)
+        calls["next_candidate"].assert_not_called()
+        calls["refresh"].assert_not_called()
+
+    def test_run_resets_stop_reason_at_start(self):
+        simple_brush.stop_reason = "esc"
+
+        calls = self.run_load_gate_candidate(observation=loaded_observation())
+
+        self.assertEqual(calls["result"], 0)
+        self.assertIsNone(simple_brush.stop_reason)
+
+    def test_unavailable_recovery_requests_load_failed_without_side_effects(self):
+        calls = self.run_load_gate_candidate(
+            observation=not_loaded_observation(),
+        )
+
+        self.assertEqual(calls["result"], 0)
+        self.assertEqual(
+            calls["detector"].capture_observation.call_args_list,
+            [call(1)] * 4,
+        )
+        self.assertEqual(
+            calls["wait"].call_args_list,
+            [call(simple_brush.LOAD_RETRY_WAIT_SECONDS)] * 3,
+        )
+        calls["detector"].detect.assert_not_called()
+        calls["detect_keywords"].assert_not_called()
+        calls["ocr_scroll"].assert_not_called()
+        calls["human_scroll"].assert_not_called()
+        calls["favorite_action"].assert_not_called()
+        calls["forward_action"].assert_not_called()
+        calls["favorite_focus_restore"].assert_not_called()
+        calls["view"].assert_not_called()
+        calls["next_candidate"].assert_not_called()
+        calls["refresh"].assert_not_called()
+        calls["recover"].assert_not_called()
+        calls["open_first"].assert_called_once_with()
+        calls["timer"].cancel.assert_called_once_with()
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "load_failed")
+        calls["warning"].assert_not_called()
+        calls["error"].assert_called_once()
+        self.assertIn(
+            'hard_recovery_unavailable',
+            calls["error"].call_args.args,
+        )
+        final_logs = [
+            log_call.args[0]
+            for log_call in calls["info"].call_args_list
+            if log_call.args and '停止运行。累计查看' in log_call.args[0]
+        ]
+        self.assertEqual(final_logs, ['\n🏁 停止运行。累计查看 0 位候选人。'])
+        self.assertTrue(
+            any(
+                log_call.args
+                and log_call.args[0]
+                == 'event=run_stopped stop_reason=load_failed'
+                for log_call in calls["info"].call_args_list
+            )
+        )
+
+    def test_repeated_ocr_errors_exhaust_run_without_candidate_side_effects(self):
+        calls = self.run_load_gate_candidate(
+            capture_error=RuntimeError("OCR unavailable"),
+        )
+
+        self.assertEqual(calls["result"], 0)
+        self.assertEqual(
+            calls["detector"].capture_observation.call_args_list,
+            [call(1)] * 4,
+        )
+        self.assertEqual(
+            calls["wait"].call_args_list,
+            [call(simple_brush.LOAD_RETRY_WAIT_SECONDS)] * 3,
+        )
+        calls["detector"].detect.assert_not_called()
+        calls["detect_keywords"].assert_not_called()
+        calls["ocr_scroll"].assert_not_called()
+        calls["human_scroll"].assert_not_called()
+        calls["favorite_action"].assert_not_called()
+        calls["forward_action"].assert_not_called()
+        calls["favorite_focus_restore"].assert_not_called()
+        calls["view"].assert_not_called()
+        calls["next_candidate"].assert_not_called()
+        calls["refresh"].assert_not_called()
+        calls["recover"].assert_not_called()
+        calls["open_first"].assert_called_once_with()
+        calls["timer"].cancel.assert_called_once_with()
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "load_failed")
+        self.assertEqual(calls["warning"].call_count, 4)
+        calls["error"].assert_called_once()
+        self.assertIn(
+            'hard_recovery_unavailable',
+            calls["error"].call_args.args,
+        )
+
+    def test_legacy_exhaustion_does_not_refresh_or_reopen_by_coordinates(self):
+        calls = self.run_load_gate_candidate(
+            observation=not_loaded_observation(),
+            batch_filter_enabled=False,
+        )
+
+        self.assertEqual(calls["result"], 0)
+        calls["open_first"].assert_called_once_with((10, 20))
+        calls["recover"].assert_not_called()
+        calls["refresh"].assert_not_called()
+        self.assertEqual(simple_brush.stop_reason, "load_failed")
+        self.assertIn(
+            'hard_recovery_unavailable',
+            calls["error"].call_args.args,
+        )
+
+    def test_recovery_restarts_at_first_candidate_without_duplicate_open(self):
+        observation = loaded_observation()
+        events = []
+
+        def record_info(message, *_args):
+            if 'event=detail_load_check' in message and 'state=loaded' in message:
+                events.append('loaded')
+            if 'event=detail_load_recovery_confirmed' in message:
+                events.append('confirmed')
+
+        def record_view(*_args, **_kwargs):
+            events.append('view')
+            simple_brush.stop_event = True
+            return False
+
+        calls = self.run_load_gate_candidate(
+            capture_sequence=[
+                not_loaded_observation(),
+                not_loaded_observation(),
+                not_loaded_observation(),
+                not_loaded_observation(),
+                observation,
+            ],
+            recovery_available=True,
+            view_side_effect=record_view,
+            info_side_effect=record_info,
+        )
+
+        self.assertEqual(calls["result"], 0)
+        self.assertEqual(calls["detector"].capture_observation.call_count, 5)
+        calls["recover"].assert_called_once_with()
+        calls["open_first"].assert_called_once_with()
+        calls["refresh"].assert_not_called()
+        calls["view"].assert_called_once_with(
+            0,
+            first_observation=observation,
+        )
+        loaded_logs = [
+            log_call
+            for log_call in calls["info"].call_args_list
+            if log_call.args
+            and 'event=detail_load_check' in log_call.args[0]
+            and 'state=loaded' in log_call.args[0]
+        ]
+        self.assertEqual(len(loaded_logs), 1)
+        self.assertEqual(loaded_logs[0].args[-1], 1)
+        confirmed_logs = [
+            log_call
+            for log_call in calls["info"].call_args_list
+            if log_call.args
+            and 'detail_load_recovery_confirmed' in log_call.args[0]
+        ]
+        self.assertEqual(len(confirmed_logs), 1)
+        self.assertEqual(confirmed_logs[0].args[-1], 1)
+        self.assertLess(
+            calls["info"].call_args_list.index(loaded_logs[0]),
+            calls["info"].call_args_list.index(confirmed_logs[0]),
+        )
+        self.assertEqual(events, ['loaded', 'confirmed', 'view'])
+
+    def test_confirmed_recovery_allows_a_later_independent_recovery(self):
+        view_count = 0
+
+        def continue_then_stop(*_args, **_kwargs):
+            nonlocal view_count
+            view_count += 1
+            if view_count == 2:
+                simple_brush.stop_event = True
+                return False
+            return True
+
+        calls = self.run_load_gate_candidate(
+            capture_sequence=[
+                *[not_loaded_observation() for _ in range(4)],
+                loaded_observation(),
+                *[not_loaded_observation() for _ in range(4)],
+                loaded_observation(),
+            ],
+            recovery_available=True,
+            view_side_effect=continue_then_stop,
+        )
+
+        self.assertEqual(calls["detector"].capture_observation.call_count, 10)
+        self.assertEqual(calls["recover"].call_count, 2)
+        self.assertEqual(
+            [view_call.args[0] for view_call in calls["view"].call_args_list],
+            [0, 0],
+        )
+        calls["next_candidate"].assert_called_once_with()
+        recovery_start_logs = [
+            log_call
+            for log_call in calls["warning"].call_args_list
+            if log_call.args
+            and 'event=detail_load_recovery_start' in log_call.args[0]
+        ]
+        self.assertEqual(len(recovery_start_logs), 2)
+        self.assertTrue(all(log_call.args[-1] == 1 for log_call in recovery_start_logs))
+        confirmed_logs = [
+            log_call
+            for log_call in calls["info"].call_args_list
+            if log_call.args
+            and 'event=detail_load_recovery_confirmed' in log_call.args[0]
+        ]
+        self.assertEqual(len(confirmed_logs), 2)
+        calls["error"].assert_not_called()
+
+    def test_exhaustion_triggers_exactly_one_f5_and_filter_reopen(self):
+        calls = self.run_load_gate_candidate(
+            capture_sequence=[
+                not_loaded_observation(),
+                not_loaded_observation(),
+                not_loaded_observation(),
+                not_loaded_observation(),
+                loaded_observation(),
+            ],
+            recovery_available=True,
+            real_recovery=True,
+        )
+
+        calls["recover"].assert_called_once_with()
+        calls["refresh"].assert_called_once_with(
+            reason='详情页加载检测重试耗尽'
+        )
+        calls["press"].assert_called_once_with('f5')
+        calls["apply_reopen"].assert_called_once_with()
+        self.assertEqual(
+            calls["wait"].call_args_list,
+            [
+                call(simple_brush.LOAD_RETRY_WAIT_SECONDS),
+                call(simple_brush.LOAD_RETRY_WAIT_SECONDS),
+                call(simple_brush.LOAD_RETRY_WAIT_SECONDS),
+                call(simple_brush.REFRESH_WAIT_SECONDS),
+            ],
+        )
+        calls["open_first"].assert_called_once_with()
+        calls["refresh"].assert_called_once()
+
+    def test_second_consecutive_exhaustion_stops_without_second_recovery(self):
+        calls = self.run_load_gate_candidate(
+            observation=not_loaded_observation(),
+            recovery_available=True,
+            real_recovery=True,
+        )
+
+        self.assertEqual(calls["result"], 0)
+        self.assertEqual(calls["detector"].capture_observation.call_count, 8)
+        self.assertEqual(
+            calls["wait"].call_args_list,
+            [
+                call(simple_brush.LOAD_RETRY_WAIT_SECONDS),
+                call(simple_brush.LOAD_RETRY_WAIT_SECONDS),
+                call(simple_brush.LOAD_RETRY_WAIT_SECONDS),
+                call(simple_brush.REFRESH_WAIT_SECONDS),
+                call(simple_brush.LOAD_RETRY_WAIT_SECONDS),
+                call(simple_brush.LOAD_RETRY_WAIT_SECONDS),
+                call(simple_brush.LOAD_RETRY_WAIT_SECONDS),
+            ],
+        )
+        calls["recover"].assert_called_once_with()
+        calls["open_first"].assert_called_once_with()
+        calls["refresh"].assert_called_once_with(
+            reason='详情页加载检测重试耗尽'
+        )
+        calls["press"].assert_called_once_with('f5')
+        calls["apply_reopen"].assert_called_once_with()
+        calls["view"].assert_not_called()
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "load_failed")
+        self.assertIn(
+            'max_consecutive_load_recoveries_reached',
+            calls["error"].call_args.args,
+        )
+        calls["timer"].cancel.assert_called_once_with()
+
+    def test_non_stop_recovery_failure_returns_through_finally(self):
+        for failure_reason in ("refresh_failed", "batch_reopen_failed"):
+            with self.subTest(failure_reason=failure_reason):
+                calls = self.run_load_gate_candidate(
+                    observation=not_loaded_observation(),
+                    recovery_available=True,
+                    recovery_result=(False, failure_reason),
+                )
+
+                self.assertEqual(calls["result"], 0)
+                calls["recover"].assert_called_once_with()
+                calls["view"].assert_not_called()
+                calls["next_candidate"].assert_not_called()
+                calls["refresh"].assert_not_called()
+                calls["timer"].cancel.assert_called_once_with()
+                self.assertTrue(simple_brush.stop_event)
+                self.assertEqual(simple_brush.stop_reason, "load_failed")
+                self.assertIn(failure_reason, calls["error"].call_args.args)
+
+    def test_stop_during_recovery_uses_existing_stop_path(self):
+        def stop_recovery():
+            simple_brush.stop_reason = "esc"
+            simple_brush.stop_event = True
+            return None, "stopped"
+
+        calls = self.run_load_gate_candidate(
+            observation=not_loaded_observation(),
+            recovery_available=True,
+            recovery_side_effect=stop_recovery,
+        )
+
+        self.assertEqual(calls["result"], 0)
+        calls["recover"].assert_called_once_with()
+        calls["view"].assert_not_called()
+        calls["next_candidate"].assert_not_called()
+        calls["refresh"].assert_not_called()
+        calls["timer"].cancel.assert_called_once_with()
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "esc")
+        calls["error"].assert_not_called()
 
     def test_no_forward_mode_never_calls_real_forward(self):
         simple_brush.no_forward_mode = True
@@ -2173,7 +3404,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             events.append("timer_start")
             return None
 
-        def view(_index):
+        def view(_index, first_observation=None):
             events.append("view")
             return False
 
@@ -2208,6 +3439,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 side_effect=calibrate_ocr,
             ) as ensure_ocr,
             patch.object(simple_brush, "start_run_timer", side_effect=start_timer),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
+            ),
             patch.object(simple_brush, "view_candidate", side_effect=view),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
@@ -2269,6 +3505,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 side_effect=record("ocr_calibrate"),
             ),
             patch.object(simple_brush, "start_run_timer", side_effect=record("timer_start", None)),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
+            ),
             patch.object(simple_brush, "view_candidate", side_effect=record("view", False)),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
@@ -2323,6 +3564,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 side_effect=record("ocr_calibrate"),
             ),
             patch.object(simple_brush, "start_run_timer", side_effect=record("timer_start", None)),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
+            ),
             patch.object(simple_brush, "view_candidate", side_effect=record("view", False)),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
@@ -2561,6 +3807,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ),
             patch.object(
                 simple_brush,
+                "run_detail_load_gate",
+                return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
+            ),
+            patch.object(
+                simple_brush,
                 "view_candidate",
                 side_effect=record("view", False),
             ),
@@ -2722,6 +3973,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ),
             patch.object(
                 simple_brush,
+                "run_detail_load_gate",
+                return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
+            ),
+            patch.object(
+                simple_brush,
                 "view_candidate",
                 side_effect=record("view", False),
             ),
@@ -2769,6 +4025,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             nonlocal view_calls
             view_calls += 1
             events.append(f"view({index})")
+            if view_calls == 2:
+                simple_brush.forward_consecutive = 3
             if view_calls == 3:
                 simple_brush.stop_event = True
                 return False
@@ -2959,6 +4217,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
     def test_timed_stop_sets_existing_stop_flag(self):
         simple_brush.request_timed_stop()
         self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "run_duration_elapsed")
 
     def test_run_does_not_start_timer_when_countdown_is_interrupted(self):
         with (
