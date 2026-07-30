@@ -1,0 +1,629 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BossOCR Evidence and Decision Index",
+  "description": "Canonical machine-readable structure for the BossOCR project-review evidence and decision index.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project",
+    "generated_at",
+    "evidence",
+    "decisions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "project": {
+      "const": "BossOCR"
+    },
+    "generated_at": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?!.*[\\r\\n])[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?(?:Z|[+-](?:0[0-9]|1[0-4]):[0-5][0-9])$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/decision"
+      }
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    }
+  },
+  "$defs": {
+    "actualText": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "not": {
+        "enum": [
+          "unknown",
+          "not_applicable",
+          "null",
+          "N/A",
+          "none",
+          "TBD",
+          "待确认",
+          "-"
+        ]
+      }
+    },
+    "textState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/actualText"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "stringList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/actualText"
+      }
+    },
+    "stringListState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/stringList"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "requirementId": {
+      "type": "string",
+      "pattern": "^(?!.*[\\r\\n])R-(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})$"
+    },
+    "decisionId": {
+      "type": "string",
+      "pattern": "^(?!.*[\\r\\n])D-(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})$"
+    },
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^(?!.*[\\r\\n])E-(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})$"
+    },
+    "requirementIdList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/requirementId"
+      }
+    },
+    "requirementIdListState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/requirementIdList"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "evidenceIdList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/evidenceId"
+      }
+    },
+    "sourceType": {
+      "enum": [
+        "source_code",
+        "automated_test",
+        "ci_result",
+        "build_script",
+        "release_artifact",
+        "runtime_log",
+        "git_commit",
+        "git_tag",
+        "github_issue",
+        "pull_request",
+        "prd",
+        "investigation_report",
+        "tid",
+        "implementation_report",
+        "acceptance_report",
+        "smoke_test",
+        "release_notes",
+        "readme",
+        "maintenance_document",
+        "baseline_handoff_document",
+        "environment_setup_report",
+        "user_operation_feedback",
+        "manual_historical_note"
+      ]
+    },
+    "confidence": {
+      "enum": [
+        "confirmed",
+        "estimated",
+        "uncertain",
+        "conflicting"
+      ]
+    },
+    "datePrecision": {
+      "enum": [
+        "exact_day",
+        "exact_month",
+        "approximate_range",
+        "sequence_only",
+        "unknown"
+      ]
+    },
+    "observedAt": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "not": {
+            "anyOf": [
+              {
+                "enum": [
+                  "not_applicable",
+                  "null",
+                  "N/A",
+                  "none",
+                  "TBD",
+                  "待确认",
+                  "-"
+                ]
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "repoPath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/actualText"
+        },
+        {
+          "not": {
+            "pattern": "([\\r\\n]|^/|^[A-Za-z]:|\\\\|(^|/)\\.\\.(/|$))"
+          }
+        }
+      ]
+    },
+    "repoPathState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/repoPath"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "gitCommit": {
+      "type": "string",
+      "pattern": "^(?!.*[\\r\\n])[0-9a-f]{40}$"
+    },
+    "gitCommitState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/gitCommit"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "allOf": [
+          {
+            "not": {
+              "pattern": "[\\r\\n]"
+            }
+          },
+          {
+            "anyOf": [
+              {
+                "pattern": "^x-[A-Za-z0-9][A-Za-z0-9._-]*$"
+              },
+              {
+                "pattern": "^[a-z][a-z0-9_-]*(?:\\.[A-Za-z0-9][A-Za-z0-9._-]*)+$"
+              }
+            ]
+          }
+        ]
+      },
+      "additionalProperties": true
+    },
+    "conflictNoteList": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stringList"
+        },
+        {
+          "contains": {
+            "type": "string",
+            "pattern": "^\\[CONFLICT:[^\\]\\r\\n]+\\]"
+          },
+          "minContains": 1
+        }
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "source_type",
+        "title",
+        "repository_path",
+        "path_at_commit",
+        "commit",
+        "external_locator",
+        "section_or_lines",
+        "observed_at",
+        "date_precision",
+        "evidence_scope",
+        "tracked_state",
+        "underlying_evidence_available",
+        "confidentiality",
+        "confidence",
+        "notes",
+        "extensions"
+      ],
+      "properties": {
+        "evidence_id": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "source_type": {
+          "$ref": "#/$defs/sourceType"
+        },
+        "title": {
+          "$ref": "#/$defs/actualText"
+        },
+        "repository_path": {
+          "$ref": "#/$defs/repoPathState"
+        },
+        "path_at_commit": {
+          "$ref": "#/$defs/repoPathState"
+        },
+        "commit": {
+          "$ref": "#/$defs/gitCommitState"
+        },
+        "external_locator": {
+          "$ref": "#/$defs/textState"
+        },
+        "section_or_lines": {
+          "$ref": "#/$defs/textState"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/observedAt"
+        },
+        "date_precision": {
+          "$ref": "#/$defs/datePrecision"
+        },
+        "evidence_scope": {
+          "$ref": "#/$defs/actualText",
+          "description": "A non-empty atomic claim stating exactly what this evidence can prove, including applicable version, platform, and scenario boundaries. Atomicity is reviewed outside JSON Schema."
+        },
+        "tracked_state": {
+          "enum": [
+            "tracked",
+            "ignored",
+            "untracked",
+            "external",
+            "historical_missing",
+            "unknown"
+          ]
+        },
+        "underlying_evidence_available": {
+          "enum": [
+            "yes",
+            "partial",
+            "no",
+            "unknown"
+          ]
+        },
+        "confidentiality": {
+          "enum": [
+            "normal",
+            "sensitive",
+            "restricted"
+          ]
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "notes": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "date_precision": {
+                "const": "exact_day"
+              }
+            },
+            "required": [
+              "date_precision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "observed_at": {
+                "type": "string",
+                "format": "date",
+                "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "date_precision": {
+                "const": "exact_month"
+              }
+            },
+            "required": [
+              "date_precision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "observed_at": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "date_precision": {
+                "const": "approximate_range"
+              }
+            },
+            "required": [
+              "date_precision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "observed_at": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12][0-9]|3[01]))?/[0-9]{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12][0-9]|3[01]))?$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "date_precision": {
+                "const": "sequence_only"
+              }
+            },
+            "required": [
+              "date_precision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "observed_at": {
+                "type": "string",
+                "pattern": "^sequence:[1-9][0-9]*$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "date_precision": {
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "date_precision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "observed_at": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "const": "unknown"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "confidence": {
+                "const": "conflicting"
+              }
+            },
+            "required": [
+              "confidence"
+            ]
+          },
+          "then": {
+            "properties": {
+              "notes": {
+                "$ref": "#/$defs/conflictNoteList"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tracked_state": {
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "tracked_state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "notes": {
+                "$ref": "#/$defs/stringList"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "title",
+        "selected_solution",
+        "alternatives_considered",
+        "decision_rationale",
+        "evidence_ids",
+        "related_requirements",
+        "confidence",
+        "notes",
+        "extensions"
+      ],
+      "properties": {
+        "decision_id": {
+          "$ref": "#/$defs/decisionId"
+        },
+        "title": {
+          "$ref": "#/$defs/actualText"
+        },
+        "selected_solution": {
+          "$ref": "#/$defs/textState"
+        },
+        "alternatives_considered": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "decision_rationale": {
+          "$ref": "#/$defs/textState"
+        },
+        "evidence_ids": {
+          "$ref": "#/$defs/evidenceIdList"
+        },
+        "related_requirements": {
+          "$ref": "#/$defs/requirementIdListState"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "notes": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "confidence": {
+                "const": "conflicting"
+              }
+            },
+            "required": [
+              "confidence"
+            ]
+          },
+          "then": {
+            "properties": {
+              "notes": {
+                "$ref": "#/$defs/conflictNoteList"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0.0",
+      "project": "BossOCR",
+      "generated_at": null,
+      "evidence": [],
+      "decisions": []
+    }
+  ]
+}

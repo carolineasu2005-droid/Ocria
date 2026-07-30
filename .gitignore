@@ -18,6 +18,13 @@ data/ocr_runs/
 
 # Local project documentation
 *.md
+# BossOCR project retrospective rules and generated review documents
+!docs/project-review/*.md
+!docs/project-review/**/*.md
+# Historical BossOCR Issue-Next TIDs
+!docs/tid/
+!docs/tid/next/
+!docs/tid/next/*.md
 !README.md
 !Issue-Next-7-windmouse-observable-motion-acceptance-report.md
 !Issue-calibration-template-module-acceptance-report.md

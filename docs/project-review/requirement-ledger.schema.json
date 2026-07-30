@@ -1,0 +1,953 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BossOCR Requirement Ledger",
+  "description": "Canonical machine-readable structure for the BossOCR project-review requirement ledger.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project",
+    "generated_at",
+    "requirements"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "project": {
+      "const": "BossOCR"
+    },
+    "generated_at": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?!.*[\\r\\n])[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]+)?(?:Z|[+-](?:0[0-9]|1[0-4]):[0-5][0-9])$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/requirement"
+      }
+    },
+    "extensions": {
+      "$ref": "#/$defs/extensions"
+    }
+  },
+  "$defs": {
+    "actualText": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "not": {
+        "enum": [
+          "unknown",
+          "not_applicable",
+          "null",
+          "N/A",
+          "none",
+          "TBD",
+          "待确认",
+          "-"
+        ]
+      }
+    },
+    "textNullableUnknown": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/actualText"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "const": "unknown"
+        }
+      ]
+    },
+    "textState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/actualText"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "stringList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/actualText"
+      }
+    },
+    "stringListState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/stringList"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "requirementId": {
+      "type": "string",
+      "pattern": "^(?!.*[\\r\\n])R-(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})$"
+    },
+    "decisionId": {
+      "type": "string",
+      "pattern": "^(?!.*[\\r\\n])D-(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})$"
+    },
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^(?!.*[\\r\\n])E-(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})$"
+    },
+    "requirementIdList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/requirementId"
+      }
+    },
+    "requirementIdListState": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/requirementIdList"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "decisionIdListState": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/decisionId"
+          }
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "evidenceIdList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/evidenceId"
+      }
+    },
+    "legacyId": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/actualText"
+        },
+        {
+          "pattern": "^(?!.*[\\r\\n])[a-z][a-z0-9_]*:.+$"
+        }
+      ]
+    },
+    "legacyIdListState": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/legacyId"
+          }
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "sourceType": {
+      "enum": [
+        "source_code",
+        "automated_test",
+        "ci_result",
+        "build_script",
+        "release_artifact",
+        "runtime_log",
+        "git_commit",
+        "git_tag",
+        "github_issue",
+        "pull_request",
+        "prd",
+        "investigation_report",
+        "tid",
+        "implementation_report",
+        "acceptance_report",
+        "smoke_test",
+        "release_notes",
+        "readme",
+        "maintenance_document",
+        "baseline_handoff_document",
+        "environment_setup_report",
+        "user_operation_feedback",
+        "manual_historical_note"
+      ]
+    },
+    "sourceTypeList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/sourceType"
+      }
+    },
+    "requirementType": {
+      "enum": [
+        "business_need",
+        "product_requirement",
+        "system_requirement",
+        "defect",
+        "engineering_enablement",
+        "test_protection",
+        "release_enablement",
+        "maintenance_enablement",
+        "unknown"
+      ]
+    },
+    "module": {
+      "enum": [
+        "core_automation",
+        "ocr_capture",
+        "keyword_rules",
+        "candidate_actions",
+        "page_filter_refresh",
+        "calibration",
+        "mouse_interaction",
+        "focus_page_state",
+        "cross_platform",
+        "stability_recovery",
+        "candidate_profile_parsing",
+        "test_build_release",
+        "documentation_handoff"
+      ]
+    },
+    "modulePrimary": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/module"
+        },
+        {
+          "const": "unknown"
+        }
+      ]
+    },
+    "moduleListState": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/module"
+          }
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "platform": {
+      "enum": [
+        "windows_edge",
+        "macos_chrome",
+        "platform_agnostic",
+        "cross_platform_core"
+      ]
+    },
+    "platformList": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "windows_edge",
+              "macos_chrome"
+            ]
+          }
+        },
+        {
+          "const": [
+            "platform_agnostic"
+          ]
+        },
+        {
+          "const": [
+            "cross_platform_core"
+          ]
+        },
+        {
+          "const": "unknown"
+        }
+      ]
+    },
+    "crossCuttingConcern": {
+      "enum": [
+        "safety_guard",
+        "privacy_compliance",
+        "fail_closed",
+        "backward_compatibility",
+        "observability",
+        "performance",
+        "coordinate_dpi",
+        "human_in_the_loop",
+        "rollback_fallback",
+        "data_integrity",
+        "page_state_integrity",
+        "long_running_stability",
+        "licensing",
+        "maintainability"
+      ]
+    },
+    "crossCuttingConcernListState": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/crossCuttingConcern"
+          }
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "riskLevel": {
+      "enum": [
+        "P0",
+        "P1",
+        "P2",
+        "experimental",
+        "unknown"
+      ]
+    },
+    "status": {
+      "enum": [
+        "proposed",
+        "investigating",
+        "designed",
+        "implementing",
+        "testing",
+        "accepted",
+        "released",
+        "superseded",
+        "rejected",
+        "deferred",
+        "abandoned",
+        "unknown"
+      ]
+    },
+    "confidence": {
+      "enum": [
+        "confirmed",
+        "estimated",
+        "uncertain",
+        "conflicting"
+      ]
+    },
+    "datePrecision": {
+      "enum": [
+        "exact_day",
+        "exact_month",
+        "approximate_range",
+        "sequence_only",
+        "unknown"
+      ]
+    },
+    "firstObservedDate": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "not": {
+            "anyOf": [
+              {
+                "enum": [
+                  "not_applicable",
+                  "null",
+                  "N/A",
+                  "none",
+                  "TBD",
+                  "待确认",
+                  "-"
+                ]
+              },
+              {
+                "pattern": "[\\r\\n]"
+              }
+            ]
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "dependency": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/requirementId"
+        },
+        {
+          "$ref": "#/$defs/decisionId"
+        },
+        {
+          "type": "string",
+          "pattern": "^(?!.*[\\r\\n])(?:package|platform|external):(?=[^\\r\\n]*\\S)[^\\r\\n]+$"
+        }
+      ]
+    },
+    "dependencyListState": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/dependency"
+          }
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "repoPath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/actualText"
+        },
+        {
+          "not": {
+            "pattern": "([\\r\\n]|^/|^[A-Za-z]:|\\\\|(^|/)\\.\\.(/|$))"
+          }
+        }
+      ]
+    },
+    "repoPathListState": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/repoPath"
+          }
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "commitListState": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?!.*[\\r\\n])[0-9a-f]{40}$"
+          }
+        },
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      ]
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "allOf": [
+          {
+            "not": {
+              "pattern": "[\\r\\n]"
+            }
+          },
+          {
+            "anyOf": [
+              {
+                "pattern": "^x-[A-Za-z0-9][A-Za-z0-9._-]*$"
+              },
+              {
+                "pattern": "^[a-z][a-z0-9_-]*(?:\\.[A-Za-z0-9][A-Za-z0-9._-]*)+$"
+              }
+            ]
+          }
+        ]
+      },
+      "additionalProperties": true
+    },
+    "conflictQuestionList": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/stringList"
+        },
+        {
+          "contains": {
+            "type": "string",
+            "pattern": "^\\[CONFLICT:[^\\]\\r\\n]+\\]"
+          }
+        }
+      ]
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirement_id",
+        "legacy_ids",
+        "title",
+        "summary",
+        "requirement_type",
+        "first_observed_date",
+        "date_precision",
+        "first_observed_evidence_ids",
+        "source_type",
+        "original_problem",
+        "business_goal",
+        "user_scenario",
+        "module_primary",
+        "module_secondary",
+        "platforms",
+        "cross_cutting_concerns",
+        "risk_level",
+        "status",
+        "confidence",
+        "alternatives_considered",
+        "selected_solution",
+        "decision_rationale",
+        "rejected_solutions",
+        "non_breakable_constraints",
+        "dependencies",
+        "derived_from",
+        "decomposed_into",
+        "related_requirements",
+        "supersedes",
+        "superseded_by",
+        "decision_ids",
+        "investigation_documents",
+        "prd_documents",
+        "tid_documents",
+        "implementation_reports",
+        "code_files",
+        "commits",
+        "tests",
+        "smoke_tests",
+        "acceptance_reports",
+        "release_notes",
+        "releases",
+        "evidence_ids",
+        "known_failures",
+        "lessons_learned",
+        "open_questions",
+        "reviewer_notes",
+        "extensions"
+      ],
+      "properties": {
+        "requirement_id": {
+          "$ref": "#/$defs/requirementId"
+        },
+        "legacy_ids": {
+          "$ref": "#/$defs/legacyIdListState"
+        },
+        "title": {
+          "$ref": "#/$defs/actualText"
+        },
+        "summary": {
+          "$ref": "#/$defs/actualText"
+        },
+        "requirement_type": {
+          "$ref": "#/$defs/requirementType"
+        },
+        "first_observed_date": {
+          "$ref": "#/$defs/firstObservedDate"
+        },
+        "date_precision": {
+          "$ref": "#/$defs/datePrecision"
+        },
+        "first_observed_evidence_ids": {
+          "$ref": "#/$defs/evidenceIdList"
+        },
+        "source_type": {
+          "$ref": "#/$defs/sourceTypeList"
+        },
+        "original_problem": {
+          "$ref": "#/$defs/textNullableUnknown"
+        },
+        "business_goal": {
+          "$ref": "#/$defs/textNullableUnknown"
+        },
+        "user_scenario": {
+          "$ref": "#/$defs/textState"
+        },
+        "module_primary": {
+          "$ref": "#/$defs/modulePrimary"
+        },
+        "module_secondary": {
+          "$ref": "#/$defs/moduleListState"
+        },
+        "platforms": {
+          "$ref": "#/$defs/platformList"
+        },
+        "cross_cutting_concerns": {
+          "$ref": "#/$defs/crossCuttingConcernListState"
+        },
+        "risk_level": {
+          "$ref": "#/$defs/riskLevel"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence"
+        },
+        "alternatives_considered": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "selected_solution": {
+          "$ref": "#/$defs/textState"
+        },
+        "decision_rationale": {
+          "$ref": "#/$defs/textState"
+        },
+        "rejected_solutions": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "non_breakable_constraints": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "dependencies": {
+          "$ref": "#/$defs/dependencyListState"
+        },
+        "derived_from": {
+          "$ref": "#/$defs/requirementIdListState"
+        },
+        "decomposed_into": {
+          "$ref": "#/$defs/requirementIdListState"
+        },
+        "related_requirements": {
+          "$ref": "#/$defs/requirementIdListState"
+        },
+        "supersedes": {
+          "$ref": "#/$defs/requirementIdListState"
+        },
+        "superseded_by": {
+          "$ref": "#/$defs/requirementIdListState"
+        },
+        "decision_ids": {
+          "$ref": "#/$defs/decisionIdListState"
+        },
+        "investigation_documents": {
+          "$ref": "#/$defs/repoPathListState"
+        },
+        "prd_documents": {
+          "$ref": "#/$defs/repoPathListState"
+        },
+        "tid_documents": {
+          "$ref": "#/$defs/repoPathListState"
+        },
+        "implementation_reports": {
+          "$ref": "#/$defs/repoPathListState"
+        },
+        "code_files": {
+          "$ref": "#/$defs/repoPathListState"
+        },
+        "commits": {
+          "$ref": "#/$defs/commitListState"
+        },
+        "tests": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "smoke_tests": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "acceptance_reports": {
+          "$ref": "#/$defs/repoPathListState"
+        },
+        "release_notes": {
+          "$ref": "#/$defs/repoPathListState"
+        },
+        "releases": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "evidence_ids": {
+          "$ref": "#/$defs/evidenceIdList"
+        },
+        "known_failures": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "lessons_learned": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "open_questions": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "reviewer_notes": {
+          "$ref": "#/$defs/stringListState"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "date_precision": {
+                "const": "exact_day"
+              }
+            },
+            "required": [
+              "date_precision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "first_observed_date": {
+                "type": "string",
+                "format": "date",
+                "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "date_precision": {
+                "const": "exact_month"
+              }
+            },
+            "required": [
+              "date_precision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "first_observed_date": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "date_precision": {
+                "const": "approximate_range"
+              }
+            },
+            "required": [
+              "date_precision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "first_observed_date": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12][0-9]|3[01]))?/[0-9]{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12][0-9]|3[01]))?$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "date_precision": {
+                "const": "sequence_only"
+              }
+            },
+            "required": [
+              "date_precision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "first_observed_date": {
+                "type": "string",
+                "pattern": "^sequence:[1-9][0-9]*$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "date_precision": {
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "date_precision"
+            ]
+          },
+          "then": {
+            "properties": {
+              "first_observed_date": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "const": "unknown"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "superseded"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "superseded_by": {
+                "$ref": "#/$defs/requirementIdList"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "released"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "releases": {
+                "$ref": "#/$defs/stringList"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "confidence": {
+                "const": "conflicting"
+              }
+            },
+            "required": [
+              "confidence"
+            ]
+          },
+          "then": {
+            "properties": {
+              "open_questions": {
+                "$ref": "#/$defs/conflictQuestionList"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "1.0.0",
+      "project": "BossOCR",
+      "generated_at": null,
+      "requirements": []
+    }
+  ]
+}

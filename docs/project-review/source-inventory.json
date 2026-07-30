@@ -1,0 +1,3400 @@
+{
+  "schema_version": "1.0.0",
+  "project": "BossOCR",
+  "generated_at": "2026-07-25T12:22:30.137Z",
+  "inventory_scope": "phase-2A-source-discovery",
+  "source_count": 79,
+  "sources": [
+    {
+      "source_id": "SRC-001",
+      "title": "BossOCR",
+      "current_path": "docs/README.md",
+      "path_at_commit": "docs/README.md",
+      "source_kind": "readme",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c36d6e7549e5098a4381861de40b271e718d5f20",
+      "git_first_seen": "2026-06-30T21:58:23+08:00",
+      "git_last_changed": "2026-07-12T22:38:48+08:00",
+      "filesystem_modified_time": "2026-07-12T14:34:16.974Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "83c663be64f2e79b001292a9609ab37837cd47683f5e1ba28e125673c20194e6",
+      "size_bytes": 28131,
+      "version_label": "v1.2 current",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "该版本面向用户声明的能力、用法、约束与支持平台"
+      ],
+      "cannot_prove": [
+        "代码一定符合文档",
+        "功能首次提出时间",
+        "远程发布对象状态"
+      ],
+      "candidate_topics": [
+        "Windows",
+        "v1.2",
+        "usage",
+        "architecture"
+      ],
+      "reviewer_notes": "当前 v1.2 用户与维护入口，汇总 Windows Edge、OCR、规则语法、收藏/转发、校准模板、构建、隐私和限制。"
+    },
+    {
+      "source_id": "SRC-002",
+      "title": "关键词连续误触发问题调查报告（修订版）",
+      "current_path": "docs/INVESTIGATION_REPORT.md",
+      "path_at_commit": "docs/INVESTIGATION_REPORT.md",
+      "source_kind": "investigation_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-06-30T22:54:58+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-06-30T15:41:29.550Z",
+      "historical_date_claim": "2026-06-30",
+      "date_confidence": "confirmed",
+      "sha256": "53085d45662374ffe92394bf12e65d15b7a8772c3e9462bba334cbe017103347",
+      "size_bytes": 10183,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "restricted",
+      "contains_personal_data": true,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "该 investigation_report 资料直接记录的项目事实"
+      ],
+      "cannot_prove": [
+        "未由该资料直接记录的动机、实现或发布事实"
+      ],
+      "candidate_topics": [
+        "OCR",
+        "clipboard",
+        "false-positive",
+        "P0"
+      ],
+      "reviewer_notes": "复核连续关键词误触发事故，确认 Ctrl+A/Ctrl+C 复制了详情覆盖层与底层推荐列表的混合全文，并纠正旧版对翻页失败的过强推断。"
+    },
+    {
+      "source_id": "SRC-003",
+      "title": "RapidOCR 简历关键词检测实施方案",
+      "current_path": "docs/RAPIDOCR_IMPLEMENTATION_PLAN.md",
+      "path_at_commit": "docs/RAPIDOCR_IMPLEMENTATION_PLAN.md",
+      "source_kind": "technical_plan",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-06-30T22:54:58+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-06-30T15:41:29.552Z",
+      "historical_date_claim": "2026-06-30",
+      "date_confidence": "confirmed",
+      "sha256": "ce8da723f83d831837cf8af9a75c8d9490f4cdb9e579478e2bf1eb693e5fe4a0",
+      "size_bytes": 14115,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "RapidOCR",
+        "privacy",
+        "exact-match",
+        "fail-closed"
+      ],
+      "reviewer_notes": "提出本地 RapidOCR 替代全页剪贴板方案，冻结局部截图、精确匹配、固定最多 8 屏、二次确认和失败关闭原则。"
+    },
+    {
+      "source_id": "SRC-004",
+      "title": "RapidOCR 关键词检测改造详细实施文档",
+      "current_path": "docs/RAPIDOCR_DETAILED_EXECUTION_GUIDE.md",
+      "path_at_commit": "docs/RAPIDOCR_DETAILED_EXECUTION_GUIDE.md",
+      "source_kind": "test_guide",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-06-30T22:54:58+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-06-30T15:41:29.551Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "a4b0680c1781f00c47996502252d63d84392128d2000f6cb5cbc81b58d9a8527",
+      "size_bytes": 17952,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "该 test_guide 资料直接记录的项目事实"
+      ],
+      "cannot_prove": [
+        "未由该资料直接记录的动机、实现或发布事实"
+      ],
+      "candidate_topics": [
+        "RapidOCR",
+        "execution-guide"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-005",
+      "title": "Issue #1 BossOCR minimal changes v1.0",
+      "current_path": "docs/Issue-1-BossOCR-release-notes.md",
+      "path_at_commit": "docs/Issue-1-BossOCR-release-notes.md",
+      "source_kind": "release_notes",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-01T13:57:53+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-01T13:42:42.876Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "602c242c8eacec34c5a5e314f700bd02bf2fa2afef484e020d5188d19cc3e13d",
+      "size_bytes": 2508,
+      "version_label": "Issue #1 v1.0",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "发布说明声称的功能范围、使用边界、资产名称与校验信息"
+      ],
+      "cannot_prove": [
+        "远程 Release 当前是否存在且附件是否仍一致",
+        "代码真实执行细节"
+      ],
+      "candidate_topics": [
+        "Issue-1",
+        "Windows",
+        "release"
+      ],
+      "reviewer_notes": "记录 Issue #1 最小发布范围、迁移说明、64 项测试声明和 Windows x64 使用限制。"
+    },
+    {
+      "source_id": "SRC-006",
+      "title": "Issue-Action-Mode-Favorite-Forward Acceptance Report",
+      "current_path": "docs/Issue-Action-Mode-Favorite-Forward-acceptance-report.md",
+      "path_at_commit": "docs/Issue-Action-Mode-Favorite-Forward-acceptance-report.md",
+      "source_kind": "acceptance_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-10T00:42:04+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-09T16:20:24.732Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "2a9edda1f2b3d8dd73e1acb53e3689b4861181733ad5e7260cfd3c10846e8f8c",
+      "size_bytes": 12200,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-and-Codex-Prompt-Favorite-Action-Mode.md",
+        "docs/TID-Action-Mode-Favorite-Forward.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的验收结论、测试命令/数量、提交与残余风险"
+      ],
+      "cannot_prove": [
+        "报告之外的实际运行行为",
+        "未执行人工测试的结果",
+        "远程发布对象当前状态"
+      ],
+      "candidate_topics": [
+        "favorite",
+        "forward",
+        "action_mode"
+      ],
+      "reviewer_notes": "确认收藏/转发模式、入口贯通、运行期收藏校准、0.5 秒等待和 202 项全量回归；人工冒烟仍建议执行。"
+    },
+    {
+      "source_id": "SRC-007",
+      "title": "校准模板模块验收报告",
+      "current_path": "docs/Issue-calibration-template-module-acceptance-report.md",
+      "path_at_commit": "docs/Issue-calibration-template-module-acceptance-report.md",
+      "source_kind": "acceptance_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-10T08:53:17+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-10T00:50:01.445Z",
+      "historical_date_claim": "2026-07-10",
+      "date_confidence": "confirmed",
+      "sha256": "ca4ab95829c97f116a2446b14d8100de6cc65f37ae27f1aa41e85c21e3edebf2",
+      "size_bytes": 6495,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-calibration-template-module.md",
+        "TID-calibration-template-module.md",
+        "docs/calibration-template-smoke-test.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的验收结论、测试命令/数量、提交与残余风险"
+      ],
+      "cannot_prove": [
+        "报告之外的实际运行行为",
+        "未执行人工测试的结果",
+        "远程发布对象当前状态"
+      ],
+      "candidate_topics": [
+        "calibration-profile",
+        "v1.2"
+      ],
+      "reviewer_notes": "确认模板数据层、步骤层、主程序注入和 263 项测试通过；真实 Boss 页面 12 项冒烟仍未执行。"
+    },
+    {
+      "source_id": "SRC-008",
+      "title": "[Hotfix] P0 验收报告：转发流程结束后执行两次焦点恢复点击",
+      "current_path": "docs/Issue-Hotfix-double-focus-restore-acceptance-report.md",
+      "path_at_commit": "docs/Issue-Hotfix-double-focus-restore-acceptance-report.md",
+      "source_kind": "acceptance_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-02T23:18:42+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-02T16:00:45.578Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "c7127b925762b79dc713af7350ac78c03b1e91502a65546ae55416bdd02a3ee5",
+      "size_bytes": 8237,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的验收结论、测试命令/数量、提交与残余风险"
+      ],
+      "cannot_prove": [
+        "报告之外的实际运行行为",
+        "未执行人工测试的结果",
+        "远程发布对象当前状态"
+      ],
+      "candidate_topics": [
+        "P0",
+        "focus-restore",
+        "hotfix"
+      ],
+      "reviewer_notes": "确认转发所有退出路径执行两次独立焦点恢复，110 项测试通过，并建议最小真实页面验证。"
+    },
+    {
+      "source_id": "SRC-009",
+      "title": "[Next-1] 验收报告：转发流程点击区域启动前校准",
+      "current_path": "docs/Issue-Next-1-focus-restore-calibration-acceptance-report.md",
+      "path_at_commit": "docs/Issue-Next-1-focus-restore-calibration-acceptance-report.md",
+      "source_kind": "acceptance_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-01T22:24:52+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-01T14:23:57.009Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "1455111960f46af06930fca9667fbf3e52063e8eb83e341e6b7650d2a1ede7b7",
+      "size_bytes": 10600,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/tid/next/Issue-Next-1-focus-restore-calibration-TID-V1.0.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的验收结论、测试命令/数量、提交与残余风险"
+      ],
+      "cannot_prove": [
+        "报告之外的实际运行行为",
+        "未执行人工测试的结果",
+        "远程发布对象当前状态"
+      ],
+      "candidate_topics": [
+        "Next-1",
+        "focus-restore"
+      ],
+      "reviewer_notes": "确认 Next-1 五个 Change、81 项测试和默认/运行期区域行为；真实 Windows Edge 验证未执行。"
+    },
+    {
+      "source_id": "SRC-010",
+      "title": "[Next-2] 验收报告：关键词规则新增 not 排除逻辑",
+      "current_path": "docs/Issue-Next-2-keyword-not-rule-acceptance-report.md",
+      "path_at_commit": "docs/Issue-Next-2-keyword-not-rule-acceptance-report.md",
+      "source_kind": "acceptance_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-01T22:58:17+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-01T14:57:32.371Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "9d5aed6b4b1667d49712b10922eefd4390924245883f1e8147f731113e86c832",
+      "size_bytes": 10854,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/tid/next/Issue-Next-2-keyword-not-rule-TID-V1.0.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的验收结论、测试命令/数量、提交与残余风险"
+      ],
+      "cannot_prove": [
+        "报告之外的实际运行行为",
+        "未执行人工测试的结果",
+        "远程发布对象当前状态"
+      ],
+      "candidate_topics": [
+        "Next-2",
+        "not",
+        "keyword-rule"
+      ],
+      "reviewer_notes": "确认 not 解析、匹配、完整规则二次确认和 97 项测试；真实 OCR 样本未执行。"
+    },
+    {
+      "source_id": "SRC-011",
+      "title": "[Next-3] 验收报告：转发流程全部关键点击点启动前校准",
+      "current_path": "docs/Issue-Next-3-forward-click-calibration-acceptance-report.md",
+      "path_at_commit": "docs/Issue-Next-3-forward-click-calibration-acceptance-report.md",
+      "source_kind": "acceptance_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-02T09:04:10+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-02T01:03:58.243Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "a7dc744574859a4b520545d6aaf9fab8301aa10e06587c7c292b63c24ccddc9c",
+      "size_bytes": 15074,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/tid/next/Issue-Next-3-forward-click-calibration-TID-V1.0.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的验收结论、测试命令/数量、提交与残余风险"
+      ],
+      "cannot_prove": [
+        "报告之外的实际运行行为",
+        "未执行人工测试的结果",
+        "远程发布对象当前状态"
+      ],
+      "candidate_topics": [
+        "Next-3",
+        "forward-calibration"
+      ],
+      "reviewer_notes": "确认五区域原子校准、运行期接入和 109 项测试；真实浏览器与邮件验证未在本次执行。"
+    },
+    {
+      "source_id": "SRC-012",
+      "title": "[Next-4] 关键词规则支持 `any(...)` 分组表达式验收报告",
+      "current_path": "docs/Issue-Next-4-keyword-any-group-acceptance-report.md",
+      "path_at_commit": "docs/Issue-Next-4-keyword-any-group-acceptance-report.md",
+      "source_kind": "acceptance_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-03T01:14:31+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-02T16:55:52.259Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "aac48bf96c71c967624de6b43795519329fe934be332035808653fad9f6f3cd7",
+      "size_bytes": 5662,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/tid/next/Issue-Next-4-keyword-any-group-TID-V1.0.md",
+        "docs/tid/next/Issue-Next-4-keyword-any-group-TID-V1.1.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的验收结论、测试命令/数量、提交与残余风险"
+      ],
+      "cannot_prove": [
+        "报告之外的实际运行行为",
+        "未执行人工测试的结果",
+        "远程发布对象当前状态"
+      ],
+      "candidate_topics": [
+        "Next-4",
+        "any",
+        "keyword-rule"
+      ],
+      "reviewer_notes": "确认 any parser/matcher 核心语义；核心 62 项测试通过，但全量 discover 曾被 KeyboardInterrupt 中断。"
+    },
+    {
+      "source_id": "SRC-013",
+      "title": "[Next-5] 启动及批次刷新后自动应用「最近没看过」筛选并点击首位候选人验收报告",
+      "current_path": "docs/Issue-Next-5-batch-filter-first-candidate-acceptance-report.md",
+      "path_at_commit": "docs/Issue-Next-5-batch-filter-first-candidate-acceptance-report.md",
+      "source_kind": "acceptance_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-03T21:54:26+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-03T13:52:30.865Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "bb734e031b52e6b23eb7cb86f10478963c4e7e8a27b0a3a415f29f4359a77a99",
+      "size_bytes": 5884,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/tid/next/Issue-Next-5-batch-filter-first-candidate-TID-V1.0.md",
+        "docs/tid/next/Issue-Next-5-batch-filter-first-candidate-TID-V1.1.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的验收结论、测试命令/数量、提交与残余风险"
+      ],
+      "cannot_prove": [
+        "报告之外的实际运行行为",
+        "未执行人工测试的结果",
+        "远程发布对象当前状态"
+      ],
+      "candidate_topics": [
+        "Next-5",
+        "batch-filter",
+        "beta"
+      ],
+      "reviewer_notes": "确认四区域筛选归位、beta 包和人工 GUI 冒烟，并记录为 beta 而非 stable release。"
+    },
+    {
+      "source_id": "SRC-014",
+      "title": "[Next-6][P2] 验收报告：优化鼠标移动轨迹——贝塞尔路径、途中抖动与慢-快-慢三段变速",
+      "current_path": "docs/Issue-Next-6-human-mouse-motion-acceptance-report.md",
+      "path_at_commit": "docs/Issue-Next-6-human-mouse-motion-acceptance-report.md",
+      "source_kind": "acceptance_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-03T22:41:38+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-25T11:47:52.342Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "80c9c71c09ee56a1c1ea1f338cec2649a736cefea50e6cf64f754b7003770791",
+      "size_bytes": 8289,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/tid/next/Issue-Next-6-human-mouse-motion-TID-V1.0.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的验收结论、测试命令/数量、提交与残余风险"
+      ],
+      "cannot_prove": [
+        "报告之外的实际运行行为",
+        "未执行人工测试的结果",
+        "远程发布对象当前状态"
+      ],
+      "candidate_topics": [
+        "Next-6",
+        "bezier",
+        "mouse"
+      ],
+      "reviewer_notes": "确认贝塞尔移动、回退参数、165 项测试和范围审计；未执行真实 GUI。"
+    },
+    {
+      "source_id": "SRC-015",
+      "title": "[Next-7] WindMouse 可观察鼠标移动验收报告",
+      "current_path": "docs/Issue-Next-7-windmouse-observable-motion-acceptance-report.md",
+      "path_at_commit": "docs/Issue-Next-7-windmouse-observable-motion-acceptance-report.md",
+      "source_kind": "acceptance_report",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-10T00:42:04+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-07T16:05:50.870Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "d340644799a496df2461afc4c318c30ed419385cb8d3273d102b0e46688de85d",
+      "size_bytes": 6429,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的验收结论、测试命令/数量、提交与残余风险"
+      ],
+      "cannot_prove": [
+        "报告之外的实际运行行为",
+        "未执行人工测试的结果",
+        "远程发布对象当前状态"
+      ],
+      "candidate_topics": [
+        "Next-7",
+        "WindMouse",
+        "build"
+      ],
+      "reviewer_notes": "确认 WindMouse 行为、175 项测试、PyInstaller one-dir 构建和许可证收集；实机观感待发布前人工验证。"
+    },
+    {
+      "source_id": "SRC-016",
+      "title": "通用校准模板冒烟验收说明",
+      "current_path": "docs/calibration-template-smoke-test.md",
+      "path_at_commit": "docs/calibration-template-smoke-test.md",
+      "source_kind": "smoke_test",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c3840b8f6fbf50bf1f763c121b80199f2a3a7656",
+      "git_first_seen": "2026-07-10T08:53:17+08:00",
+      "git_last_changed": "2026-07-10T08:53:17+08:00",
+      "filesystem_modified_time": "2026-07-10T00:45:56.911Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "ab220902ec3bd83b7bf1318ae138d13aa79a663e827f342103804a15eaa6b227",
+      "size_bytes": 4209,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-calibration-template-module.md",
+        "TID-calibration-template-module.md",
+        "docs/Issue-calibration-template-module-acceptance-report.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "该 smoke_test 资料直接记录的项目事实"
+      ],
+      "cannot_prove": [
+        "未由该资料直接记录的动机、实现或发布事实"
+      ],
+      "candidate_topics": [
+        "calibration-profile",
+        "manual-smoke"
+      ],
+      "reviewer_notes": "给出模板模块自动化覆盖、人工冒烟、非交互错误处理和打包边界清单。"
+    },
+    {
+      "source_id": "SRC-017",
+      "title": "TID-Action-Mode-Favorite-Forward",
+      "current_path": "docs/TID-Action-Mode-Favorite-Forward.md",
+      "path_at_commit": "docs/TID-Action-Mode-Favorite-Forward.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-10T00:42:04+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-09T15:45:44.607Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "0a6119df05f8ff220f110d9357b9b00b78f47ad684e4c0f6b0ea7f0396c19f6f",
+      "size_bytes": 23186,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-and-Codex-Prompt-Favorite-Action-Mode.md",
+        "docs/Issue-Action-Mode-Favorite-Forward-acceptance-report.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "favorite",
+        "forward",
+        "action_mode"
+      ],
+      "reviewer_notes": "结合现有代码细化 action_mode 输入、CLI 兼容、运行期收藏校准、互斥分发和测试拆分。"
+    },
+    {
+      "source_id": "SRC-018",
+      "title": "Windows WindMouse 可观察鼠标移动 TID",
+      "current_path": "docs/TID-Windows-WindMouse-Observable-Motion.md",
+      "path_at_commit": "docs/TID-Windows-WindMouse-Observable-Motion.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "90365ca33321d90ebd1f734bd6bd237ba8cb7c94",
+      "git_first_seen": "2026-07-10T00:42:04+08:00",
+      "git_last_changed": "2026-07-10T00:42:04+08:00",
+      "filesystem_modified_time": "2026-07-07T16:06:50.895Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "c372307921e9bedca2947a25f8191f5129976d7fc2d9d47e56ead7bc02ffe774",
+      "size_bytes": 5442,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "WindMouse",
+        "Windows",
+        "license"
+      ],
+      "reviewer_notes": "设计 WindMouse 1.0.2 两段移动、稳定收尾、贝塞尔回退、精确终点、打包收集和 GPL 边界。"
+    },
+    {
+      "source_id": "SRC-019",
+      "title": "BossOCR Windows Stable v1.1",
+      "current_path": "docs/windows-stable-release.md",
+      "path_at_commit": "docs/windows-stable-release.md",
+      "source_kind": "release_notes",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "8082d04cf408212560051bfacfa7588531512f69",
+      "git_first_seen": "2026-07-02T22:38:26+08:00",
+      "git_last_changed": "2026-07-12T22:26:19+08:00",
+      "filesystem_modified_time": "2026-07-02T16:00:45.580Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "f015dc2f3b8098013e56aec58d20044da36ce2896de1b10f96b0e0788d93cc3c",
+      "size_bytes": 5621,
+      "version_label": "Windows Stable v1.1",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "发布说明声称的功能范围、使用边界、资产名称与校验信息"
+      ],
+      "cannot_prove": [
+        "远程 Release 当前是否存在且附件是否仍一致",
+        "代码真实执行细节"
+      ],
+      "candidate_topics": [
+        "Windows",
+        "v1.1",
+        "release"
+      ],
+      "reviewer_notes": "记录 Windows Stable v1.1 功能、110 项测试、GUI 冒烟、单候选人真实转发验证和发布 SHA。"
+    },
+    {
+      "source_id": "SRC-020",
+      "title": "BossOCR Windows Edge Release Notes - 2026-07-02",
+      "current_path": "docs/releases/windows-edge-release-notes-2026-07-02.md",
+      "path_at_commit": "docs/releases/windows-edge-release-notes-2026-07-02.md",
+      "source_kind": "release_notes",
+      "file_format": "md",
+      "tracked_state": "ignored",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-02T15:37:01.792Z",
+      "historical_date_claim": "2026-07-02",
+      "date_confidence": "confirmed",
+      "sha256": "8734e551c13a40c707b08e4f7bf18c98f3362006e6a82c415023ebf7708fe1f1",
+      "size_bytes": 4111,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "发布说明声称的功能范围、使用边界、资产名称与校验信息"
+      ],
+      "cannot_prove": [
+        "远程 Release 当前是否存在且附件是否仍一致",
+        "代码真实执行细节"
+      ],
+      "candidate_topics": [
+        "Windows",
+        "release",
+        "2026-07-02"
+      ],
+      "reviewer_notes": "记录 2026-07-02 Windows Edge 发布范围、人工验证、资产大小与 SHA，以及后续发布步骤。"
+    },
+    {
+      "source_id": "SRC-021",
+      "title": "BossOCR Windows Stable v1.2",
+      "current_path": "docs/releases/windows-stable-v1.2.md",
+      "path_at_commit": "docs/releases/windows-stable-v1.2.md",
+      "source_kind": "release_notes",
+      "file_format": "md",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c36d6e7549e5098a4381861de40b271e718d5f20",
+      "git_first_seen": "2026-07-12T22:38:48+08:00",
+      "git_last_changed": "2026-07-12T22:38:48+08:00",
+      "filesystem_modified_time": "2026-07-12T14:34:18.119Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "3a75c4bd4cf49019bc2f21498c06278aa41e1aedffb3b975d47671a43e55b765",
+      "size_bytes": 1563,
+      "version_label": "Windows Stable v1.2",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-calibration-template-module.md",
+        "TID-calibration-template-module.md",
+        "docs/Issue-calibration-template-module-acceptance-report.md",
+        "docs/calibration-template-smoke-test.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "发布说明声称的功能范围、使用边界、资产名称与校验信息"
+      ],
+      "cannot_prove": [
+        "远程 Release 当前是否存在且附件是否仍一致",
+        "代码真实执行细节"
+      ],
+      "candidate_topics": [
+        "Windows",
+        "v1.2",
+        "calibration-profile"
+      ],
+      "reviewer_notes": "记录 v1.2 校准模板能力、兼容边界、人工 Windows 冒烟和发布文件名。"
+    },
+    {
+      "source_id": "SRC-022",
+      "title": "BossOCR Issue-Next TID 索引",
+      "current_path": "docs/tid/next/README.md",
+      "path_at_commit": "docs/tid/next/README.md",
+      "source_kind": "documentation_index",
+      "file_format": "md",
+      "tracked_state": "untracked",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-25T11:47:29.244Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "911039ee06307065d12a103969891489c1bf4ecfa812dec064a13080df3083f4",
+      "size_bytes": 2759,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "low",
+      "can_prove": [
+        "该 documentation_index 资料直接记录的项目事实"
+      ],
+      "cannot_prove": [
+        "未由该资料直接记录的动机、实现或发布事实"
+      ],
+      "candidate_topics": [
+        "TID",
+        "index"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-023",
+      "title": "BossOCR PRD：新增收藏处理模式与 Codex TID 生成提示词",
+      "current_path": "PRD-and-Codex-Prompt-Favorite-Action-Mode.md",
+      "path_at_commit": "PRD-and-Codex-Prompt-Favorite-Action-Mode.md",
+      "source_kind": "prd",
+      "file_format": "md",
+      "tracked_state": "ignored",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-09T15:28:12.370Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "5ea17ebea1ac8ff3587c0dc3de25a2e1ef0d2752f95d7c1cf97547d5995f4007",
+      "size_bytes": 14608,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/TID-Action-Mode-Favorite-Forward.md",
+        "docs/Issue-Action-Mode-Favorite-Forward-acceptance-report.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "favorite",
+        "forward",
+        "action_mode"
+      ],
+      "reviewer_notes": "提出互斥 favorite/forward action_mode、收藏按钮区域校准、中间 60% 落点和保留原转发链路。"
+    },
+    {
+      "source_id": "SRC-024",
+      "title": "PRD-calibration-template-module",
+      "current_path": "PRD-calibration-template-module.md",
+      "path_at_commit": "PRD-calibration-template-module.md",
+      "source_kind": "prd",
+      "file_format": "md",
+      "tracked_state": "ignored",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-09T16:58:56.788Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "bfc32dfb053c99c421cf778f6ad5fce404df84217cff6c8251108cb5262f5727",
+      "size_bytes": 10533,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "TID-calibration-template-module.md",
+        "docs/Issue-calibration-template-module-acceptance-report.md",
+        "docs/calibration-template-smoke-test.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "calibration-profile",
+        "persistence"
+      ],
+      "reviewer_notes": "定义通用、跨动作模式的 11 区域校准模板、现有字段复用、旧手工流程保留和模板异常回退。"
+    },
+    {
+      "source_id": "SRC-025",
+      "title": "TID-calibration-template-module",
+      "current_path": "TID-calibration-template-module.md",
+      "path_at_commit": "TID-calibration-template-module.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "ignored",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-09T23:58:02.552Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "bd6856a045e782bb318460e6a8875c039e9b70479e7d0dcb888566107f6805d6",
+      "size_bytes": 25790,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-calibration-template-module.md",
+        "docs/Issue-calibration-template-module-acceptance-report.md",
+        "docs/calibration-template-smoke-test.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "calibration-profile",
+        "JSON",
+        "registry"
+      ],
+      "reviewer_notes": "设计多文件 JSON 模板、步骤注册表、独立生成入口、主程序注入、非交互加载和 9 个实施 Change。"
+    },
+    {
+      "source_id": "SRC-026",
+      "title": "Windows RapidOCR 接入与验证报告",
+      "current_path": "WINDOWS_OCR_IMPLEMENTATION_REPORT.md",
+      "path_at_commit": "WINDOWS_OCR_IMPLEMENTATION_REPORT.md",
+      "source_kind": "implementation_report",
+      "file_format": "md",
+      "tracked_state": "ignored",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-01T00:32:51.407Z",
+      "historical_date_claim": "2026-07-01",
+      "date_confidence": "confirmed",
+      "sha256": "daf59e8974bffb36186fe453fc4ffad281d5098fe14d628d0fed2ee862c33174",
+      "size_bytes": 7695,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "报告所声称的实现范围、环境、测试结果和未完成边界"
+      ],
+      "cannot_prove": [
+        "原始业务动机的完整讨论",
+        "未执行的实机验证结果",
+        "正式发布状态"
+      ],
+      "candidate_topics": [
+        "Windows",
+        "RapidOCR",
+        "DPI"
+      ],
+      "reviewer_notes": "记录 Windows RapidOCR 接入、DPI 拖框、真实静态图推理、29 项测试与尚未完成的真实 BOSS 页面核对。"
+    },
+    {
+      "source_id": "SRC-027",
+      "title": "Windows 环境初始化与测试报告",
+      "current_path": "WINDOWS_SETUP_REPORT.md",
+      "path_at_commit": "WINDOWS_SETUP_REPORT.md",
+      "source_kind": "environment_setup_report",
+      "file_format": "md",
+      "tracked_state": "ignored",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-01T00:32:51.407Z",
+      "historical_date_claim": "2026-06-30",
+      "date_confidence": "confirmed",
+      "sha256": "a0a8b6d3dcfa4fc86d74bd83455885ed8df2569f5856ee6af1a2d874c44fd2e0",
+      "size_bytes": 4607,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的环境、依赖、导入和测试结果"
+      ],
+      "cannot_prove": [
+        "产品功能已完整实现",
+        "真实业务页面已验收",
+        "正式发布状态"
+      ],
+      "candidate_topics": [
+        "Windows",
+        "environment",
+        "RapidOCR"
+      ],
+      "reviewer_notes": "记录 Windows 环境初始化、依赖版本、13 项测试与真实拖框/DPI 尚待验证的边界。"
+    },
+    {
+      "source_id": "SRC-028",
+      "title": "BossOCR Windows 正式版 v1.0 发布前基线",
+      "current_path": "Windows-current-baseline-before-official-v1.0.md",
+      "path_at_commit": "Windows-current-baseline-before-official-v1.0.md",
+      "source_kind": "baseline_handoff_document",
+      "file_format": "md",
+      "tracked_state": "ignored",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-03T14:51:35.388Z",
+      "historical_date_claim": "2026-07-03",
+      "date_confidence": "confirmed",
+      "sha256": "6bfeb9b6e2783a64edc6f6fb95e4b6fb3a9568d528ec53cb876473636292445d",
+      "size_bytes": 6457,
+      "version_label": "Windows official v1.0 candidate",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "文档声称的基线 commit、功能范围、测试与冻结边界"
+      ],
+      "cannot_prove": [
+        "远程分支/Release 当前状态",
+        "文档之后发生的变更"
+      ],
+      "candidate_topics": [
+        "Windows",
+        "baseline",
+        "v1.0"
+      ],
+      "reviewer_notes": "冻结 2026-07-03 Windows 正式版候选基线，汇总 Issue #1、Next-1 至 Next-6、P0 hotfix、测试和发布前门槛。"
+    },
+    {
+      "source_id": "SRC-029",
+      "title": "[Next-1] TID V1.0：转发流程点击区域启动前校准",
+      "current_path": "docs/tid/next/Issue-Next-1-focus-restore-calibration-TID-V1.0.md",
+      "path_at_commit": "docs/tid/next/Issue-Next-1-focus-restore-calibration-TID-V1.0.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "untracked",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-01T14:04:41.955Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "caa35e235fe8331e592496ab667617c6c3b88e0518b0e73164b7676be5883ac3",
+      "size_bytes": 13558,
+      "version_label": "V1.0",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/Issue-Next-1-focus-restore-calibration-acceptance-report.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "Next-1"
+      ],
+      "reviewer_notes": "设计运行期焦点恢复区域校准，取消或失败回退默认区域，且所有转发退出路径统一使用区域内精确落点。"
+    },
+    {
+      "source_id": "SRC-030",
+      "title": "[Next-2] TID V1.0：关键词规则新增 not 排除逻辑",
+      "current_path": "docs/tid/next/Issue-Next-2-keyword-not-rule-TID-V1.0.md",
+      "path_at_commit": "docs/tid/next/Issue-Next-2-keyword-not-rule-TID-V1.0.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "untracked",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-01T14:36:09.368Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "7e34b32d97d5d6ed72005fac2f917ac3ac869ed35bc56c2ce06ea78cd83ea55f",
+      "size_bytes": 13687,
+      "version_label": "V1.0",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/Issue-Next-2-keyword-not-rule-acceptance-report.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "Next-2"
+      ],
+      "reviewer_notes": "设计 not 原子、not > and > or 优先级、每个 OR 分支必须含正向条件和完整规则 OCR 二次确认。"
+    },
+    {
+      "source_id": "SRC-031",
+      "title": "[Next-3] TID V1.0：转发流程全部关键点击点启动前校准",
+      "current_path": "docs/tid/next/Issue-Next-3-forward-click-calibration-TID-V1.0.md",
+      "path_at_commit": "docs/tid/next/Issue-Next-3-forward-click-calibration-TID-V1.0.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "untracked",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-02T00:21:29.658Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "b2dc920608551df785ffad2598f39a685dce55983eb9b1fb500acffe67df3db9",
+      "size_bytes": 25029,
+      "version_label": "V1.0",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/Issue-Next-3-forward-click-calibration-acceptance-report.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "Next-3"
+      ],
+      "reviewer_notes": "设计五个转发点击区域的原子校准、最小导航点击、默认回退和转发按钮校准期不点击的安全门。"
+    },
+    {
+      "source_id": "SRC-032",
+      "title": "[Next-4] TID V1.0：关键词规则支持 `any(...)` 分组表达式",
+      "current_path": "docs/tid/next/Issue-Next-4-keyword-any-group-TID-V1.0.md",
+      "path_at_commit": "docs/tid/next/Issue-Next-4-keyword-any-group-TID-V1.0.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "untracked",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-02T16:17:56.548Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "5056c7360227e06f335f0038894890236a5da102965cd0841f0a71a879df21c8",
+      "size_bytes": 19212,
+      "version_label": "V1.0",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/Issue-Next-4-keyword-any-group-acceptance-report.md",
+        "docs/tid/next/Issue-Next-4-keyword-any-group-TID-V1.1.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "Next-4"
+      ],
+      "reviewer_notes": "设计 any(...) 作为独立原子参与外层逻辑，禁止展开为顶层 OR，并覆盖 parser/matcher 反例。 V1.0/V1.1 的修订或替代关系未见正文明确声明，本轮不建立 previous_version/next_version。"
+    },
+    {
+      "source_id": "SRC-033",
+      "title": "[Next-4] TID V1.1：关键词规则支持 `any(...)` 分组表达式",
+      "current_path": "docs/tid/next/Issue-Next-4-keyword-any-group-TID-V1.1.md",
+      "path_at_commit": "docs/tid/next/Issue-Next-4-keyword-any-group-TID-V1.1.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "untracked",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-02T16:26:02.210Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "2bc014246abb07b04cbddf7ce193c8f8956edd48c67a19c585c053a06d797892",
+      "size_bytes": 19986,
+      "version_label": "V1.1",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/Issue-Next-4-keyword-any-group-acceptance-report.md",
+        "docs/tid/next/Issue-Next-4-keyword-any-group-TID-V1.0.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "Next-4"
+      ],
+      "reviewer_notes": "强化 any 原子不可展开、parser/matcher 必须同时可发布、重复项规范化拒绝和阻断验收反例。 V1.0/V1.1 的修订或替代关系未见正文明确声明，本轮不建立 previous_version/next_version。"
+    },
+    {
+      "source_id": "SRC-034",
+      "title": "[Next-5] TID V1.0：启动及批次刷新后自动应用「最近没看过」筛选并点击首位候选人",
+      "current_path": "docs/tid/next/Issue-Next-5-batch-filter-first-candidate-TID-V1.0.md",
+      "path_at_commit": "docs/tid/next/Issue-Next-5-batch-filter-first-candidate-TID-V1.0.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "untracked",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-03T00:06:01.879Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "e3cff944e897b1020121d9a2e9b4058227e625bfbd617a5b052b415af6955367",
+      "size_bytes": 29938,
+      "version_label": "V1.0",
+      "previous_version": null,
+      "next_version": "SRC-035",
+      "related_files": [
+        "docs/Issue-Next-5-batch-filter-first-candidate-acceptance-report.md",
+        "docs/tid/next/Issue-Next-5-batch-filter-first-candidate-TID-V1.1.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "Next-5"
+      ],
+      "reviewer_notes": "设计四区域筛选归位、启动与批次边界接入、原子回退以及运行中失败安全停止。"
+    },
+    {
+      "source_id": "SRC-035",
+      "title": "[Next-5] TID V1.1：启动及批次刷新后自动应用「最近没看过」筛选并点击首位候选人",
+      "current_path": "docs/tid/next/Issue-Next-5-batch-filter-first-candidate-TID-V1.1.md",
+      "path_at_commit": "docs/tid/next/Issue-Next-5-batch-filter-first-candidate-TID-V1.1.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "untracked",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-03T00:12:08.169Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "01e23f736d981bbeee07f16dc4d6d3d1e2f8b9a81d7301a74182a2a7daff7abb",
+      "size_bytes": 22756,
+      "version_label": "V1.1",
+      "previous_version": "SRC-034",
+      "next_version": null,
+      "related_files": [
+        "docs/Issue-Next-5-batch-filter-first-candidate-acceptance-report.md",
+        "docs/tid/next/Issue-Next-5-batch-filter-first-candidate-TID-V1.0.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "Next-5"
+      ],
+      "reviewer_notes": "明确基于 V1.0 修订，补充启动准备不计时、首次 apply 失败不可回退、UI 事实与四段式 Change。"
+    },
+    {
+      "source_id": "SRC-036",
+      "title": "[Next-6][P2] TID V1.0：优化鼠标移动轨迹——贝塞尔路径、途中抖动与慢-快-慢三段变速",
+      "current_path": "docs/tid/next/Issue-Next-6-human-mouse-motion-TID-V1.0.md",
+      "path_at_commit": "docs/tid/next/Issue-Next-6-human-mouse-motion-TID-V1.0.md",
+      "source_kind": "tid",
+      "file_format": "md",
+      "tracked_state": "untracked",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-03T14:08:58.540Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "96bde547398761f0e8ac4f3826601c8293602b9adfc32d4bcc6e60fdc26ac14b",
+      "size_bytes": 20885,
+      "version_label": "V1.0",
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "docs/Issue-Next-6-human-mouse-motion-acceptance-report.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "critical",
+      "can_prove": [
+        "当时记录的目标、非目标、设计意图、风险与计划验收条件"
+      ],
+      "cannot_prove": [
+        "最终代码是否按计划实现",
+        "自动化或人工验收是否通过",
+        "是否已进入发布"
+      ],
+      "candidate_topics": [
+        "Next-6"
+      ],
+      "reviewer_notes": "设计贝塞尔路径、smoothstep 慢快慢、途中抖动、精确终点和 --simple-mouse 回退，强调仅用于可观察性。"
+    },
+    {
+      "source_id": "SRC-037",
+      "title": "windows-release.yml",
+      "current_path": ".github/workflows/windows-release.yml",
+      "path_at_commit": ".github/workflows/windows-release.yml",
+      "source_kind": "github_actions",
+      "file_format": "yml",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "f9978ca44835562d21365bc78c6cad8ff91b6c99",
+      "git_first_seen": "2026-07-01T13:57:53+08:00",
+      "git_last_changed": "2026-07-01T13:57:53+08:00",
+      "filesystem_modified_time": "2026-07-01T13:42:42.868Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "f0d31699662d0ef3df687807cf4d4dc9326480d71148d46941c5ce27fb6db71c",
+      "size_bytes": 2231,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "当前构建、测试、打包与发布自动化步骤"
+      ],
+      "cannot_prove": [
+        "某次远程运行实际成功",
+        "历史发布附件当前可下载"
+      ],
+      "candidate_topics": [
+        "CI",
+        "release"
+      ],
+      "reviewer_notes": "定义 issue-* tag 触发的 Windows GitHub Actions：安装、测试、PyInstaller、安全冒烟、压缩、校验和 Release 创建。"
+    },
+    {
+      "source_id": "SRC-038",
+      "title": "build-windows.bat",
+      "current_path": "build-windows.bat",
+      "path_at_commit": "build-windows.bat",
+      "source_kind": "build_script",
+      "file_format": "bat",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "f9978ca44835562d21365bc78c6cad8ff91b6c99",
+      "git_first_seen": "2026-07-01T13:57:53+08:00",
+      "git_last_changed": "2026-07-01T13:57:53+08:00",
+      "filesystem_modified_time": "2026-07-01T13:42:42.873Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "0c9097624389b2998531ad8eeba446302c660bab37610466eea68e5a2b8ba63f",
+      "size_bytes": 1149,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "当前构建、测试、打包与发布自动化步骤"
+      ],
+      "cannot_prove": [
+        "某次远程运行实际成功",
+        "历史发布附件当前可下载"
+      ],
+      "candidate_topics": [
+        "Windows",
+        "build",
+        "smoke"
+      ],
+      "reviewer_notes": "定义本地 Windows 构建链：安装依赖、全量 unittest、PyInstaller、安全冒烟、ZIP 和 SHA 查看。"
+    },
+    {
+      "source_id": "SRC-039",
+      "title": "-*- mode: python ; coding: utf-8 -*-",
+      "current_path": "BossOCR.spec",
+      "path_at_commit": "BossOCR.spec",
+      "source_kind": "build_script",
+      "file_format": "spec",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "90365ca33321d90ebd1f734bd6bd237ba8cb7c94",
+      "git_first_seen": "2026-07-01T13:57:53+08:00",
+      "git_last_changed": "2026-07-10T00:42:04+08:00",
+      "filesystem_modified_time": "2026-07-07T14:27:42.230Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "ed210ec28fdeb2b46f1fd61e8cd7e0537a8e5e27ccaaa6c7567d297ff602870b",
+      "size_bytes": 1684,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "当前构建、测试、打包与发布自动化步骤"
+      ],
+      "cannot_prove": [
+        "某次远程运行实际成功",
+        "历史发布附件当前可下载"
+      ],
+      "candidate_topics": [
+        "PyInstaller",
+        "WindMouse",
+        "RapidOCR"
+      ],
+      "reviewer_notes": "定义 one-dir PyInstaller 收集 RapidOCR、WindMouse PyAutoGUI backend、metadata/许可证和 GUI 自动化依赖。"
+    },
+    {
+      "source_id": "SRC-040",
+      "title": "setup.bat",
+      "current_path": "setup.bat",
+      "path_at_commit": "setup.bat",
+      "source_kind": "environment_setup_script",
+      "file_format": "bat",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "6bcc49a8af61af58cca147b1fd8182e086223c93",
+      "git_first_seen": "2026-06-30T21:58:23+08:00",
+      "git_last_changed": "2026-07-01T08:30:27+08:00",
+      "filesystem_modified_time": "2026-07-01T00:52:53.514Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "564d256435246b3a29ce225030c0a1afab4f94881cebe8c6facca5595c83d476",
+      "size_bytes": 1312,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "该 environment_setup_script 资料直接记录的项目事实"
+      ],
+      "cannot_prove": [
+        "未由该资料直接记录的动机、实现或发布事实"
+      ],
+      "candidate_topics": [
+        "Windows",
+        "setup"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-041",
+      "title": "start.bat",
+      "current_path": "start.bat",
+      "path_at_commit": "start.bat",
+      "source_kind": "run_script",
+      "file_format": "bat",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "3d097695138076809a56b4094f898246cdf34f12",
+      "git_first_seen": "2026-06-30T21:58:23+08:00",
+      "git_last_changed": "2026-06-30T21:58:23+08:00",
+      "filesystem_modified_time": "2026-06-30T15:41:29.558Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "b9857872195a8b6d41abaf991931182b1b6ad3f8722fb72e57d82bc7922aa1ce",
+      "size_bytes": 844,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "该 run_script 资料直接记录的项目事实"
+      ],
+      "cannot_prove": [
+        "未由该资料直接记录的动机、实现或发布事实"
+      ],
+      "candidate_topics": [
+        "Windows",
+        "startup"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-042",
+      "title": "requirements.txt",
+      "current_path": "requirements.txt",
+      "path_at_commit": "requirements.txt",
+      "source_kind": "dependency_manifest",
+      "file_format": "txt",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "90365ca33321d90ebd1f734bd6bd237ba8cb7c94",
+      "git_first_seen": "2026-06-30T21:58:23+08:00",
+      "git_last_changed": "2026-07-10T00:42:04+08:00",
+      "filesystem_modified_time": "2026-07-07T14:27:40.955Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "f52be9773c952be5d70458139fb60a432fb95b3209fe3fb6bcf846d4a79425a9",
+      "size_bytes": 129,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "该版本声明的直接依赖与版本约束"
+      ],
+      "cannot_prove": [
+        "依赖已成功安装",
+        "运行时实际加载版本",
+        "功能验收结果"
+      ],
+      "candidate_topics": [
+        "dependencies",
+        "WindMouse"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-043",
+      "title": "Cross-platform RapidOCR dependencies. Use Python 3.10+ (3.11 x64 preferred).",
+      "current_path": "requirements-ocr.txt",
+      "path_at_commit": "requirements-ocr.txt",
+      "source_kind": "dependency_manifest",
+      "file_format": "txt",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "6bcc49a8af61af58cca147b1fd8182e086223c93",
+      "git_first_seen": "2026-07-01T08:30:27+08:00",
+      "git_last_changed": "2026-07-01T08:30:27+08:00",
+      "filesystem_modified_time": "2026-07-01T00:52:53.513Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "e514962ce682768cf3d755d4a0705ac3026dffb8d24b179e53284ca9d17d9220",
+      "size_bytes": 123,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "该版本声明的直接依赖与版本约束"
+      ],
+      "cannot_prove": [
+        "依赖已成功安装",
+        "运行时实际加载版本",
+        "功能验收结果"
+      ],
+      "candidate_topics": [
+        "RapidOCR",
+        "dependencies"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-044",
+      "title": "requirements-build.txt",
+      "current_path": "requirements-build.txt",
+      "path_at_commit": "requirements-build.txt",
+      "source_kind": "dependency_manifest",
+      "file_format": "txt",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "f9978ca44835562d21365bc78c6cad8ff91b6c99",
+      "git_first_seen": "2026-07-01T13:57:53+08:00",
+      "git_last_changed": "2026-07-01T13:57:53+08:00",
+      "filesystem_modified_time": "2026-07-01T13:42:42.877Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "b5aad196099f7780b84c9cf3037a85bc52282fa65d2ed965cdd7a8be6137dcdb",
+      "size_bytes": 21,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "low",
+      "can_prove": [
+        "该版本声明的直接依赖与版本约束"
+      ],
+      "cannot_prove": [
+        "依赖已成功安装",
+        "运行时实际加载版本",
+        "功能验收结果"
+      ],
+      "candidate_topics": [
+        "PyInstaller"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-045",
+      "title": "BossOCR-Windows-x64.sha256.txt",
+      "current_path": "release/BossOCR-Windows-x64.sha256.txt",
+      "path_at_commit": "release/BossOCR-Windows-x64.sha256.txt",
+      "source_kind": "release_artifact_manifest",
+      "file_format": "txt",
+      "tracked_state": "ignored",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-12T14:37:55.045Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "14d172b40f133e4b1a7f3b39fb897c807063b9b297cf3ac5c14fce0d62b43527",
+      "size_bytes": 91,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "本地校验文件记录的摘要值和目标文件名"
+      ],
+      "cannot_prove": [
+        "该摘要对应哪一个正式 Release",
+        "远程附件仍存在且内容一致"
+      ],
+      "candidate_topics": [
+        "release",
+        "sha256"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-046",
+      "title": "-*- coding: utf-8 -*-",
+      "current_path": "simple_brush.py",
+      "path_at_commit": "simple_brush.py",
+      "source_kind": "source_code",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c36d6e7549e5098a4381861de40b271e718d5f20",
+      "git_first_seen": "2026-06-30T21:58:23+08:00",
+      "git_last_changed": "2026-07-12T22:38:48+08:00",
+      "filesystem_modified_time": "2026-07-12T14:07:11.255Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "b592dc22c477cabe4ddc4896169c79469a799278bf19e09983f6e106ccc70029",
+      "size_bytes": 74339,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前检出版本实际实现的控制流与数据结构"
+      ],
+      "cannot_prove": [
+        "原始业务动机",
+        "历史首次提出时间",
+        "人工验收结果"
+      ],
+      "candidate_topics": [
+        "main-loop",
+        "actions",
+        "automation"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-047",
+      "title": "mouse_motion.py",
+      "current_path": "mouse_motion.py",
+      "path_at_commit": "mouse_motion.py",
+      "source_kind": "source_code",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "90365ca33321d90ebd1f734bd6bd237ba8cb7c94",
+      "git_first_seen": "2026-07-10T00:42:04+08:00",
+      "git_last_changed": "2026-07-10T00:42:04+08:00",
+      "filesystem_modified_time": "2026-07-07T16:13:21.206Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "2a4e28a6855bdb7d3c524f5e2c064bdcf1b655d670afe7a6b80924caf3ddab80",
+      "size_bytes": 4130,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前检出版本实际实现的控制流与数据结构"
+      ],
+      "cannot_prove": [
+        "原始业务动机",
+        "历史首次提出时间",
+        "人工验收结果"
+      ],
+      "candidate_topics": [
+        "WindMouse",
+        "bezier"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-048",
+      "title": "ocr_calibration.py",
+      "current_path": "ocr_calibration.py",
+      "path_at_commit": "ocr_calibration.py",
+      "source_kind": "source_code",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "3a512ed3c65296d92eef55c6355312547a716b27",
+      "git_first_seen": "2026-06-30T23:04:29+08:00",
+      "git_last_changed": "2026-07-01T22:10:34+08:00",
+      "filesystem_modified_time": "2026-07-01T14:09:10.646Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "484a041fba90948597b66615691da63b82d942aa3c181a212ade96f6212be551",
+      "size_bytes": 7505,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前检出版本实际实现的控制流与数据结构"
+      ],
+      "cannot_prove": [
+        "原始业务动机",
+        "历史首次提出时间",
+        "人工验收结果"
+      ],
+      "candidate_topics": [
+        "calibration",
+        "DPI"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-049",
+      "title": "ocr_detector.py",
+      "current_path": "ocr_detector.py",
+      "path_at_commit": "ocr_detector.py",
+      "source_kind": "source_code",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "55456bbb79a22dd0cd311782f6069e35d7d22f83",
+      "git_first_seen": "2026-06-30T23:04:29+08:00",
+      "git_last_changed": "2026-07-01T13:53:57+08:00",
+      "filesystem_modified_time": "2026-07-01T13:42:42.874Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "24de8f57e79b84f86229c0db3c4a799753a7ae6341971096b1c0b37bff40ad40",
+      "size_bytes": 7353,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前检出版本实际实现的控制流与数据结构"
+      ],
+      "cannot_prove": [
+        "原始业务动机",
+        "历史首次提出时间",
+        "人工验收结果"
+      ],
+      "candidate_topics": [
+        "OCR",
+        "scan",
+        "confirmation"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-050",
+      "title": "ocr_text.py",
+      "current_path": "ocr_text.py",
+      "path_at_commit": "ocr_text.py",
+      "source_kind": "source_code",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "5115ede13cae59099a9cf306a18c42b22cf2fa6d",
+      "git_first_seen": "2026-06-30T23:04:29+08:00",
+      "git_last_changed": "2026-07-03T00:35:16+08:00",
+      "filesystem_modified_time": "2026-07-02T16:34:34.920Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "c7faed35eb1c0c9a0bc288c186dc9ca8b876919bae12bc5206385878efc24f7d",
+      "size_bytes": 13428,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前检出版本实际实现的控制流与数据结构"
+      ],
+      "cannot_prove": [
+        "原始业务动机",
+        "历史首次提出时间",
+        "人工验收结果"
+      ],
+      "candidate_topics": [
+        "keyword-rule",
+        "parser",
+        "matcher"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-051",
+      "title": "ocr_mac_demo.py",
+      "current_path": "ocr_mac_demo.py",
+      "path_at_commit": "ocr_mac_demo.py",
+      "source_kind": "source_code",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "6bcc49a8af61af58cca147b1fd8182e086223c93",
+      "git_first_seen": "2026-06-30T23:04:29+08:00",
+      "git_last_changed": "2026-07-01T08:30:27+08:00",
+      "filesystem_modified_time": "2026-07-01T00:52:53.511Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "62ceaac727778a0626fdd9412a030682c973d3d329db83cb8062e65bbeb9b331",
+      "size_bytes": 1923,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "low",
+      "can_prove": [
+        "当前检出版本实际实现的控制流与数据结构"
+      ],
+      "cannot_prove": [
+        "原始业务动机",
+        "历史首次提出时间",
+        "人工验收结果"
+      ],
+      "candidate_topics": [
+        "macOS",
+        "OCR",
+        "demo"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-052",
+      "title": "ocr_fixture_demo.py",
+      "current_path": "ocr_fixture_demo.py",
+      "path_at_commit": "ocr_fixture_demo.py",
+      "source_kind": "source_code",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "012bfc418649f9eed7fbfcd89caa35ba2e13b165",
+      "git_first_seen": "2026-06-30T23:04:29+08:00",
+      "git_last_changed": "2026-06-30T23:04:29+08:00",
+      "filesystem_modified_time": "2026-07-01T00:52:53.511Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "47b7776b3e5d7521d31c78ebd8a97fbcb1a1c22e2f26575e4ee4e5db41935d77",
+      "size_bytes": 2680,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "low",
+      "can_prove": [
+        "当前检出版本实际实现的控制流与数据结构"
+      ],
+      "cannot_prove": [
+        "原始业务动机",
+        "历史首次提出时间",
+        "人工验收结果"
+      ],
+      "candidate_topics": [
+        "OCR",
+        "fixture",
+        "demo"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-053",
+      "title": "calibration_profiles.py",
+      "current_path": "calibration_profiles.py",
+      "path_at_commit": "calibration_profiles.py",
+      "source_kind": "source_code",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c3840b8f6fbf50bf1f763c121b80199f2a3a7656",
+      "git_first_seen": "2026-07-10T08:53:17+08:00",
+      "git_last_changed": "2026-07-10T08:53:17+08:00",
+      "filesystem_modified_time": "2026-07-10T00:15:43.835Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "c972ccc8401ffdf0914b23b8b27bdb614e110dc5ca4087374a450e2f486a4294",
+      "size_bytes": 11956,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-calibration-template-module.md",
+        "TID-calibration-template-module.md",
+        "docs/Issue-calibration-template-module-acceptance-report.md",
+        "docs/calibration-template-smoke-test.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前检出版本实际实现的控制流与数据结构"
+      ],
+      "cannot_prove": [
+        "原始业务动机",
+        "历史首次提出时间",
+        "人工验收结果"
+      ],
+      "candidate_topics": [
+        "calibration-profile",
+        "JSON"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-054",
+      "title": "calibration_steps.py",
+      "current_path": "calibration_steps.py",
+      "path_at_commit": "calibration_steps.py",
+      "source_kind": "source_code",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c3840b8f6fbf50bf1f763c121b80199f2a3a7656",
+      "git_first_seen": "2026-07-10T08:53:17+08:00",
+      "git_last_changed": "2026-07-10T08:53:17+08:00",
+      "filesystem_modified_time": "2026-07-10T00:17:35.420Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "e67130173e287ad45eb2ecc31f843d0d28a4d74c66477bfbf23cca963e5c10e3",
+      "size_bytes": 6698,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-calibration-template-module.md",
+        "TID-calibration-template-module.md",
+        "docs/Issue-calibration-template-module-acceptance-report.md",
+        "docs/calibration-template-smoke-test.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前检出版本实际实现的控制流与数据结构"
+      ],
+      "cannot_prove": [
+        "原始业务动机",
+        "历史首次提出时间",
+        "人工验收结果"
+      ],
+      "candidate_topics": [
+        "calibration-profile",
+        "registry"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-055",
+      "title": "calibration_template.py",
+      "current_path": "calibration_template.py",
+      "path_at_commit": "calibration_template.py",
+      "source_kind": "source_code",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c36d6e7549e5098a4381861de40b271e718d5f20",
+      "git_first_seen": "2026-07-10T08:53:17+08:00",
+      "git_last_changed": "2026-07-12T22:38:48+08:00",
+      "filesystem_modified_time": "2026-07-12T14:16:49.788Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "619c6e507eecb518a8e3434027505bf52ae92597f19b41bf87ff4dc78d03d5e6",
+      "size_bytes": 6790,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-calibration-template-module.md",
+        "TID-calibration-template-module.md",
+        "docs/Issue-calibration-template-module-acceptance-report.md",
+        "docs/calibration-template-smoke-test.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前检出版本实际实现的控制流与数据结构"
+      ],
+      "cannot_prove": [
+        "原始业务动机",
+        "历史首次提出时间",
+        "人工验收结果"
+      ],
+      "candidate_topics": [
+        "calibration-profile",
+        "entrypoint"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-056",
+      "title": "test_calibration_profiles.py",
+      "current_path": "tests/test_calibration_profiles.py",
+      "path_at_commit": "tests/test_calibration_profiles.py",
+      "source_kind": "automated_test",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c3840b8f6fbf50bf1f763c121b80199f2a3a7656",
+      "git_first_seen": "2026-07-10T08:53:17+08:00",
+      "git_last_changed": "2026-07-10T08:53:17+08:00",
+      "filesystem_modified_time": "2026-07-10T00:44:54.360Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "cef487a69ba4ee30292cfa3ee96e6db3b1e234965f65d1bb0fb2f4833010f212",
+      "size_bytes": 11761,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-calibration-template-module.md",
+        "TID-calibration-template-module.md",
+        "docs/Issue-calibration-template-module-acceptance-report.md",
+        "docs/calibration-template-smoke-test.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前测试保护的行为契约与异常分支"
+      ],
+      "cannot_prove": [
+        "真实 GUI、浏览器和邮件环境已通过",
+        "设计动机"
+      ],
+      "candidate_topics": [
+        "calibration-profile",
+        "test"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-057",
+      "title": "test_calibration_steps.py",
+      "current_path": "tests/test_calibration_steps.py",
+      "path_at_commit": "tests/test_calibration_steps.py",
+      "source_kind": "automated_test",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c3840b8f6fbf50bf1f763c121b80199f2a3a7656",
+      "git_first_seen": "2026-07-10T08:53:17+08:00",
+      "git_last_changed": "2026-07-10T08:53:17+08:00",
+      "filesystem_modified_time": "2026-07-10T00:18:02.097Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "0652d46a9debd516cb75fed6e6dbb5de3e92ee0ea31d7ca102a86650c97a5adf",
+      "size_bytes": 2196,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-calibration-template-module.md",
+        "TID-calibration-template-module.md",
+        "docs/Issue-calibration-template-module-acceptance-report.md",
+        "docs/calibration-template-smoke-test.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前测试保护的行为契约与异常分支"
+      ],
+      "cannot_prove": [
+        "真实 GUI、浏览器和邮件环境已通过",
+        "设计动机"
+      ],
+      "candidate_topics": [
+        "calibration-profile",
+        "test"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-058",
+      "title": "test_calibration_template.py",
+      "current_path": "tests/test_calibration_template.py",
+      "path_at_commit": "tests/test_calibration_template.py",
+      "source_kind": "automated_test",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c36d6e7549e5098a4381861de40b271e718d5f20",
+      "git_first_seen": "2026-07-10T08:53:17+08:00",
+      "git_last_changed": "2026-07-12T22:38:48+08:00",
+      "filesystem_modified_time": "2026-07-12T14:17:06.574Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "d83eda6a8d04807e475ce15537418d2c97b7496030bd5e0a77ad72deb5c6a49d",
+      "size_bytes": 6646,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [
+        "PRD-calibration-template-module.md",
+        "TID-calibration-template-module.md",
+        "docs/Issue-calibration-template-module-acceptance-report.md",
+        "docs/calibration-template-smoke-test.md"
+      ],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前测试保护的行为契约与异常分支"
+      ],
+      "cannot_prove": [
+        "真实 GUI、浏览器和邮件环境已通过",
+        "设计动机"
+      ],
+      "candidate_topics": [
+        "calibration-profile",
+        "test"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-059",
+      "title": "test_mouse_motion.py",
+      "current_path": "tests/test_mouse_motion.py",
+      "path_at_commit": "tests/test_mouse_motion.py",
+      "source_kind": "automated_test",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "90365ca33321d90ebd1f734bd6bd237ba8cb7c94",
+      "git_first_seen": "2026-07-03T22:19:50+08:00",
+      "git_last_changed": "2026-07-10T00:42:04+08:00",
+      "filesystem_modified_time": "2026-07-07T16:25:37.210Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "2047ac6dc59344f3fc19416b91ea399268f1fe768f7dcfa7d038717e1fef935b",
+      "size_bytes": 25178,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前测试保护的行为契约与异常分支"
+      ],
+      "cannot_prove": [
+        "真实 GUI、浏览器和邮件环境已通过",
+        "设计动机"
+      ],
+      "candidate_topics": [
+        "mouse",
+        "WindMouse",
+        "test"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-060",
+      "title": "test_ocr_calibration.py",
+      "current_path": "tests/test_ocr_calibration.py",
+      "path_at_commit": "tests/test_ocr_calibration.py",
+      "source_kind": "automated_test",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "3a512ed3c65296d92eef55c6355312547a716b27",
+      "git_first_seen": "2026-06-30T23:04:29+08:00",
+      "git_last_changed": "2026-07-01T22:10:34+08:00",
+      "filesystem_modified_time": "2026-07-01T14:09:21.711Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "868aec514a14bd90c256ed7684628d58b154a3e8e4ba8fe14c4a71cf2d61ee23",
+      "size_bytes": 1883,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前测试保护的行为契约与异常分支"
+      ],
+      "cannot_prove": [
+        "真实 GUI、浏览器和邮件环境已通过",
+        "设计动机"
+      ],
+      "candidate_topics": [
+        "OCR",
+        "calibration",
+        "test"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-061",
+      "title": "test_ocr_detector.py",
+      "current_path": "tests/test_ocr_detector.py",
+      "path_at_commit": "tests/test_ocr_detector.py",
+      "source_kind": "automated_test",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "5115ede13cae59099a9cf306a18c42b22cf2fa6d",
+      "git_first_seen": "2026-06-30T23:04:29+08:00",
+      "git_last_changed": "2026-07-03T00:35:16+08:00",
+      "filesystem_modified_time": "2026-07-02T16:34:34.922Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "b9c2d76d6aaf1b4f15d0c0b12030f7680e9df358ee6ef665ea880354d250d12a",
+      "size_bytes": 9878,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前测试保护的行为契约与异常分支"
+      ],
+      "cannot_prove": [
+        "真实 GUI、浏览器和邮件环境已通过",
+        "设计动机"
+      ],
+      "candidate_topics": [
+        "OCR",
+        "detector",
+        "test"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-062",
+      "title": "test_ocr_text.py",
+      "current_path": "tests/test_ocr_text.py",
+      "path_at_commit": "tests/test_ocr_text.py",
+      "source_kind": "automated_test",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "5115ede13cae59099a9cf306a18c42b22cf2fa6d",
+      "git_first_seen": "2026-06-30T23:04:29+08:00",
+      "git_last_changed": "2026-07-03T00:35:16+08:00",
+      "filesystem_modified_time": "2026-07-02T16:34:34.921Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "aa15ccc0186f50d8d8eca190f74b3ff7f2276450836955a886871cf9c9de927b",
+      "size_bytes": 12950,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前测试保护的行为契约与异常分支"
+      ],
+      "cannot_prove": [
+        "真实 GUI、浏览器和邮件环境已通过",
+        "设计动机"
+      ],
+      "candidate_topics": [
+        "keyword-rule",
+        "test"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-063",
+      "title": "test_simple_brush_ocr.py",
+      "current_path": "tests/test_simple_brush_ocr.py",
+      "path_at_commit": "tests/test_simple_brush_ocr.py",
+      "source_kind": "automated_test",
+      "file_format": "py",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "main",
+      "commit_hash": "c36d6e7549e5098a4381861de40b271e718d5f20",
+      "git_first_seen": "2026-07-01T08:30:27+08:00",
+      "git_last_changed": "2026-07-12T22:38:48+08:00",
+      "filesystem_modified_time": "2026-07-12T14:07:36.259Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "104395b2ad02f3f6114e99db9299e5f0fdad2b504635f09c5486d619f58cda31",
+      "size_bytes": 132660,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "当前测试保护的行为契约与异常分支"
+      ],
+      "cannot_prove": [
+        "真实 GUI、浏览器和邮件环境已通过",
+        "设计动机"
+      ],
+      "candidate_topics": [
+        "main-loop",
+        "safety",
+        "test"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-064",
+      "title": "simple_brush.log",
+      "current_path": "logs/simple_brush.log",
+      "path_at_commit": "logs/simple_brush.log",
+      "source_kind": "runtime_log",
+      "file_format": "log",
+      "tracked_state": "ignored",
+      "branch_or_ref": "main",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": "2026-07-12T16:09:44.960Z",
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "22bec7e669cca4365ba0a9f1d80cf84355bec99e7d62e29905e11f2eb1985b7d",
+      "size_bytes": 1811793,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "restricted",
+      "contains_personal_data": true,
+      "full_read_status": "partially_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "本地运行事件、错误模式与时序的抽象证据"
+      ],
+      "cannot_prove": [
+        "无上下文情况下的业务因果",
+        "任何个人身份结论"
+      ],
+      "candidate_topics": [
+        "runtime",
+        "diagnostics",
+        "privacy"
+      ],
+      "reviewer_notes": "仅做文件规模和结构性抽查（25,963 行、1,811,793 bytes），未复制候选人、邮箱或简历原文。"
+    },
+    {
+      "source_id": "SRC-065",
+      "title": "RapidOCR Mac 阶段实施报告",
+      "current_path": null,
+      "path_at_commit": "OCR_MAC_IMPLEMENTATION_REPORT.md",
+      "source_kind": "implementation_report",
+      "file_format": "md",
+      "tracked_state": "tracked_other_branch",
+      "branch_or_ref": "origin/feature/rapidocr-mac",
+      "commit_hash": "012bfc418649f9eed7fbfcd89caa35ba2e13b165",
+      "git_first_seen": "2026-06-30T23:04:29+08:00",
+      "git_last_changed": "2026-06-30T23:04:29+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": "2026-06-30",
+      "date_confidence": "confirmed",
+      "sha256": "feae2b7b558758e1f625d31a181259203d664741bb81fcae6fa61d12c17fb3a2",
+      "size_bytes": 6655,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "报告所声称的实现范围、环境、测试结果和未完成边界"
+      ],
+      "cannot_prove": [
+        "原始业务动机的完整讨论",
+        "未执行的实机验证结果",
+        "正式发布状态"
+      ],
+      "candidate_topics": [
+        "macOS",
+        "RapidOCR",
+        "implementation"
+      ],
+      "reviewer_notes": "记录 macOS 分支 OCR 核心、13 项 mock 测试与依赖/Retina/真实模型尚未联调的边界。"
+    },
+    {
+      "source_id": "SRC-066",
+      "title": "BOSS 直聘自动刷简历工具",
+      "current_path": null,
+      "path_at_commit": "README.md",
+      "source_kind": "readme",
+      "file_format": "md",
+      "tracked_state": "tracked_other_branch",
+      "branch_or_ref": "origin/feature/rapidocr-mac",
+      "commit_hash": "012bfc418649f9eed7fbfcd89caa35ba2e13b165",
+      "git_first_seen": "2026-06-30T21:58:23+08:00",
+      "git_last_changed": "2026-06-30T21:58:23+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "87e87a422191dbd7ccce57e864fc1952517bedb7271abd135cb0874048241c7e",
+      "size_bytes": 4579,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "该版本面向用户声明的能力、用法、约束与支持平台"
+      ],
+      "cannot_prove": [
+        "代码一定符合文档",
+        "功能首次提出时间",
+        "远程发布对象状态"
+      ],
+      "candidate_topics": [
+        "macOS-branch",
+        "early-Windows",
+        "clipboard"
+      ],
+      "reviewer_notes": "macOS 分支上的早期 Windows 用户说明，仍描述剪贴板全文检测和未接通的 --no-forward，可作为旧行为快照。"
+    },
+    {
+      "source_id": "SRC-067",
+      "title": "Use Python 3.10+ for the Mac OCR development environment.",
+      "current_path": null,
+      "path_at_commit": "requirements-ocr-mac.txt",
+      "source_kind": "dependency_manifest",
+      "file_format": "txt",
+      "tracked_state": "tracked_other_branch",
+      "branch_or_ref": "origin/feature/rapidocr-mac",
+      "commit_hash": "012bfc418649f9eed7fbfcd89caa35ba2e13b165",
+      "git_first_seen": "2026-06-30T23:04:29+08:00",
+      "git_last_changed": "2026-06-30T23:04:29+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "f3b963feb8c750d5534a5845159cd236c1ef2a620d0fc5c44f7c2e1bb9ebcb30",
+      "size_bytes": 98,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "low",
+      "can_prove": [
+        "该版本声明的直接依赖与版本约束"
+      ],
+      "cannot_prove": [
+        "依赖已成功安装",
+        "运行时实际加载版本",
+        "功能验收结果"
+      ],
+      "candidate_topics": [
+        "macOS",
+        "RapidOCR",
+        "dependencies"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-068",
+      "title": "BOSS 直聘自动刷简历工具",
+      "current_path": null,
+      "path_at_commit": "README.md",
+      "source_kind": "readme",
+      "file_format": "md",
+      "tracked_state": "deleted_historical",
+      "branch_or_ref": "3d09769",
+      "commit_hash": "3d097695138076809a56b4094f898246cdf34f12",
+      "git_first_seen": "2026-06-30T21:58:23+08:00",
+      "git_last_changed": "2026-06-30T21:58:23+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": "87e87a422191dbd7ccce57e864fc1952517bedb7271abd135cb0874048241c7e",
+      "size_bytes": 4579,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "fully_read",
+      "full_read_date": "2026-07-25",
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "high",
+      "can_prove": [
+        "该版本面向用户声明的能力、用法、约束与支持平台"
+      ],
+      "cannot_prove": [
+        "代码一定符合文档",
+        "功能首次提出时间",
+        "远程发布对象状态"
+      ],
+      "candidate_topics": [
+        "initial",
+        "Windows",
+        "clipboard",
+        "fixed-coordinates"
+      ],
+      "reviewer_notes": "初始提交 README，证明项目早期依赖 Windows Edge、剪贴板全文、固定坐标、右方向键和每 100 人刷新。"
+    },
+    {
+      "source_id": "SRC-069",
+      "title": "Git tag Boss",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "git_tag",
+      "file_format": "git_ref",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "Boss",
+      "commit_hash": "6bcc49a8af61af58cca147b1fd8182e086223c93",
+      "git_first_seen": "2026-07-01T08:30:27+08:00",
+      "git_last_changed": "2026-07-01T08:30:27+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "not_applicable",
+      "full_read_date": null,
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "本地 Git 仓库中该 tag 名称及其指向的 commit"
+      ],
+      "cannot_prove": [
+        "对应 GitHub Release 是否存在",
+        "远程 tag 是否仍一致"
+      ],
+      "candidate_topics": [
+        "tag",
+        "Boss"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-070",
+      "title": "Git tag v1.0.0",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "git_tag",
+      "file_format": "git_ref",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "v1.0.0",
+      "commit_hash": "a69bb5c88b6e2df799263d3986f61963178d4b20",
+      "git_first_seen": "2026-07-01T08:52:53+08:00",
+      "git_last_changed": "2026-07-01T08:52:53+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "not_applicable",
+      "full_read_date": null,
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "本地 Git 仓库中该 tag 名称及其指向的 commit"
+      ],
+      "cannot_prove": [
+        "对应 GitHub Release 是否存在",
+        "远程 tag 是否仍一致"
+      ],
+      "candidate_topics": [
+        "tag",
+        "v1.0.0"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-071",
+      "title": "Git tag issue-1-v1.0",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "git_tag",
+      "file_format": "git_ref",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "issue-1-v1.0",
+      "commit_hash": "f9978ca44835562d21365bc78c6cad8ff91b6c99",
+      "git_first_seen": "2026-07-01T13:57:53+08:00",
+      "git_last_changed": "2026-07-01T13:57:53+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "not_applicable",
+      "full_read_date": null,
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "本地 Git 仓库中该 tag 名称及其指向的 commit"
+      ],
+      "cannot_prove": [
+        "对应 GitHub Release 是否存在",
+        "远程 tag 是否仍一致"
+      ],
+      "candidate_topics": [
+        "tag",
+        "issue-1-v1.0"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-072",
+      "title": "Git tag windows-stable-v1.0",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "git_tag",
+      "file_format": "git_ref",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "windows-stable-v1.0",
+      "commit_hash": "9b8c1f8751c10f913149e060160d68e945d6369a",
+      "git_first_seen": "2026-07-02T22:38:26+08:00",
+      "git_last_changed": "2026-07-02T22:38:26+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "not_applicable",
+      "full_read_date": null,
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "本地 Git 仓库中该 tag 名称及其指向的 commit"
+      ],
+      "cannot_prove": [
+        "对应 GitHub Release 是否存在",
+        "远程 tag 是否仍一致"
+      ],
+      "candidate_topics": [
+        "tag",
+        "windows-stable-v1.0"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-073",
+      "title": "Git tag windows-stable-v1.1",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "git_tag",
+      "file_format": "git_ref",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "windows-stable-v1.1",
+      "commit_hash": "335dcf7017520ecf752f51b6a8a75319d479654d",
+      "git_first_seen": "2026-07-02T23:52:18+08:00",
+      "git_last_changed": "2026-07-02T23:52:18+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "not_applicable",
+      "full_read_date": null,
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "本地 Git 仓库中该 tag 名称及其指向的 commit"
+      ],
+      "cannot_prove": [
+        "对应 GitHub Release 是否存在",
+        "远程 tag 是否仍一致"
+      ],
+      "candidate_topics": [
+        "tag",
+        "windows-stable-v1.1"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-074",
+      "title": "Git tag v1.1",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "git_tag",
+      "file_format": "git_ref",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "v1.1",
+      "commit_hash": "90365ca33321d90ebd1f734bd6bd237ba8cb7c94",
+      "git_first_seen": "2026-07-10T00:42:04+08:00",
+      "git_last_changed": "2026-07-10T00:42:04+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "not_applicable",
+      "full_read_date": null,
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "本地 Git 仓库中该 tag 名称及其指向的 commit"
+      ],
+      "cannot_prove": [
+        "对应 GitHub Release 是否存在",
+        "远程 tag 是否仍一致"
+      ],
+      "candidate_topics": [
+        "tag",
+        "v1.1"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-075",
+      "title": "Git tag v1.2",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "git_tag",
+      "file_format": "git_ref",
+      "tracked_state": "tracked_current",
+      "branch_or_ref": "v1.2",
+      "commit_hash": "c36d6e7549e5098a4381861de40b271e718d5f20",
+      "git_first_seen": "2026-07-12T22:38:48+08:00",
+      "git_last_changed": "2026-07-12T22:38:48+08:00",
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "not_applicable",
+      "full_read_date": null,
+      "readable": true,
+      "access_problem": null,
+      "historical_relevance": "medium",
+      "can_prove": [
+        "本地 Git 仓库中该 tag 名称及其指向的 commit"
+      ],
+      "cannot_prove": [
+        "对应 GitHub Release 是否存在",
+        "远程 tag 是否仍一致"
+      ],
+      "candidate_topics": [
+        "tag",
+        "v1.2"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-076",
+      "title": "GitHub Issues（开放与关闭）",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "github_issue_collection",
+      "file_format": "remote_api",
+      "tracked_state": "github_only",
+      "branch_or_ref": "origin",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "inaccessible",
+      "full_read_date": null,
+      "readable": false,
+      "access_problem": "gh 已安装但当前账户令牌无效；直接 GitHub 访问同时因 127.0.0.1 代理连接失败而不可用，无法读取远程对象。",
+      "historical_relevance": "critical",
+      "can_prove": [],
+      "cannot_prove": [
+        "远程对象数量、状态、时间、讨论、附件和检查结论"
+      ],
+      "candidate_topics": [
+        "GitHub",
+        "remote"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-077",
+      "title": "GitHub Pull Requests（merged 与 closed）",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "pull_request_collection",
+      "file_format": "remote_api",
+      "tracked_state": "github_only",
+      "branch_or_ref": "origin",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "inaccessible",
+      "full_read_date": null,
+      "readable": false,
+      "access_problem": "gh 已安装但当前账户令牌无效；直接 GitHub 访问同时因 127.0.0.1 代理连接失败而不可用，无法读取远程对象。",
+      "historical_relevance": "high",
+      "can_prove": [],
+      "cannot_prove": [
+        "远程对象数量、状态、时间、讨论、附件和检查结论"
+      ],
+      "candidate_topics": [
+        "GitHub",
+        "remote"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-078",
+      "title": "GitHub Releases 与附件",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "github_release_collection",
+      "file_format": "remote_api",
+      "tracked_state": "github_only",
+      "branch_or_ref": "origin",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "inaccessible",
+      "full_read_date": null,
+      "readable": false,
+      "access_problem": "gh 已安装但当前账户令牌无效；直接 GitHub 访问同时因 127.0.0.1 代理连接失败而不可用，无法读取远程对象。",
+      "historical_relevance": "high",
+      "can_prove": [],
+      "cannot_prove": [
+        "远程对象数量、状态、时间、讨论、附件和检查结论"
+      ],
+      "candidate_topics": [
+        "GitHub",
+        "remote"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    },
+    {
+      "source_id": "SRC-079",
+      "title": "GitHub Actions 与检查结果",
+      "current_path": null,
+      "path_at_commit": null,
+      "source_kind": "github_actions_collection",
+      "file_format": "remote_api",
+      "tracked_state": "github_only",
+      "branch_or_ref": "origin",
+      "commit_hash": null,
+      "git_first_seen": null,
+      "git_last_changed": null,
+      "filesystem_modified_time": null,
+      "historical_date_claim": null,
+      "date_confidence": "unknown",
+      "sha256": null,
+      "size_bytes": null,
+      "version_label": null,
+      "previous_version": null,
+      "next_version": null,
+      "related_files": [],
+      "confidentiality": "internal",
+      "contains_personal_data": false,
+      "full_read_status": "inaccessible",
+      "full_read_date": null,
+      "readable": false,
+      "access_problem": "gh 已安装但当前账户令牌无效；直接 GitHub 访问同时因 127.0.0.1 代理连接失败而不可用，无法读取远程对象。",
+      "historical_relevance": "high",
+      "can_prove": [],
+      "cannot_prove": [
+        "远程对象数量、状态、时间、讨论、附件和检查结论"
+      ],
+      "candidate_topics": [
+        "GitHub",
+        "remote"
+      ],
+      "reviewer_notes": "已登记来源、定位、读取状态与可证明边界；正式需求抽取时需按主题与相邻材料交叉验证。"
+    }
+  ]
+}

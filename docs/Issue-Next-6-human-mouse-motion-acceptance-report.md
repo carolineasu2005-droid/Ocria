@@ -4,7 +4,7 @@
 
 **结论：通过。**
 
-Next-6 已按 `Issue-Next-6-human-mouse-motion-TID-V1.0.md` 完成实施。核心鼠标移动、`human_click()` 接入、`--simple-mouse` 回退、业务路径兼容测试和 README 均已完成；指定测试与全量测试全部通过，未发现阻断问题。
+Next-6 已按 `docs/tid/next/Issue-Next-6-human-mouse-motion-TID-V1.0.md` 完成实施。核心鼠标移动、`human_click()` 接入、`--simple-mouse` 回退、业务路径兼容测试和 README 均已完成；指定测试与全量测试全部通过，未发现阻断问题。
 
 本次验收建议下一步：
 
