@@ -9,6 +9,7 @@ venv/
 # Runtime data (may contain candidate information)
 logs/
 calibration_profiles/*.json
+data/ocr_runs/
 
 # Editors and operating systems
 .idea/

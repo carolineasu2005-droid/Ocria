@@ -1,11 +1,12 @@
 import unittest
 from contextlib import ExitStack
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
 import simple_brush
 from calibration_profiles import CalibrationProfileError, REQUIRED_AREA_FIELDS
-from ocr_detector import DetectionResult, ScanObservation
+from ocr_detector import DetectionResult, ScanObservation, ScreenFingerprint
 
 
 def sample_profile_areas():
@@ -67,6 +68,648 @@ def sample_batch_filter_regions():
     )
 
 
+def make_switch_fingerprint(
+    hash_character,
+    *,
+    screen_index=None,
+    fingerprint_version="r03-v1",
+    exact_hash=None,
+):
+    return ScreenFingerprint(
+        raw_text="",
+        normalized_text="",
+        raw_text_length=0,
+        normalized_text_length=0,
+        ocr_box_count=0,
+        captured_at="2026-01-01T00:00:00+00:00",
+        exact_hash=(
+            exact_hash
+            if exact_hash is not None
+            else hash_character * 64
+        ),
+        fingerprint_version=fingerprint_version,
+        screen_index=screen_index,
+    )
+
+
+def make_switch_observation(fingerprint):
+    return ScanObservation(
+        scan_number=1,
+        text="",
+        item_count=0,
+        elapsed_seconds=0.0,
+        fingerprint=fingerprint,
+    )
+
+
+def make_ready_switch_observation(
+    hash_character,
+    *,
+    screen_index=None,
+    fingerprint_version="r03-v1",
+    ready=True,
+    fingerprint=True,
+):
+    screen_fingerprint = (
+        make_switch_fingerprint(
+            hash_character,
+            screen_index=screen_index,
+            fingerprint_version=fingerprint_version,
+        )
+        if fingerprint
+        else None
+    )
+    return ScanObservation(
+        scan_number=1,
+        text="",
+        item_count=6 if ready else 2,
+        elapsed_seconds=0.0,
+        ocr_box_count=6 if ready else 2,
+        ocr_text_length=30 if ready else 5,
+        fingerprint=screen_fingerprint,
+    )
+
+
+def render_log_calls(*loggers):
+    rendered = []
+    for log_mock in loggers:
+        for log_call in log_mock.call_args_list:
+            message, *values = log_call.args
+            rendered.append(message % tuple(values) if values else message)
+    return rendered
+
+
+class CandidateSwitchPureTests(unittest.TestCase):
+    def test_state_constants_and_frozen_budgets_match_tid(self):
+        self.assertEqual(simple_brush.CANDIDATE_SWITCH_MAX_ACTIONS, 2)
+        self.assertEqual(
+            simple_brush.CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION,
+            6,
+        )
+        self.assertEqual(
+            simple_brush.CANDIDATE_SWITCH_STABLE_OBSERVATIONS,
+            2,
+        )
+        self.assertEqual(
+            simple_brush.CANDIDATE_SWITCH_OBSERVATION_WAIT_SECONDS,
+            0.8,
+        )
+        self.assertEqual(
+            (
+                simple_brush.CANDIDATE_SWITCH_PENDING,
+                simple_brush.CANDIDATE_SWITCH_LOADING,
+                simple_brush.CANDIDATE_SWITCH_OBSERVING,
+                simple_brush.CANDIDATE_SWITCH_UNCHANGED,
+                simple_brush.CANDIDATE_SWITCH_CONFIRMED,
+                simple_brush.CANDIDATE_SWITCH_UNVERIFIABLE,
+                simple_brush.CANDIDATE_SWITCH_FAILED,
+            ),
+            (
+                "switch_pending",
+                "switch_loading",
+                "switch_observing",
+                "switch_unchanged",
+                "switch_confirmed",
+                "switch_unverifiable",
+                "switch_failed",
+            ),
+        )
+
+    def test_value_objects_have_only_frozen_tid_fields(self):
+        self.assertEqual(
+            tuple(field.name for field in fields(
+                simple_brush.CandidateSwitchContext
+            )),
+            ("formal_fingerprints", "pre_switch_fingerprint"),
+        )
+        self.assertEqual(
+            tuple(field.name for field in fields(
+                simple_brush.CandidateSwitchResult
+            )),
+            (
+                "state",
+                "action_attempt",
+                "observation_attempt",
+                "confirmed_observation",
+                "failure_reason",
+            ),
+        )
+
+        baseline = make_switch_fingerprint("a")
+        context = simple_brush.CandidateSwitchContext((), baseline)
+        result = simple_brush.CandidateSwitchResult(
+            simple_brush.CANDIDATE_SWITCH_PENDING,
+            0,
+            0,
+        )
+        with self.assertRaises(FrozenInstanceError):
+            context.pre_switch_fingerprint = make_switch_fingerprint("b")
+        with self.assertRaises(FrozenInstanceError):
+            result.state = simple_brush.CANDIDATE_SWITCH_FAILED
+
+    def test_comparable_fingerprint_reuses_r03_validation(self):
+        valid = make_switch_fingerprint("a")
+        bad_hash = make_switch_fingerprint(
+            "a",
+            exact_hash="not-a-valid-hash",
+        )
+        bad_version = make_switch_fingerprint(
+            "a",
+            fingerprint_version="",
+        )
+
+        self.assertTrue(
+            simple_brush.is_comparable_screen_fingerprint(valid)
+        )
+        self.assertFalse(
+            simple_brush.is_comparable_screen_fingerprint(None)
+        )
+        self.assertFalse(
+            simple_brush.is_comparable_screen_fingerprint(bad_hash)
+        )
+        self.assertFalse(
+            simple_brush.is_comparable_screen_fingerprint(bad_version)
+        )
+
+    def test_formal_fingerprints_filter_and_sort_without_confirmation(self):
+        formal_three = make_switch_fingerprint("3", screen_index=3)
+        formal_one = make_switch_fingerprint("1", screen_index=1)
+        confirmation = make_switch_fingerprint("c")
+        invalid = make_switch_fingerprint(
+            "d",
+            screen_index=2,
+            exact_hash="bad",
+        )
+        result = DetectionResult(
+            success=True,
+            confirmed_match=False,
+            observations=[
+                make_switch_observation(formal_three),
+                make_switch_observation(None),
+                make_switch_observation(confirmation),
+                make_switch_observation(invalid),
+                make_switch_observation(formal_one),
+            ],
+        )
+
+        self.assertEqual(
+            simple_brush.extract_formal_fingerprints(result),
+            (formal_one, formal_three),
+        )
+        self.assertEqual(simple_brush.extract_formal_fingerprints(None), ())
+
+    def test_formal_fingerprints_accept_exactly_eight(self):
+        fingerprints = tuple(
+            make_switch_fingerprint(
+                format(screen_index, "x"),
+                screen_index=screen_index,
+            )
+            for screen_index in range(1, 9)
+        )
+        result = DetectionResult(
+            success=True,
+            confirmed_match=False,
+            observations=[
+                make_switch_observation(fingerprint)
+                for fingerprint in reversed(fingerprints)
+            ],
+        )
+
+        self.assertEqual(
+            simple_brush.extract_formal_fingerprints(result),
+            fingerprints,
+        )
+
+    def test_formal_fingerprints_reject_invalid_or_duplicate_indexes(self):
+        for invalid_index in (True, 0, 9, "1"):
+            with self.subTest(screen_index=invalid_index):
+                result = DetectionResult(
+                    success=True,
+                    confirmed_match=False,
+                    observations=[make_switch_observation(
+                        make_switch_fingerprint(
+                            "a",
+                            screen_index=invalid_index,
+                        )
+                    )],
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "^formal fingerprint invariant failed$",
+                ):
+                    simple_brush.extract_formal_fingerprints(result)
+
+        duplicate_result = DetectionResult(
+            success=True,
+            confirmed_match=False,
+            observations=[
+                make_switch_observation(
+                    make_switch_fingerprint("a", screen_index=1)
+                ),
+                make_switch_observation(
+                    make_switch_fingerprint("b", screen_index=1)
+                ),
+            ],
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "^formal fingerprint invariant failed$",
+        ):
+            simple_brush.extract_formal_fingerprints(duplicate_result)
+
+    def test_references_append_valid_pre_switch_baseline(self):
+        formal = make_switch_fingerprint("a", screen_index=1)
+        baseline = make_switch_fingerprint("b")
+        context = simple_brush.CandidateSwitchContext((formal,), baseline)
+
+        self.assertEqual(
+            simple_brush.candidate_switch_references(context),
+            (formal, baseline),
+        )
+        self.assertEqual(
+            simple_brush.candidate_switch_references(
+                simple_brush.CandidateSwitchContext((), baseline)
+            ),
+            (baseline,),
+        )
+
+    def test_references_reject_invalid_context_invariants(self):
+        baseline = make_switch_fingerprint("f")
+        too_many = tuple(
+            make_switch_fingerprint(
+                format(index % 16, "x"),
+                screen_index=(index % 8) + 1,
+            )
+            for index in range(9)
+        )
+        contexts = (
+            simple_brush.CandidateSwitchContext(
+                too_many,
+                baseline,
+            ),
+            simple_brush.CandidateSwitchContext(
+                (make_switch_fingerprint("a", screen_index=0),),
+                baseline,
+            ),
+            simple_brush.CandidateSwitchContext(
+                (),
+                make_switch_fingerprint("a", screen_index=1),
+            ),
+            simple_brush.CandidateSwitchContext(
+                (),
+                make_switch_fingerprint("a", exact_hash="bad"),
+            ),
+        )
+
+        for context in contexts:
+            with self.subTest(context=context):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "^candidate switch context invariant failed$",
+                ):
+                    simple_brush.candidate_switch_references(context)
+
+    def test_any_match_wins_even_when_another_comparison_is_none(self):
+        current = make_switch_fingerprint("a")
+        incompatible = make_switch_fingerprint(
+            "b",
+            fingerprint_version="r03-v2",
+        )
+        same = make_switch_fingerprint("a")
+
+        self.assertIs(
+            simple_brush.matches_any_previous_fingerprint(
+                current,
+                (incompatible, same),
+            ),
+            True,
+        )
+        self.assertIs(
+            simple_brush.differs_from_all_previous_fingerprints(
+                current,
+                (incompatible, same),
+            ),
+            False,
+        )
+
+    def test_different_from_all_requires_every_comparison_false(self):
+        current = make_switch_fingerprint("c")
+        previous = (
+            make_switch_fingerprint("a"),
+            make_switch_fingerprint("b"),
+        )
+
+        self.assertIs(
+            simple_brush.matches_any_previous_fingerprint(
+                current,
+                previous,
+            ),
+            False,
+        )
+        self.assertIs(
+            simple_brush.differs_from_all_previous_fingerprints(
+                current,
+                previous,
+            ),
+            True,
+        )
+
+    def test_none_comparison_and_empty_previous_are_not_different(self):
+        current = make_switch_fingerprint("a")
+        incompatible = make_switch_fingerprint(
+            "b",
+            fingerprint_version="r03-v2",
+        )
+
+        self.assertIsNone(
+            simple_brush.matches_any_previous_fingerprint(
+                current,
+                (incompatible,),
+            )
+        )
+        self.assertIsNone(
+            simple_brush.differs_from_all_previous_fingerprints(
+                current,
+                (incompatible,),
+            )
+        )
+        self.assertIsNone(
+            simple_brush.matches_any_previous_fingerprint(current, ())
+        )
+        self.assertIsNone(
+            simple_brush.differs_from_all_previous_fingerprints(current, ())
+        )
+
+    def test_fingerprint_stability_is_exact_three_state(self):
+        first = make_switch_fingerprint("a")
+        same = make_switch_fingerprint("a")
+        different = make_switch_fingerprint("b")
+        incompatible = make_switch_fingerprint(
+            "a",
+            fingerprint_version="r03-v2",
+        )
+
+        self.assertIs(
+            simple_brush.fingerprints_are_stable(first, same),
+            True,
+        )
+        self.assertIs(
+            simple_brush.fingerprints_are_stable(first, different),
+            False,
+        )
+        self.assertIsNone(
+            simple_brush.fingerprints_are_stable(first, incompatible)
+        )
+
+    def test_r02_not_ready_and_unknown_are_not_observing(self):
+        current = make_switch_fingerprint("a")
+        previous = (make_switch_fingerprint("b"),)
+
+        self.assertEqual(
+            simple_brush.evaluate_candidate_switch_observation(
+                False,
+                current,
+                previous,
+                None,
+                None,
+            ),
+            (simple_brush.CANDIDATE_SWITCH_LOADING, None),
+        )
+        self.assertEqual(
+            simple_brush.evaluate_candidate_switch_observation(
+                None,
+                current,
+                previous,
+                None,
+                None,
+            ),
+            (simple_brush.CANDIDATE_SWITCH_UNVERIFIABLE, None),
+        )
+
+    def test_single_ready_old_or_new_is_only_observing(self):
+        old = make_switch_fingerprint("a")
+        new = make_switch_fingerprint("b")
+        previous = (old,)
+
+        self.assertEqual(
+            simple_brush.evaluate_candidate_switch_observation(
+                True,
+                old,
+                previous,
+                None,
+                None,
+            ),
+            (simple_brush.CANDIDATE_SWITCH_OBSERVING, "old"),
+        )
+        self.assertEqual(
+            simple_brush.evaluate_candidate_switch_observation(
+                True,
+                new,
+                previous,
+                None,
+                None,
+            ),
+            (simple_brush.CANDIDATE_SWITCH_OBSERVING, "new"),
+        )
+
+    def test_two_ready_stable_old_observations_are_unchanged(self):
+        old_first = make_switch_fingerprint("a")
+        old_second = make_switch_fingerprint("a")
+        previous = (make_switch_fingerprint("a"),)
+
+        self.assertEqual(
+            simple_brush.evaluate_candidate_switch_observation(
+                True,
+                old_second,
+                previous,
+                old_first,
+                "old",
+            ),
+            (simple_brush.CANDIDATE_SWITCH_UNCHANGED, "old"),
+        )
+
+    def test_old_new_relation_changes_are_only_observing(self):
+        old = make_switch_fingerprint("a")
+        new = make_switch_fingerprint("b")
+        previous = (old,)
+
+        self.assertEqual(
+            simple_brush.evaluate_candidate_switch_observation(
+                True,
+                new,
+                previous,
+                old,
+                "old",
+            ),
+            (simple_brush.CANDIDATE_SWITCH_OBSERVING, "new"),
+        )
+        self.assertEqual(
+            simple_brush.evaluate_candidate_switch_observation(
+                True,
+                old,
+                previous,
+                new,
+                "new",
+            ),
+            (simple_brush.CANDIDATE_SWITCH_OBSERVING, "old"),
+        )
+
+    def test_two_ready_stable_new_observations_are_confirmed(self):
+        previous = (
+            make_switch_fingerprint("a"),
+            make_switch_fingerprint("b"),
+        )
+        new_first = make_switch_fingerprint("c")
+        new_second = make_switch_fingerprint("c")
+
+        self.assertEqual(
+            simple_brush.evaluate_candidate_switch_observation(
+                True,
+                new_second,
+                previous,
+                new_first,
+                "new",
+            ),
+            (simple_brush.CANDIDATE_SWITCH_CONFIRMED, "new"),
+        )
+
+    def test_two_different_new_observations_remain_observing(self):
+        previous = (make_switch_fingerprint("a"),)
+        new_first = make_switch_fingerprint("b")
+        new_second = make_switch_fingerprint("c")
+
+        self.assertEqual(
+            simple_brush.evaluate_candidate_switch_observation(
+                True,
+                new_second,
+                previous,
+                new_first,
+                "new",
+            ),
+            (simple_brush.CANDIDATE_SWITCH_OBSERVING, "new"),
+        )
+
+    def test_invalid_incompatible_or_unreferenced_observation_is_unverifiable(self):
+        previous = (make_switch_fingerprint("a"),)
+        incompatible = make_switch_fingerprint(
+            "b",
+            fingerprint_version="r03-v2",
+        )
+
+        for current, references in (
+            (None, previous),
+            (make_switch_fingerprint("b", exact_hash="bad"), previous),
+            (incompatible, previous),
+            (make_switch_fingerprint("b"), ()),
+        ):
+            with self.subTest(current=current, references=references):
+                self.assertEqual(
+                    simple_brush.evaluate_candidate_switch_observation(
+                        True,
+                        current,
+                        references,
+                        None,
+                        None,
+                    ),
+                    (
+                        simple_brush.CANDIDATE_SWITCH_UNVERIFIABLE,
+                        None,
+                    ),
+                )
+
+    def test_action_and_observation_budget_boundaries(self):
+        self.assertFalse(
+            simple_brush.candidate_switch_action_budget_exhausted(1)
+        )
+        self.assertTrue(
+            simple_brush.candidate_switch_action_budget_exhausted(2)
+        )
+        self.assertTrue(
+            simple_brush.candidate_switch_action_budget_exhausted(3)
+        )
+        self.assertFalse(
+            simple_brush.candidate_switch_observation_budget_exhausted(5)
+        )
+        self.assertTrue(
+            simple_brush.candidate_switch_observation_budget_exhausted(6)
+        )
+        self.assertTrue(
+            simple_brush.candidate_switch_observation_budget_exhausted(7)
+        )
+
+    def test_only_first_unchanged_action_allows_focus_recovery(self):
+        self.assertTrue(
+            simple_brush.candidate_switch_focus_recovery_allowed(
+                simple_brush.CANDIDATE_SWITCH_UNCHANGED,
+                1,
+            )
+        )
+        for state, action_attempt in (
+            (simple_brush.CANDIDATE_SWITCH_UNCHANGED, 2),
+            (simple_brush.CANDIDATE_SWITCH_PENDING, 1),
+            (simple_brush.CANDIDATE_SWITCH_LOADING, 1),
+            (simple_brush.CANDIDATE_SWITCH_OBSERVING, 1),
+            (simple_brush.CANDIDATE_SWITCH_CONFIRMED, 1),
+            (simple_brush.CANDIDATE_SWITCH_UNVERIFIABLE, 1),
+            (simple_brush.CANDIDATE_SWITCH_FAILED, 1),
+        ):
+            with self.subTest(state=state, action_attempt=action_attempt):
+                self.assertFalse(
+                    simple_brush.candidate_switch_focus_recovery_allowed(
+                        state,
+                        action_attempt,
+                    )
+                )
+
+    def test_only_confirmed_allows_formal_scan(self):
+        self.assertTrue(simple_brush.candidate_switch_scan_allowed(
+            simple_brush.CANDIDATE_SWITCH_CONFIRMED
+        ))
+        for state in (
+            simple_brush.CANDIDATE_SWITCH_PENDING,
+            simple_brush.CANDIDATE_SWITCH_LOADING,
+            simple_brush.CANDIDATE_SWITCH_OBSERVING,
+            simple_brush.CANDIDATE_SWITCH_UNCHANGED,
+            simple_brush.CANDIDATE_SWITCH_UNVERIFIABLE,
+            simple_brush.CANDIDATE_SWITCH_FAILED,
+        ):
+            with self.subTest(state=state):
+                self.assertFalse(
+                    simple_brush.candidate_switch_scan_allowed(state)
+                )
+
+    def test_pure_helpers_reference_no_side_effect_operations(self):
+        forbidden_names = {
+            "capture_observation",
+            "human_scroll_once",
+            "logger",
+            "matching_keyword_rule",
+            "next_candidate",
+            "ocr_detector",
+            "safe_wait",
+            "sleep",
+        }
+        pure_helpers = (
+            simple_brush.is_comparable_screen_fingerprint,
+            simple_brush.extract_formal_fingerprints,
+            simple_brush.candidate_switch_references,
+            simple_brush.matches_any_previous_fingerprint,
+            simple_brush.differs_from_all_previous_fingerprints,
+            simple_brush.fingerprints_are_stable,
+            simple_brush.evaluate_candidate_switch_observation,
+            simple_brush.candidate_switch_action_budget_exhausted,
+            simple_brush.candidate_switch_observation_budget_exhausted,
+            simple_brush.candidate_switch_focus_recovery_allowed,
+            simple_brush.candidate_switch_scan_allowed,
+        )
+
+        for helper in pure_helpers:
+            with self.subTest(helper=helper.__name__):
+                self.assertTrue(
+                    forbidden_names.isdisjoint(helper.__code__.co_names)
+                )
+
+
 class SimpleBrushOCRTests(unittest.TestCase):
     def setUp(self):
         self.saved = {
@@ -99,6 +742,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "ocr_initialization_attempted",
                 "ocr_calibration_attempted",
                 "ocr_calibration_in_progress",
+                "ocr_record_store",
+                "current_candidate_builder",
+                "candidate_record_sequence",
+                "recorded_observation_ids",
                 "stop_event",
                 "stop_reason",
                 "paused",
@@ -122,8 +769,19 @@ class SimpleBrushOCRTests(unittest.TestCase):
         simple_brush.paused = False
         simple_brush.run_duration_seconds = 0
         simple_brush._programmatic_esc = False
+        self.disabled_ocr_store = Mock(
+            enabled=False,
+            run_id="disabled-test-run",
+        )
+        self.ocr_store_factory_patcher = patch.object(
+            simple_brush,
+            "create_ocr_record_store",
+            return_value=self.disabled_ocr_store,
+        )
+        self.ocr_store_factory_patcher.start()
 
     def tearDown(self):
+        self.ocr_store_factory_patcher.stop()
         for name, value in self.saved.items():
             setattr(simple_brush, name, value)
 
@@ -174,7 +832,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
 
         def stop_after_view(*_args, **_kwargs):
             simple_brush.stop_event = True
-            return False
+            return False, None
 
         with ExitStack() as stack:
             stack.enter_context(patch.object(
@@ -330,6 +988,1551 @@ class SimpleBrushOCRTests(unittest.TestCase):
             "error": error,
         }
 
+    def run_candidate_switch_confirmation(
+        self,
+        observations,
+        *,
+        context=None,
+        next_result=True,
+        next_side_effect=None,
+        focus_result=True,
+        focus_side_effect=None,
+        wait_side_effect=None,
+    ):
+        detector = Mock()
+        detector.capture_observation.side_effect = observations
+        simple_brush.ocr_detector = detector
+        if context is None:
+            old = make_switch_fingerprint("a", screen_index=1)
+            baseline = make_switch_fingerprint("a")
+            context = simple_brush.CandidateSwitchContext(
+                (old,),
+                baseline,
+            )
+
+        with (
+            patch.object(
+                simple_brush,
+                "next_candidate",
+                return_value=next_result,
+                side_effect=next_side_effect,
+            ) as next_candidate,
+            patch.object(
+                simple_brush,
+                "safe_wait",
+                return_value=True,
+                side_effect=wait_side_effect,
+            ) as wait,
+            patch.object(simple_brush, "ocr_scroll_down") as ocr_scroll,
+            patch.object(simple_brush, "human_scroll_once") as human_scroll,
+            patch.object(
+                simple_brush,
+                "perform_favorite_action",
+            ) as favorite,
+            patch.object(
+                simple_brush,
+                "forward_one_candidate",
+            ) as forward,
+            patch.object(simple_brush, "refresh_page") as refresh,
+            patch.object(
+                simple_brush,
+                "restore_candidate_page_focus",
+                return_value=focus_result,
+                side_effect=focus_side_effect,
+            ) as focus_restore,
+            patch.object(simple_brush.logger, "info") as info,
+            patch.object(simple_brush.logger, "warning") as warning,
+            patch.object(simple_brush.logger, "error") as error,
+        ):
+            result = simple_brush.confirm_candidate_switch(
+                context,
+                candidate_in_batch=2,
+                total_viewed=1,
+            )
+
+        return {
+            "result": result,
+            "detector": detector,
+            "next": next_candidate,
+            "wait": wait,
+            "ocr_scroll": ocr_scroll,
+            "human_scroll": human_scroll,
+            "favorite": favorite,
+            "forward": forward,
+            "refresh": refresh,
+            "focus_restore": focus_restore,
+            "info": info,
+            "warning": warning,
+            "error": error,
+        }
+
+    def run_mocked_keyword_switch(
+        self,
+        switch_result,
+        *,
+        action_mode=simple_brush.ACTION_MODE_FORWARD,
+        no_forward=True,
+        stop_on_view_call=2,
+        refresh_result=False,
+        batch_filter_enabled=False,
+    ):
+        first_observation = loaded_observation()
+        first_detection = DetectionResult(
+            success=True,
+            confirmed_match=False,
+            observations=[],
+        )
+        context = simple_brush.CandidateSwitchContext(
+            (make_switch_fingerprint("a", screen_index=1),),
+            make_switch_fingerprint("a"),
+        )
+        view_calls = 0
+
+        def configure_input(**_kwargs):
+            simple_brush.forward_enabled = True
+            simple_brush.forward_keywords = (
+                simple_brush.parse_keyword_rules('"Python"')
+            )
+            simple_brush.batch_filter_enabled = batch_filter_enabled
+            simple_brush.batch_filter_regions = (
+                sample_batch_filter_regions()
+                if batch_filter_enabled
+                else None
+            )
+            simple_brush.no_forward_mode = no_forward
+            simple_brush.action_mode = action_mode
+
+        def view_side_effect(_index, first_observation=None):
+            nonlocal view_calls
+            view_calls += 1
+            if view_calls == stop_on_view_call:
+                simple_brush.stop_event = True
+                simple_brush.stop_reason = "esc"
+                return False, first_detection
+            return True, first_detection
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(simple_brush, "BATCH_SIZE", 2))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "parse_args",
+                return_value={
+                    "keywords": "",
+                    "email": "",
+                    "duration_seconds": "",
+                    "no_forward": no_forward,
+                    "auto": False,
+                },
+            ))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "get_user_input",
+                side_effect=configure_input,
+            ))
+            stack.enter_context(patch.object(simple_brush, "initialize_ocr"))
+            stack.enter_context(patch.object(simple_brush.listener, "start"))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "bring_edge_foreground",
+                return_value=True,
+            ))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "safe_wait",
+                return_value=True,
+            ))
+            stack.enter_context(patch.object(
+                simple_brush.pyautogui,
+                "position",
+                return_value=(10, 20),
+            ))
+            open_first = stack.enter_context(patch.object(
+                simple_brush,
+                "click_first_candidate",
+                return_value=True,
+            ))
+            filter_open = stack.enter_context(patch.object(
+                simple_brush,
+                "apply_batch_filter_and_open_first_candidate",
+                return_value=True,
+            ))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "ensure_ocr_region_calibrated",
+                return_value=True,
+            ))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "ensure_favorite_button_region_calibrated",
+                return_value=simple_brush.ScreenRegion(10, 20, 30, 40),
+            ))
+            load_gate = stack.enter_context(patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=(
+                    "loaded",
+                    first_observation,
+                    0,
+                    "threshold_passed",
+                ),
+            ))
+            view = stack.enter_context(patch.object(
+                simple_brush,
+                "view_candidate",
+                side_effect=view_side_effect,
+            ))
+            prepare_context = stack.enter_context(patch.object(
+                simple_brush,
+                "prepare_candidate_switch_context",
+                return_value=(context, None),
+            ))
+            confirm_switch = stack.enter_context(patch.object(
+                simple_brush,
+                "confirm_candidate_switch",
+                return_value=switch_result,
+            ))
+            next_candidate = stack.enter_context(patch.object(
+                simple_brush,
+                "next_candidate",
+            ))
+            favorite = stack.enter_context(patch.object(
+                simple_brush,
+                "perform_favorite_action",
+            ))
+            forward = stack.enter_context(patch.object(
+                simple_brush,
+                "forward_one_candidate",
+            ))
+            refresh = stack.enter_context(patch.object(
+                simple_brush,
+                "refresh_page",
+                return_value=refresh_result,
+            ))
+            stack.enter_context(patch.object(
+                simple_brush,
+                "start_run_timer",
+                return_value=None,
+            ))
+            info = stack.enter_context(patch.object(
+                simple_brush.logger,
+                "info",
+            ))
+            warning = stack.enter_context(patch.object(
+                simple_brush.logger,
+                "warning",
+            ))
+            error = stack.enter_context(patch.object(
+                simple_brush.logger,
+                "error",
+            ))
+            result = simple_brush.run()
+
+        return {
+            "result": result,
+            "first_observation": first_observation,
+            "context": context,
+            "open_first": open_first,
+            "filter_open": filter_open,
+            "load_gate": load_gate,
+            "view": view,
+            "prepare_context": prepare_context,
+            "confirm_switch": confirm_switch,
+            "next_candidate": next_candidate,
+            "favorite": favorite,
+            "forward": forward,
+            "refresh": refresh,
+            "info": info,
+            "warning": warning,
+            "error": error,
+        }
+
+    def test_prepare_switch_context_uses_one_dedicated_baseline(self):
+        formal_three = make_switch_fingerprint("3", screen_index=3)
+        formal_one = make_switch_fingerprint("1", screen_index=1)
+        confirmation = make_switch_fingerprint("c")
+        detection_result = DetectionResult(
+            success=True,
+            confirmed_match=False,
+            observations=[
+                make_switch_observation(formal_three),
+                make_switch_observation(confirmation),
+                make_switch_observation(None),
+                make_switch_observation(formal_one),
+            ],
+        )
+        baseline_observation = make_ready_switch_observation("b")
+        detector = Mock()
+        detector.capture_observation.return_value = baseline_observation
+        simple_brush.ocr_detector = detector
+
+        context, reason = simple_brush.prepare_candidate_switch_context(
+            detection_result,
+            candidate_in_batch=1,
+            total_viewed=1,
+        )
+
+        self.assertIsNone(reason)
+        self.assertEqual(
+            context.formal_fingerprints,
+            (formal_one, formal_three),
+        )
+        self.assertIs(
+            context.pre_switch_fingerprint,
+            baseline_observation.fingerprint,
+        )
+        self.assertIsNone(context.pre_switch_fingerprint.screen_index)
+        detector.capture_observation.assert_called_once_with(1)
+        detector.detect.assert_not_called()
+
+    def test_prepare_switch_context_allows_baseline_only(self):
+        baseline_observation = make_ready_switch_observation("b")
+        detector = Mock()
+        detector.capture_observation.return_value = baseline_observation
+        simple_brush.ocr_detector = detector
+
+        context, reason = simple_brush.prepare_candidate_switch_context(
+            None,
+            candidate_in_batch=1,
+            total_viewed=1,
+        )
+
+        self.assertIsNone(reason)
+        self.assertEqual(context.formal_fingerprints, ())
+        self.assertEqual(
+            simple_brush.candidate_switch_references(context),
+            (baseline_observation.fingerprint,),
+        )
+
+    def test_prepare_switch_context_fails_closed_before_next(self):
+        invalid_baselines = (
+            make_ready_switch_observation("a", ready=False),
+            make_ready_switch_observation("a", fingerprint=False),
+            make_ready_switch_observation("a", screen_index=1),
+            make_ready_switch_observation(
+                "a",
+                fingerprint_version="",
+            ),
+        )
+
+        for baseline in invalid_baselines:
+            with self.subTest(baseline=baseline):
+                detector = Mock()
+                detector.capture_observation.return_value = baseline
+                simple_brush.ocr_detector = detector
+                with patch.object(
+                    simple_brush,
+                    "next_candidate",
+                ) as next_candidate:
+                    context, reason = (
+                        simple_brush.prepare_candidate_switch_context(
+                            None,
+                            candidate_in_batch=1,
+                            total_viewed=1,
+                        )
+                    )
+
+                self.assertIsNone(context)
+                self.assertEqual(
+                    reason,
+                    "pre_switch_baseline_unavailable",
+                )
+                detector.capture_observation.assert_called_once_with(1)
+                next_candidate.assert_not_called()
+
+    def test_confirm_switch_stable_new_returns_last_observation(self):
+        new_first = make_ready_switch_observation("b")
+        new_second = make_ready_switch_observation("b")
+
+        with patch.object(
+            simple_brush,
+            "evaluate_detail_page_load",
+            wraps=simple_brush.evaluate_detail_page_load,
+        ) as readiness:
+            calls = self.run_candidate_switch_confirmation([
+                new_first,
+                new_second,
+            ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_CONFIRMED)
+        self.assertEqual(result.action_attempt, 1)
+        self.assertEqual(result.observation_attempt, 2)
+        self.assertIs(result.confirmed_observation, new_second)
+        self.assertIsNone(result.failure_reason)
+        calls["next"].assert_called_once_with()
+        calls["focus_restore"].assert_not_called()
+        self.assertEqual(
+            calls["detector"].capture_observation.call_args_list,
+            [call(1), call(1)],
+        )
+        calls["wait"].assert_called_once_with(
+            simple_brush.CANDIDATE_SWITCH_OBSERVATION_WAIT_SECONDS
+        )
+        self.assertIsNone(new_first.fingerprint.screen_index)
+        self.assertIsNone(new_second.fingerprint.screen_index)
+        self.assertEqual(readiness.call_count, 2)
+        self.assertEqual(
+            readiness.call_args_list[0],
+            call(
+                6,
+                30,
+                simple_brush.OCR_BOX_COUNT_THRESHOLD,
+                simple_brush.OCR_TEXT_LENGTH_THRESHOLD,
+            ),
+        )
+
+    def test_confirm_switch_old_then_two_new_is_confirmed(self):
+        old = make_ready_switch_observation("a")
+        new_first = make_ready_switch_observation("b")
+        new_second = make_ready_switch_observation("b")
+
+        calls = self.run_candidate_switch_confirmation([
+            old,
+            new_first,
+            new_second,
+        ])
+
+        self.assertEqual(
+            calls["result"].state,
+            simple_brush.CANDIDATE_SWITCH_CONFIRMED,
+        )
+        self.assertIs(calls["result"].confirmed_observation, new_second)
+        calls["next"].assert_called_once_with()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 3)
+        self.assertEqual(
+            calls["wait"].call_args_list,
+            [
+                call(simple_brush.CANDIDATE_SWITCH_OBSERVATION_WAIT_SECONDS),
+                call(simple_brush.CANDIDATE_SWITCH_OBSERVATION_WAIT_SECONDS),
+            ],
+        )
+
+    def test_confirm_switch_loading_then_stable_new_uses_one_next(self):
+        calls = self.run_candidate_switch_confirmation([
+            make_ready_switch_observation("b", ready=False),
+            make_ready_switch_observation("b", ready=False),
+            make_ready_switch_observation("b"),
+            make_ready_switch_observation("b"),
+        ])
+
+        self.assertEqual(
+            calls["result"].state,
+            simple_brush.CANDIDATE_SWITCH_CONFIRMED,
+        )
+        calls["next"].assert_called_once_with()
+        calls["focus_restore"].assert_not_called()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 4)
+        self.assertEqual(calls["wait"].call_count, 3)
+
+    def test_confirm_switch_full_old_action_consumes_budget_before_retry(self):
+        confirmed = make_ready_switch_observation("b")
+        calls = self.run_candidate_switch_confirmation([
+            *[make_ready_switch_observation("a") for _ in range(6)],
+            make_ready_switch_observation("b"),
+            confirmed,
+        ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_CONFIRMED)
+        self.assertEqual(result.action_attempt, 2)
+        self.assertEqual(result.observation_attempt, 2)
+        self.assertIs(result.confirmed_observation, confirmed)
+        self.assertEqual(calls["next"].call_args_list, [call(), call()])
+        calls["focus_restore"].assert_called_once_with()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 8)
+        self.assertEqual(calls["wait"].call_count, 6)
+
+    def test_confirm_switch_old_old_then_new_new_confirms_first_action(self):
+        confirmed = make_ready_switch_observation("b")
+        calls = self.run_candidate_switch_confirmation([
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("b"),
+            confirmed,
+        ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_CONFIRMED)
+        self.assertEqual(result.action_attempt, 1)
+        self.assertEqual(result.observation_attempt, 4)
+        self.assertIs(result.confirmed_observation, confirmed)
+        calls["next"].assert_called_once_with()
+        calls["focus_restore"].assert_not_called()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 4)
+        calls["detector"].detect.assert_not_called()
+
+    def test_confirm_switch_loading_disqualifies_unchanged_retry(self):
+        calls = self.run_candidate_switch_confirmation([
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a", ready=False),
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a"),
+        ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_FAILED)
+        self.assertEqual(result.action_attempt, 1)
+        self.assertEqual(result.observation_attempt, 6)
+        self.assertEqual(result.failure_reason, "observation_budget_exhausted")
+        calls["next"].assert_called_once_with()
+        calls["focus_restore"].assert_not_called()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 6)
+        calls["detector"].detect.assert_not_called()
+
+    def test_confirm_switch_unverifiable_disqualifies_unchanged_retry(self):
+        calls = self.run_candidate_switch_confirmation([
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a", fingerprint=False),
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a"),
+        ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_FAILED)
+        self.assertEqual(result.action_attempt, 1)
+        self.assertEqual(result.observation_attempt, 6)
+        self.assertEqual(result.failure_reason, "comparison_unverifiable")
+        calls["next"].assert_called_once_with()
+        calls["focus_restore"].assert_not_called()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 6)
+
+    def test_confirm_switch_new_seen_disqualifies_later_old_retry(self):
+        calls = self.run_candidate_switch_confirmation([
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("b"),
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a"),
+            make_ready_switch_observation("a"),
+        ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_FAILED)
+        self.assertEqual(result.action_attempt, 1)
+        self.assertEqual(result.observation_attempt, 6)
+        self.assertEqual(result.failure_reason, "observation_budget_exhausted")
+        calls["next"].assert_called_once_with()
+        calls["focus_restore"].assert_not_called()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 6)
+
+    def test_confirm_switch_second_full_old_action_fails_at_full_budget(self):
+        calls = self.run_candidate_switch_confirmation([
+            *[make_ready_switch_observation("a") for _ in range(12)],
+        ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_FAILED)
+        self.assertEqual(result.action_attempt, 2)
+        self.assertEqual(result.observation_attempt, 6)
+        self.assertEqual(
+            result.failure_reason,
+            "stable_unchanged_after_retry",
+        )
+        self.assertEqual(calls["next"].call_args_list, [call(), call()])
+        calls["focus_restore"].assert_called_once_with()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 12)
+        self.assertEqual(calls["wait"].call_count, 10)
+
+    def test_confirm_switch_first_unchanged_recovers_then_confirms(self):
+        confirmed = make_ready_switch_observation("b")
+        calls = self.run_candidate_switch_confirmation([
+            *[make_ready_switch_observation("a") for _ in range(6)],
+            make_ready_switch_observation("b"),
+            confirmed,
+        ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_CONFIRMED)
+        self.assertEqual(result.action_attempt, 2)
+        self.assertEqual(result.observation_attempt, 2)
+        self.assertIs(result.confirmed_observation, confirmed)
+        self.assertIsNone(result.failure_reason)
+        self.assertEqual(calls["next"].call_args_list, [call(), call()])
+        calls["focus_restore"].assert_called_once_with()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 8)
+        self.assertEqual(calls["wait"].call_count, 6)
+        calls["favorite"].assert_not_called()
+        calls["forward"].assert_not_called()
+        calls["refresh"].assert_not_called()
+
+    def test_confirm_switch_second_unchanged_fails_without_third_next(self):
+        calls = self.run_candidate_switch_confirmation([
+            *[make_ready_switch_observation("a") for _ in range(12)],
+        ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_FAILED)
+        self.assertEqual(result.action_attempt, 2)
+        self.assertEqual(result.observation_attempt, 6)
+        self.assertEqual(
+            result.failure_reason,
+            "stable_unchanged_after_retry",
+        )
+        self.assertIsNone(result.confirmed_observation)
+        self.assertEqual(calls["next"].call_args_list, [call(), call()])
+        calls["focus_restore"].assert_called_once_with()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 12)
+
+    def test_confirm_switch_second_loading_then_stable_new_confirms(self):
+        confirmed = make_ready_switch_observation("b")
+        calls = self.run_candidate_switch_confirmation([
+            *[make_ready_switch_observation("a") for _ in range(6)],
+            make_ready_switch_observation("b", ready=False),
+            make_ready_switch_observation("b"),
+            confirmed,
+        ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_CONFIRMED)
+        self.assertEqual(result.action_attempt, 2)
+        self.assertEqual(result.observation_attempt, 3)
+        self.assertIs(result.confirmed_observation, confirmed)
+        self.assertEqual(calls["next"].call_args_list, [call(), call()])
+        calls["focus_restore"].assert_called_once_with()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 9)
+        self.assertEqual(calls["wait"].call_count, 7)
+
+    def test_confirm_switch_second_unstable_exhausts_fresh_budget(self):
+        calls = self.run_candidate_switch_confirmation([
+            *[make_ready_switch_observation("a") for _ in range(6)],
+            *[
+                make_ready_switch_observation(character)
+                for character in ("b", "c", "d", "e", "f", "0")
+            ],
+        ])
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_FAILED)
+        self.assertEqual(result.action_attempt, 2)
+        self.assertEqual(
+            result.observation_attempt,
+            simple_brush.CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION,
+        )
+        self.assertEqual(
+            result.failure_reason,
+            "observation_budget_exhausted",
+        )
+        self.assertEqual(calls["next"].call_args_list, [call(), call()])
+        calls["focus_restore"].assert_called_once_with()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 12)
+        self.assertEqual(calls["wait"].call_count, 10)
+
+    def test_confirm_switch_focus_recovery_failure_stops_before_retry(self):
+        for focus_side_effect, focus_result in (
+            (None, False),
+            (RuntimeError("focus unavailable"), True),
+        ):
+            with self.subTest(focus_side_effect=focus_side_effect):
+                calls = self.run_candidate_switch_confirmation(
+                    [make_ready_switch_observation("a") for _ in range(6)],
+                    focus_result=focus_result,
+                    focus_side_effect=focus_side_effect,
+                )
+
+                result = calls["result"]
+                self.assertEqual(
+                    result.state,
+                    simple_brush.CANDIDATE_SWITCH_FAILED,
+                )
+                self.assertEqual(result.action_attempt, 1)
+                self.assertEqual(
+                    result.failure_reason,
+                    "focus_recovery_failed",
+                )
+                calls["next"].assert_called_once_with()
+                calls["focus_restore"].assert_called_once_with()
+                self.assertEqual(
+                    calls["detector"].capture_observation.call_count,
+                    6,
+                )
+
+    def test_confirm_switch_stop_during_focus_prevents_second_next(self):
+        def stop_during_focus():
+            simple_brush.stop_event = True
+            simple_brush.stop_reason = "esc"
+            return True
+
+        calls = self.run_candidate_switch_confirmation(
+            [make_ready_switch_observation("a") for _ in range(6)],
+            focus_side_effect=stop_during_focus,
+        )
+
+        self.assertIsNone(calls["result"])
+        calls["next"].assert_called_once_with()
+        calls["focus_restore"].assert_called_once_with()
+
+    def test_confirm_switch_stop_during_observation_wait_prevents_actions(self):
+        def stop_during_wait(_seconds):
+            simple_brush.stop_event = True
+            simple_brush.stop_reason = "run_duration_elapsed"
+            return False
+
+        calls = self.run_candidate_switch_confirmation(
+            [make_ready_switch_observation("b")],
+            wait_side_effect=stop_during_wait,
+        )
+
+        self.assertIsNone(calls["result"])
+        calls["next"].assert_called_once_with()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 1)
+        calls["focus_restore"].assert_not_called()
+
+    def test_confirm_switch_next_failure_observes_nothing(self):
+        calls = self.run_candidate_switch_confirmation(
+            [],
+            next_result=False,
+        )
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_FAILED)
+        self.assertEqual(result.failure_reason, "next_action_failed")
+        self.assertEqual(result.observation_attempt, 0)
+        calls["next"].assert_called_once_with()
+        calls["detector"].capture_observation.assert_not_called()
+        calls["wait"].assert_not_called()
+        calls["focus_restore"].assert_not_called()
+
+    def test_confirm_switch_second_next_failure_stops_without_observation(self):
+        calls = self.run_candidate_switch_confirmation(
+            [make_ready_switch_observation("a") for _ in range(6)],
+            next_side_effect=[True, False],
+        )
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_FAILED)
+        self.assertEqual(result.action_attempt, 2)
+        self.assertEqual(result.observation_attempt, 0)
+        self.assertEqual(result.failure_reason, "next_action_failed")
+        self.assertEqual(calls["next"].call_args_list, [call(), call()])
+        calls["focus_restore"].assert_called_once_with()
+        self.assertEqual(calls["detector"].capture_observation.call_count, 6)
+
+    def test_candidate_switch_failure_sets_only_the_first_stop_reason(self):
+        result = simple_brush.CandidateSwitchResult(
+            state=simple_brush.CANDIDATE_SWITCH_FAILED,
+            action_attempt=1,
+            observation_attempt=6,
+            failure_reason="comparison_unverifiable",
+        )
+
+        with patch.object(simple_brush.logger, "error") as error:
+            simple_brush.request_candidate_switch_failed_stop(
+                result,
+                candidate_in_batch=2,
+                total_viewed=1,
+            )
+            simple_brush.request_candidate_switch_failed_stop(
+                result,
+                candidate_in_batch=2,
+                total_viewed=1,
+            )
+
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(
+            simple_brush.stop_reason,
+            "candidate_switch_failed",
+        )
+        error.assert_called_once()
+        failed_log = render_log_calls(error)[0]
+        self.assertIn("event=candidate_switch_failed", failed_log)
+        self.assertIn("phase=post_next", failed_log)
+        self.assertIn("state=switch_failed", failed_log)
+        self.assertIn("action_attempt=1", failed_log)
+        self.assertIn("observation_attempt=6", failed_log)
+        self.assertIn("current_hash=-", failed_log)
+        self.assertIn("failure_reason=comparison_unverifiable", failed_log)
+        self.assertIn("stop_reason=candidate_switch_failed", failed_log)
+        self.assertIn("candidate_in_batch=2", failed_log)
+        self.assertIn("total_viewed=1", failed_log)
+
+        for existing_reason in (
+            "esc",
+            "run_duration_elapsed",
+            "load_failed",
+        ):
+            with self.subTest(existing_reason=existing_reason):
+                simple_brush.stop_event = True
+                simple_brush.stop_reason = existing_reason
+                with patch.object(simple_brush.logger, "error") as error:
+                    simple_brush.request_candidate_switch_failed_stop(
+                        result,
+                        candidate_in_batch=2,
+                        total_viewed=1,
+                    )
+                self.assertEqual(simple_brush.stop_reason, existing_reason)
+                error.assert_not_called()
+
+    def test_confirm_switch_unstable_new_exhausts_six_observations(self):
+        observations = [
+            make_ready_switch_observation(character)
+            for character in ("b", "c", "d", "e", "f", "0")
+        ]
+
+        calls = self.run_candidate_switch_confirmation(observations)
+
+        result = calls["result"]
+        self.assertEqual(result.state, simple_brush.CANDIDATE_SWITCH_FAILED)
+        self.assertEqual(
+            result.observation_attempt,
+            simple_brush.CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION,
+        )
+        self.assertEqual(
+            result.failure_reason,
+            "observation_budget_exhausted",
+        )
+        self.assertEqual(calls["detector"].capture_observation.call_count, 6)
+        self.assertEqual(calls["wait"].call_count, 5)
+        calls["next"].assert_called_once_with()
+        calls["focus_restore"].assert_not_called()
+
+    def test_confirm_switch_unverifiable_observations_are_bounded(self):
+        scenarios = (
+            [
+                make_ready_switch_observation("b", fingerprint=False)
+                for _ in range(6)
+            ],
+            [
+                make_ready_switch_observation(
+                    "b",
+                    fingerprint_version="r03-v2",
+                )
+                for _ in range(6)
+            ],
+            [RuntimeError("capture unavailable") for _ in range(6)],
+        )
+
+        for observations in scenarios:
+            with self.subTest(observations=observations):
+                calls = self.run_candidate_switch_confirmation(observations)
+                result = calls["result"]
+                self.assertEqual(
+                    result.state,
+                    simple_brush.CANDIDATE_SWITCH_FAILED,
+                )
+                self.assertEqual(
+                    result.failure_reason,
+                    "comparison_unverifiable",
+                )
+                self.assertEqual(
+                    calls["detector"].capture_observation.call_count,
+                    6,
+                )
+                self.assertEqual(calls["wait"].call_count, 5)
+                calls["next"].assert_called_once_with()
+                calls["focus_restore"].assert_not_called()
+
+    def test_confirm_switch_performs_no_business_or_navigation_side_effects(self):
+        calls = self.run_candidate_switch_confirmation([
+            make_ready_switch_observation("b"),
+            make_ready_switch_observation("b"),
+        ])
+
+        calls["ocr_scroll"].assert_not_called()
+        calls["human_scroll"].assert_not_called()
+        calls["favorite"].assert_not_called()
+        calls["forward"].assert_not_called()
+        calls["refresh"].assert_not_called()
+        calls["detector"].detect.assert_not_called()
+        calls["focus_restore"].assert_not_called()
+
+    def test_candidate_switch_logs_use_five_frozen_events_and_fields(self):
+        formal = make_switch_fingerprint("a", screen_index=1)
+        baseline_observation = make_ready_switch_observation("a")
+        simple_brush.ocr_detector = Mock()
+        simple_brush.ocr_detector.capture_observation.return_value = (
+            baseline_observation
+        )
+        detection_result = DetectionResult(
+            success=True,
+            confirmed_match=False,
+            observations=[make_switch_observation(formal)],
+        )
+
+        with (
+            patch.object(simple_brush.logger, "info") as baseline_info,
+            patch.object(simple_brush.logger, "warning") as baseline_warning,
+        ):
+            context, reason = simple_brush.prepare_candidate_switch_context(
+                detection_result,
+                candidate_in_batch=1,
+                total_viewed=1,
+            )
+
+        self.assertIsNone(reason)
+        baseline_warning.assert_not_called()
+        calls = self.run_candidate_switch_confirmation(
+            [
+                *[make_ready_switch_observation("a") for _ in range(6)],
+                make_ready_switch_observation("b"),
+                make_ready_switch_observation("b"),
+            ],
+            context=context,
+        )
+        failed_result = simple_brush.CandidateSwitchResult(
+            state=simple_brush.CANDIDATE_SWITCH_FAILED,
+            action_attempt=2,
+            observation_attempt=6,
+            failure_reason="observation_budget_exhausted",
+        )
+        with patch.object(simple_brush.logger, "error") as failed_error:
+            simple_brush.request_candidate_switch_failed_stop(
+                failed_result,
+                candidate_in_batch=3,
+                total_viewed=2,
+            )
+
+        info_logs = render_log_calls(baseline_info, calls["info"])
+        warning_logs = render_log_calls(calls["warning"])
+        error_logs = render_log_calls(failed_error)
+        r01_logs = [
+            line
+            for line in info_logs + warning_logs + error_logs
+            if line.startswith("event=candidate_switch_")
+        ]
+        event_names = {
+            line.split(" ", 1)[0].split("=", 1)[1]
+            for line in r01_logs
+        }
+        self.assertEqual(
+            event_names,
+            {
+                "candidate_switch_check",
+                "candidate_switch_focus_recovery",
+                "candidate_switch_retry",
+                "candidate_switch_confirmed",
+                "candidate_switch_failed",
+            },
+        )
+        self.assertEqual(
+            sum("event=candidate_switch_check" in line for line in r01_logs),
+            9,
+        )
+        self.assertEqual(
+            sum("event=candidate_switch_confirmed" in line for line in r01_logs),
+            1,
+        )
+        self.assertEqual(
+            sum("event=candidate_switch_failed" in line for line in r01_logs),
+            1,
+        )
+        self.assertTrue(all(
+            "event=candidate_switch_check" in line
+            or "event=candidate_switch_confirmed" in line
+            for line in info_logs
+            if line.startswith("event=candidate_switch_")
+        ))
+        self.assertEqual(
+            {
+                line.split(" ", 1)[0]
+                for line in warning_logs
+                if line.startswith("event=candidate_switch_")
+            },
+            {
+                "event=candidate_switch_focus_recovery",
+                "event=candidate_switch_retry",
+            },
+        )
+        self.assertEqual(
+            [line.split(" ", 1)[0] for line in error_logs],
+            ["event=candidate_switch_failed"],
+        )
+        required_fields = (
+            "phase=",
+            "state=",
+            "action_attempt=",
+            "observation_attempt=",
+            "old_fingerprint_count=",
+            "current_hash=-",
+            "compare_relation=",
+            "r02_ready=",
+            "r02_reason=",
+            "failure_reason=",
+            "stop_reason=",
+            "candidate_in_batch=",
+            "total_viewed=",
+        )
+        self.assertTrue(all(
+            all(field in line for field in required_fields)
+            for line in r01_logs
+        ))
+
+    def test_candidate_switch_logs_do_not_leak_private_page_data(self):
+        private_marker = "PRIVATE_R01_SWITCH_BODY_7D4F"
+        private_exception = (
+            f"{private_marker} OCRItem coordinate=(123,456) "
+            "confidence=0.987"
+        )
+
+        def private_fingerprint(character, *, screen_index=None):
+            return ScreenFingerprint(
+                raw_text=private_marker,
+                normalized_text=private_marker,
+                raw_text_length=len(private_marker),
+                normalized_text_length=len(private_marker),
+                ocr_box_count=1,
+                captured_at="2026-01-01T00:00:00+00:00",
+                exact_hash=character * 64,
+                fingerprint_version="r03-v1",
+                screen_index=screen_index,
+            )
+
+        def private_observation(character):
+            return ScanObservation(
+                scan_number=1,
+                text=private_marker,
+                item_count=6,
+                elapsed_seconds=0.987,
+                ocr_box_count=6,
+                ocr_text_length=30,
+                fingerprint=private_fingerprint(character),
+            )
+
+        formal = private_fingerprint("a", screen_index=1)
+        baseline = private_observation("a")
+        simple_brush.ocr_detector = Mock()
+        simple_brush.ocr_detector.capture_observation.return_value = baseline
+        with patch.object(simple_brush.logger, "info") as baseline_info:
+            context, reason = simple_brush.prepare_candidate_switch_context(
+                DetectionResult(
+                    success=True,
+                    confirmed_match=False,
+                    observations=[make_switch_observation(formal)],
+                ),
+                candidate_in_batch=1,
+                total_viewed=1,
+            )
+        self.assertIsNone(reason)
+
+        confirmed_calls = self.run_candidate_switch_confirmation(
+            [
+                private_observation("a"),
+                private_observation("a"),
+                private_observation("b"),
+                private_observation("b"),
+            ],
+            context=context,
+        )
+        failed_calls = self.run_candidate_switch_confirmation(
+            [RuntimeError(private_exception) for _ in range(6)],
+            context=context,
+        )
+        simple_brush.stop_event = False
+        simple_brush.stop_reason = None
+        with patch.object(simple_brush.logger, "error") as failed_error:
+            simple_brush.request_candidate_switch_failed_stop(
+                failed_calls["result"],
+                candidate_in_batch=2,
+                total_viewed=1,
+            )
+
+        rendered = "\n".join(render_log_calls(
+            baseline_info,
+            confirmed_calls["info"],
+            confirmed_calls["warning"],
+            confirmed_calls["error"],
+            failed_calls["info"],
+            failed_calls["warning"],
+            failed_calls["error"],
+            failed_error,
+        ))
+        self.assertIn("error_type=RuntimeError", rendered)
+        for forbidden in (
+            private_marker,
+            "OCRItem",
+            "coordinate=(123,456)",
+            "confidence=0.987",
+            "ScreenFingerprint(",
+            "ScanObservation(",
+            "DetectionResult(",
+            "a" * 64,
+            "b" * 64,
+            "candidate_name",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, rendered)
+
+        production_source = Path(simple_brush.__file__).read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("candidate_name", production_source)
+
+    def test_nonconfirmed_terminal_states_stop_before_count_or_actions(self):
+        states = (
+            simple_brush.CANDIDATE_SWITCH_LOADING,
+            simple_brush.CANDIDATE_SWITCH_OBSERVING,
+            simple_brush.CANDIDATE_SWITCH_UNCHANGED,
+            simple_brush.CANDIDATE_SWITCH_UNVERIFIABLE,
+            simple_brush.CANDIDATE_SWITCH_FAILED,
+        )
+        for state in states:
+            with self.subTest(state=state):
+                simple_brush.stop_event = False
+                simple_brush.stop_reason = None
+                calls = self.run_mocked_keyword_switch(
+                    simple_brush.CandidateSwitchResult(
+                        state=state,
+                        action_attempt=1,
+                        observation_attempt=1,
+                        failure_reason=(
+                            "observation_budget_exhausted"
+                            if state == simple_brush.CANDIDATE_SWITCH_FAILED
+                            else None
+                        ),
+                    )
+                )
+
+                self.assertEqual(calls["result"], 0)
+                calls["view"].assert_called_once_with(
+                    0,
+                    first_observation=calls["first_observation"],
+                )
+                calls["confirm_switch"].assert_called_once_with(
+                    calls["context"],
+                    candidate_in_batch=2,
+                    total_viewed=1,
+                )
+                calls["next_candidate"].assert_not_called()
+                calls["favorite"].assert_not_called()
+                calls["forward"].assert_not_called()
+                calls["refresh"].assert_not_called()
+                self.assertEqual(
+                    simple_brush.stop_reason,
+                    "candidate_switch_failed",
+                )
+                failed_logs = [
+                    line
+                    for line in render_log_calls(calls["error"])
+                    if line.startswith("event=candidate_switch_failed")
+                ]
+                self.assertEqual(len(failed_logs), 1)
+                self.assertIn("total_viewed=1", failed_logs[0])
+                self.assertTrue(any(
+                    log_call.args
+                    and log_call.args[0]
+                    == "\n🏁 停止运行。累计查看 1 位候选人。"
+                    for log_call in calls["info"].call_args_list
+                ))
+
+    def test_favorite_forward_and_no_forward_modes_all_enter_r01(self):
+        modes = (
+            (simple_brush.ACTION_MODE_FAVORITE, False),
+            (simple_brush.ACTION_MODE_FORWARD, False),
+            (simple_brush.ACTION_MODE_FORWARD, True),
+        )
+        for action_mode, no_forward in modes:
+            with self.subTest(
+                action_mode=action_mode,
+                no_forward=no_forward,
+            ):
+                simple_brush.stop_event = False
+                simple_brush.stop_reason = None
+                confirmed_observation = make_ready_switch_observation("b")
+                calls = self.run_mocked_keyword_switch(
+                    simple_brush.CandidateSwitchResult(
+                        state=simple_brush.CANDIDATE_SWITCH_CONFIRMED,
+                        action_attempt=1,
+                        observation_attempt=2,
+                        confirmed_observation=confirmed_observation,
+                    ),
+                    action_mode=action_mode,
+                    no_forward=no_forward,
+                )
+
+                calls["load_gate"].assert_called_once_with(
+                    candidate_in_batch=1,
+                    total_viewed=0,
+                    recovery_count=0,
+                    recovery_available=False,
+                )
+                calls["prepare_context"].assert_called_once()
+                calls["confirm_switch"].assert_called_once_with(
+                    calls["context"],
+                    candidate_in_batch=2,
+                    total_viewed=1,
+                )
+                self.assertIs(
+                    calls["view"].call_args_list[1].kwargs[
+                        "first_observation"
+                    ],
+                    confirmed_observation,
+                )
+                calls["next_candidate"].assert_not_called()
+                calls["refresh"].assert_not_called()
+                self.assertTrue(any(
+                    log_call.args
+                    and log_call.args[0]
+                    == "\n🏁 停止运行。累计查看 2 位候选人。"
+                    for log_call in calls["info"].call_args_list
+                ))
+
+    def test_refresh_and_refilter_clear_context_before_new_first_r02(self):
+        confirmed_observation = make_ready_switch_observation("b")
+        calls = self.run_mocked_keyword_switch(
+            simple_brush.CandidateSwitchResult(
+                state=simple_brush.CANDIDATE_SWITCH_CONFIRMED,
+                action_attempt=1,
+                observation_attempt=2,
+                confirmed_observation=confirmed_observation,
+            ),
+            stop_on_view_call=3,
+            refresh_result=True,
+            batch_filter_enabled=True,
+        )
+
+        self.assertEqual(calls["load_gate"].call_count, 2)
+        self.assertEqual(
+            calls["load_gate"].call_args_list,
+            [
+                call(
+                    candidate_in_batch=1,
+                    total_viewed=0,
+                    recovery_count=0,
+                    recovery_available=True,
+                ),
+                call(
+                    candidate_in_batch=1,
+                    total_viewed=2,
+                    recovery_count=0,
+                    recovery_available=True,
+                ),
+            ],
+        )
+        calls["confirm_switch"].assert_called_once_with(
+            calls["context"],
+            candidate_in_batch=2,
+            total_viewed=1,
+        )
+        self.assertEqual(
+            [view_call.args[0] for view_call in calls["view"].call_args_list],
+            [0, 1, 0],
+        )
+        calls["prepare_context"].assert_called_once()
+        calls["open_first"].assert_not_called()
+        self.assertEqual(calls["filter_open"].call_count, 2)
+        calls["refresh"].assert_called_once_with()
+        self.assertTrue(any(
+            log_call.args
+            and log_call.args[0]
+            == "\n🏁 停止运行。累计查看 3 位候选人。"
+            for log_call in calls["info"].call_args_list
+        ))
+
+    def test_normal_refresh_completion_does_not_become_r01_failure(self):
+        confirmed_observation = make_ready_switch_observation("b")
+        calls = self.run_mocked_keyword_switch(
+            simple_brush.CandidateSwitchResult(
+                state=simple_brush.CANDIDATE_SWITCH_CONFIRMED,
+                action_attempt=1,
+                observation_attempt=2,
+                confirmed_observation=confirmed_observation,
+            ),
+            stop_on_view_call=99,
+            refresh_result=False,
+        )
+
+        self.assertEqual(calls["result"], 0)
+        calls["refresh"].assert_called_once_with()
+        calls["error"].assert_not_called()
+        self.assertIsNone(simple_brush.stop_reason)
+        self.assertFalse(simple_brush.stop_event)
+        self.assertTrue(any(
+            log_call.args
+            and log_call.args[0]
+            == "event=run_stopped stop_reason=none"
+            for log_call in calls["info"].call_args_list
+        ))
+
+    def test_run_reuses_second_action_confirmation_and_counts_once(self):
+        first_loaded = loaded_observation()
+        formal_old = make_switch_fingerprint("a", screen_index=1)
+        first_detection = DetectionResult(
+            success=True,
+            confirmed_match=False,
+            observations=[make_switch_observation(formal_old)],
+        )
+        baseline = make_ready_switch_observation("a")
+        unchanged_observations = [
+            make_ready_switch_observation("a")
+            for _ in range(6)
+        ]
+        new_first = make_ready_switch_observation("b")
+        new_second = make_ready_switch_observation("b")
+        second_detection = DetectionResult(
+            success=True,
+            confirmed_match=False,
+            observations=[new_second],
+        )
+        detector = Mock()
+        detector.capture_observation.side_effect = [
+            baseline,
+            *unchanged_observations,
+            new_first,
+            new_second,
+        ]
+        detector.detect.side_effect = [first_detection, second_detection]
+        simple_brush.ocr_detector = detector
+
+        def configure_input(**_kwargs):
+            simple_brush.forward_enabled = True
+            simple_brush.forward_keywords = (
+                simple_brush.parse_keyword_rules('"Python"')
+            )
+            simple_brush.batch_filter_enabled = False
+            simple_brush.no_forward_mode = True
+
+        with (
+            patch.object(simple_brush, "BATCH_SIZE", 2),
+            patch.object(simple_brush, "parse_args", return_value={
+                "keywords": "",
+                "email": "",
+                "duration_seconds": "",
+                "no_forward": True,
+                "auto": False,
+            }),
+            patch.object(
+                simple_brush,
+                "get_user_input",
+                side_effect=configure_input,
+            ),
+            patch.object(simple_brush, "initialize_ocr"),
+            patch.object(simple_brush.listener, "start"),
+            patch.object(
+                simple_brush,
+                "bring_edge_foreground",
+                return_value=True,
+            ),
+            patch.object(simple_brush, "safe_wait", return_value=True),
+            patch.object(
+                simple_brush.pyautogui,
+                "position",
+                return_value=(10, 20),
+            ),
+            patch.object(
+                simple_brush,
+                "click_first_candidate",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "ensure_ocr_region_calibrated",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=(
+                    "loaded",
+                    first_loaded,
+                    0,
+                    "threshold_passed",
+                ),
+            ) as load_gate,
+            patch.object(
+                simple_brush,
+                "next_candidate",
+                return_value=True,
+            ) as next_candidate,
+            patch.object(
+                simple_brush,
+                "restore_candidate_page_focus",
+                return_value=True,
+            ) as restore_focus,
+            patch.object(
+                simple_brush.random,
+                "uniform",
+                return_value=0.0,
+            ),
+            patch.object(simple_brush, "refresh_page", return_value=False),
+            patch.object(simple_brush, "perform_favorite_action") as favorite,
+            patch.object(simple_brush, "forward_one_candidate") as forward,
+            patch.object(simple_brush.logger, "info") as info,
+            patch.object(simple_brush.logger, "warning") as warning,
+            patch.object(simple_brush.logger, "error") as error,
+        ):
+            self.assertEqual(simple_brush.run(), 0)
+
+        load_gate.assert_called_once()
+        self.assertEqual(next_candidate.call_args_list, [call(), call()])
+        restore_focus.assert_called_once_with()
+        self.assertEqual(
+            detector.capture_observation.call_args_list,
+            [call(1) for _ in range(9)],
+        )
+        self.assertEqual(detector.detect.call_count, 2)
+        self.assertIs(
+            detector.detect.call_args_list[1].kwargs["first_observation"],
+            new_second,
+        )
+        favorite.assert_not_called()
+        forward.assert_not_called()
+        error.assert_not_called()
+        r01_logs = [
+            line
+            for line in render_log_calls(info, warning)
+            if line.startswith("event=candidate_switch_")
+        ]
+        self.assertEqual(
+            sum("event=candidate_switch_confirmed" in line for line in r01_logs),
+            1,
+        )
+        self.assertEqual(
+            sum("event=candidate_switch_focus_recovery" in line for line in r01_logs),
+            1,
+        )
+        self.assertEqual(
+            sum("event=candidate_switch_retry" in line for line in r01_logs),
+            1,
+        )
+        confirmed_log = next(
+            line
+            for line in r01_logs
+            if "event=candidate_switch_confirmed" in line
+        )
+        self.assertIn("action_attempt=2", confirmed_log)
+        self.assertIn("candidate_in_batch=2", confirmed_log)
+        self.assertIn("total_viewed=1", confirmed_log)
+        self.assertTrue(any(
+            log_call.args
+            and log_call.args[0]
+            == '\n🏁 停止运行。累计查看 2 位候选人。'
+            for log_call in info.call_args_list
+        ))
+
+    def test_run_second_unchanged_never_scans_or_counts_second_candidate(self):
+        first_observation = loaded_observation()
+        old_fingerprint = make_switch_fingerprint("a", screen_index=1)
+        first_detection = DetectionResult(
+            success=True,
+            confirmed_match=False,
+            observations=[make_switch_observation(old_fingerprint)],
+        )
+        baseline = make_ready_switch_observation("a")
+        old_observations = [
+            make_ready_switch_observation("a")
+            for _ in range(12)
+        ]
+        detector = Mock()
+        detector.capture_observation.side_effect = [
+            baseline,
+            *old_observations,
+        ]
+        simple_brush.ocr_detector = detector
+
+        def configure_input(**_kwargs):
+            simple_brush.forward_enabled = True
+            simple_brush.forward_keywords = (
+                simple_brush.parse_keyword_rules('"Python"')
+            )
+            simple_brush.batch_filter_enabled = False
+
+        def first_view(*_args, **_kwargs):
+            return True, first_detection
+
+        with (
+            patch.object(simple_brush, "BATCH_SIZE", 2),
+            patch.object(simple_brush, "parse_args", return_value={
+                "keywords": "",
+                "email": "",
+                "duration_seconds": "",
+                "no_forward": True,
+                "auto": False,
+            }),
+            patch.object(
+                simple_brush,
+                "get_user_input",
+                side_effect=configure_input,
+            ),
+            patch.object(simple_brush, "initialize_ocr"),
+            patch.object(simple_brush.listener, "start"),
+            patch.object(
+                simple_brush,
+                "bring_edge_foreground",
+                return_value=True,
+            ),
+            patch.object(simple_brush, "safe_wait", return_value=True),
+            patch.object(
+                simple_brush.pyautogui,
+                "position",
+                return_value=(10, 20),
+            ),
+            patch.object(
+                simple_brush,
+                "click_first_candidate",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "ensure_ocr_region_calibrated",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=(
+                    "loaded",
+                    first_observation,
+                    0,
+                    "threshold_passed",
+                ),
+            ),
+            patch.object(
+                simple_brush,
+                "view_candidate",
+                side_effect=first_view,
+            ) as view,
+            patch.object(
+                simple_brush,
+                "next_candidate",
+                return_value=True,
+            ) as next_candidate,
+            patch.object(
+                simple_brush,
+                "restore_candidate_page_focus",
+                return_value=True,
+            ) as restore_focus,
+            patch.object(simple_brush, "refresh_page") as refresh,
+            patch.object(simple_brush, "perform_favorite_action") as favorite,
+            patch.object(simple_brush, "forward_one_candidate") as forward,
+            patch.object(simple_brush.logger, "info") as info,
+            patch.object(simple_brush.logger, "warning") as warning,
+            patch.object(simple_brush.logger, "error") as error,
+        ):
+            self.assertEqual(simple_brush.run(), 0)
+
+        view.assert_called_once_with(
+            0,
+            first_observation=first_observation,
+        )
+        self.assertEqual(next_candidate.call_args_list, [call(), call()])
+        restore_focus.assert_called_once_with()
+        refresh.assert_not_called()
+        favorite.assert_not_called()
+        forward.assert_not_called()
+        self.assertEqual(simple_brush.stop_reason, "candidate_switch_failed")
+        r01_errors = [
+            line
+            for line in render_log_calls(error)
+            if line.startswith("event=candidate_switch_")
+        ]
+        self.assertEqual(len(r01_errors), 1)
+        self.assertIn("event=candidate_switch_failed", r01_errors[0])
+        self.assertIn("action_attempt=2", r01_errors[0])
+        self.assertIn("total_viewed=1", r01_errors[0])
+        self.assertFalse(any(
+            "event=candidate_switch_confirmed" in line
+            for line in render_log_calls(info, warning, error)
+        ))
+        self.assertTrue(any(
+            log_call.args
+            and log_call.args[0]
+            == '\n🏁 停止运行。累计查看 1 位候选人。'
+            for log_call in info.call_args_list
+        ))
+
     def test_detect_keywords_uses_ocr_without_clipboard(self):
         observation = ScanObservation(1, "python", 1, 0.05, "Python")
         detector = Mock()
@@ -343,7 +2546,9 @@ class SimpleBrushOCRTests(unittest.TestCase):
         simple_brush.ocr_detector = detector
 
         with patch.object(simple_brush, "get_clipboard_text") as clipboard:
-            self.assertTrue(simple_brush.detect_keywords())
+            keyword_hit, result = simple_brush.detect_keywords()
+        self.assertTrue(keyword_hit)
+        self.assertIs(result, detector.detect.return_value)
         clipboard.assert_not_called()
         detector.detect.assert_called_once_with(
             simple_brush.forward_keywords,
@@ -363,7 +2568,9 @@ class SimpleBrushOCRTests(unittest.TestCase):
         simple_brush.forward_keywords = rules
         simple_brush.ocr_detector = detector
 
-        self.assertTrue(simple_brush.detect_keywords())
+        keyword_hit, result = simple_brush.detect_keywords()
+        self.assertTrue(keyword_hit)
+        self.assertIs(result, detector.detect.return_value)
         detector.detect.assert_called_once_with(rules, first_observation=None)
 
     def test_detect_keywords_reuses_prefetched_observation_without_relogging_it(self):
@@ -380,8 +2587,12 @@ class SimpleBrushOCRTests(unittest.TestCase):
         simple_brush.ocr_detector = detector
 
         with patch.object(simple_brush.logger, "info") as info:
-            self.assertTrue(simple_brush.detect_keywords(first_observation))
+            keyword_hit, result = simple_brush.detect_keywords(
+                first_observation
+            )
 
+        self.assertTrue(keyword_hit)
+        self.assertIs(result, detector.detect.return_value)
         detector.detect.assert_called_once_with(
             simple_brush.forward_keywords,
             first_observation=first_observation,
@@ -1022,7 +3233,17 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.assertEqual(loaded_logs[0].args[2:5], (1, 'retry', 2))
 
     def test_no_keyword_run_bypasses_load_gate_and_ocr_setup(self):
-        calls = self.run_load_gate_candidate(keywords=False)
+        with (
+            patch.object(
+                simple_brush,
+                "prepare_candidate_switch_context",
+            ) as prepare_context,
+            patch.object(
+                simple_brush,
+                "confirm_candidate_switch",
+            ) as confirm_switch,
+        ):
+            calls = self.run_load_gate_candidate(keywords=False)
 
         self.assertEqual(calls["result"], 0)
         calls["initialize_ocr"].assert_not_called()
@@ -1031,6 +3252,16 @@ class SimpleBrushOCRTests(unittest.TestCase):
         calls["view"].assert_called_once_with(0)
         calls["next_candidate"].assert_not_called()
         calls["refresh"].assert_not_called()
+        prepare_context.assert_not_called()
+        confirm_switch.assert_not_called()
+        self.assertFalse(any(
+            line.startswith("event=candidate_switch_")
+            for line in render_log_calls(
+                calls["info"],
+                calls["warning"],
+                calls["error"],
+            )
+        ))
 
     def test_run_resets_stop_reason_at_start(self):
         simple_brush.stop_reason = "esc"
@@ -1039,6 +3270,30 @@ class SimpleBrushOCRTests(unittest.TestCase):
 
         self.assertEqual(calls["result"], 0)
         self.assertIsNone(simple_brush.stop_reason)
+
+    def test_independent_keyword_runs_each_start_with_r02_not_r01(self):
+        with patch.object(
+            simple_brush,
+            "confirm_candidate_switch",
+        ) as confirm_switch:
+            first = self.run_load_gate_candidate(
+                observation=loaded_observation()
+            )
+            second = self.run_load_gate_candidate(
+                observation=loaded_observation()
+            )
+
+        first["detector"].capture_observation.assert_called_once_with(1)
+        second["detector"].capture_observation.assert_called_once_with(1)
+        first["view"].assert_called_once_with(
+            0,
+            first_observation=first["detector"].capture_observation.return_value,
+        )
+        second["view"].assert_called_once_with(
+            0,
+            first_observation=second["detector"].capture_observation.return_value,
+        )
+        confirm_switch.assert_not_called()
 
     def test_unavailable_recovery_requests_load_failed_without_side_effects(self):
         calls = self.run_load_gate_candidate(
@@ -1155,7 +3410,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         def record_view(*_args, **_kwargs):
             events.append('view')
             simple_brush.stop_event = True
-            return False
+            return False, None
 
         calls = self.run_load_gate_candidate(
             capture_sequence=[
@@ -1202,42 +3457,40 @@ class SimpleBrushOCRTests(unittest.TestCase):
         )
         self.assertEqual(events, ['loaded', 'confirmed', 'view'])
 
-    def test_confirmed_recovery_allows_a_later_independent_recovery(self):
-        view_count = 0
+    def test_recovered_first_candidate_still_requires_valid_pre_switch_baseline(self):
+        def continue_to_baseline(*_args, **_kwargs):
+            return True, DetectionResult(False, False)
 
-        def continue_then_stop(*_args, **_kwargs):
-            nonlocal view_count
-            view_count += 1
-            if view_count == 2:
-                simple_brush.stop_event = True
-                return False
-            return True
+        with patch.object(
+            simple_brush,
+            "confirm_candidate_switch",
+        ) as confirm_switch:
+            calls = self.run_load_gate_candidate(
+                capture_sequence=[
+                    *[not_loaded_observation() for _ in range(4)],
+                    loaded_observation(),
+                    *[not_loaded_observation() for _ in range(4)],
+                    loaded_observation(),
+                ],
+                recovery_available=True,
+                view_side_effect=continue_to_baseline,
+            )
 
-        calls = self.run_load_gate_candidate(
-            capture_sequence=[
-                *[not_loaded_observation() for _ in range(4)],
-                loaded_observation(),
-                *[not_loaded_observation() for _ in range(4)],
-                loaded_observation(),
-            ],
-            recovery_available=True,
-            view_side_effect=continue_then_stop,
-        )
-
-        self.assertEqual(calls["detector"].capture_observation.call_count, 10)
-        self.assertEqual(calls["recover"].call_count, 2)
+        self.assertEqual(calls["detector"].capture_observation.call_count, 6)
+        self.assertEqual(calls["recover"].call_count, 1)
         self.assertEqual(
             [view_call.args[0] for view_call in calls["view"].call_args_list],
-            [0, 0],
+            [0],
         )
-        calls["next_candidate"].assert_called_once_with()
+        calls["next_candidate"].assert_not_called()
+        confirm_switch.assert_not_called()
         recovery_start_logs = [
             log_call
             for log_call in calls["warning"].call_args_list
             if log_call.args
             and 'event=detail_load_recovery_start' in log_call.args[0]
         ]
-        self.assertEqual(len(recovery_start_logs), 2)
+        self.assertEqual(len(recovery_start_logs), 1)
         self.assertTrue(all(log_call.args[-1] == 1 for log_call in recovery_start_logs))
         confirmed_logs = [
             log_call
@@ -1245,8 +3498,9 @@ class SimpleBrushOCRTests(unittest.TestCase):
             if log_call.args
             and 'event=detail_load_recovery_confirmed' in log_call.args[0]
         ]
-        self.assertEqual(len(confirmed_logs), 2)
-        calls["error"].assert_not_called()
+        self.assertEqual(len(confirmed_logs), 1)
+        calls["error"].assert_called_once()
+        self.assertEqual(simple_brush.stop_reason, "candidate_switch_failed")
 
     def test_exhaustion_triggers_exactly_one_f5_and_filter_reopen(self):
         calls = self.run_load_gate_candidate(
@@ -1360,58 +3614,90 @@ class SimpleBrushOCRTests(unittest.TestCase):
     def test_no_forward_mode_never_calls_real_forward(self):
         simple_brush.no_forward_mode = True
         simple_brush.action_mode = simple_brush.ACTION_MODE_FORWARD
+        detection_result = DetectionResult(True, True)
         with (
-            patch.object(simple_brush, "detect_keywords", return_value=True),
+            patch.object(
+                simple_brush,
+                "detect_keywords",
+                return_value=(True, detection_result),
+            ),
             patch.object(simple_brush, "forward_one_candidate") as forward,
             patch.object(simple_brush, "perform_favorite_action") as favorite,
             patch.object(simple_brush.random, "uniform", return_value=0.0),
         ):
-            self.assertTrue(simple_brush.view_candidate(0))
+            completed, result = simple_brush.view_candidate(0)
+        self.assertTrue(completed)
+        self.assertIs(result, detection_result)
         forward.assert_not_called()
         favorite.assert_not_called()
 
     def test_forward_mode_keyword_hit_calls_forward_action(self):
         simple_brush.action_mode = simple_brush.ACTION_MODE_FORWARD
+        detection_result = DetectionResult(True, True)
         with (
-            patch.object(simple_brush, "detect_keywords", return_value=True),
+            patch.object(
+                simple_brush,
+                "detect_keywords",
+                return_value=(True, detection_result),
+            ),
             patch.object(simple_brush, "forward_one_candidate") as forward,
             patch.object(simple_brush, "perform_favorite_action") as favorite,
             patch.object(simple_brush.random, "uniform", return_value=0.0),
         ):
-            self.assertTrue(simple_brush.view_candidate(0))
+            completed, result = simple_brush.view_candidate(0)
+        self.assertTrue(completed)
+        self.assertIs(result, detection_result)
         forward.assert_called_once_with()
         favorite.assert_not_called()
 
     def test_favorite_mode_keyword_hit_calls_favorite_action_only(self):
         simple_brush.action_mode = simple_brush.ACTION_MODE_FAVORITE
         simple_brush.no_forward_mode = True
+        detection_result = DetectionResult(True, True)
         with (
-            patch.object(simple_brush, "detect_keywords", return_value=True),
+            patch.object(
+                simple_brush,
+                "detect_keywords",
+                return_value=(True, detection_result),
+            ),
             patch.object(simple_brush, "perform_favorite_action") as favorite,
             patch.object(simple_brush, "forward_one_candidate") as forward,
             patch.object(simple_brush, "ensure_forward_click_regions_calibrated") as forward_calibrate,
             patch.object(simple_brush.random, "uniform", return_value=0.0),
         ):
-            self.assertTrue(simple_brush.view_candidate(0))
+            completed, result = simple_brush.view_candidate(0)
+        self.assertTrue(completed)
+        self.assertIs(result, detection_result)
         favorite.assert_called_once_with()
         forward.assert_not_called()
         forward_calibrate.assert_not_called()
 
     def test_ocr_failure_never_calls_real_forward(self):
+        detection_result = DetectionResult(False, False)
         with (
-            patch.object(simple_brush, "detect_keywords", return_value=False),
+            patch.object(
+                simple_brush,
+                "detect_keywords",
+                return_value=(False, detection_result),
+            ),
             patch.object(simple_brush, "forward_one_candidate") as forward,
             patch.object(simple_brush, "perform_favorite_action") as favorite,
             patch.object(simple_brush.random, "uniform", return_value=0.0),
         ):
-            self.assertTrue(simple_brush.view_candidate(0))
+            completed, result = simple_brush.view_candidate(0)
+        self.assertTrue(completed)
+        self.assertIs(result, detection_result)
         forward.assert_not_called()
         favorite.assert_not_called()
 
     def test_invalid_action_mode_fails_when_keyword_hits(self):
         simple_brush.action_mode = "invalid"
         with (
-            patch.object(simple_brush, "detect_keywords", return_value=True),
+            patch.object(
+                simple_brush,
+                "detect_keywords",
+                return_value=(True, DetectionResult(True, True)),
+            ),
             patch.object(simple_brush.random, "uniform", return_value=0.0),
         ):
             with self.assertRaisesRegex(ValueError, "未知候选人处理模式"):
@@ -2354,7 +4640,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         sleep.assert_called_once_with(0.5)
         restore_focus.assert_called_once_with()
 
-    def test_restore_candidate_page_focus_after_favorite_clicks_ocr_inner_region_twice(self):
+    def test_restore_candidate_page_focus_clicks_ocr_inner_region_twice(self):
         region = simple_brush.ScreenRegion(left=100, top=200, width=300, height=100)
         simple_brush.ocr_detector = Mock(region=region)
         with (
@@ -2371,7 +4657,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "ensure_focus_restore_region_calibrated",
             ) as forward_focus_calibrate,
         ):
-            self.assertTrue(simple_brush.restore_candidate_page_focus_after_favorite())
+            self.assertTrue(simple_brush.restore_candidate_page_focus())
 
         self.assertEqual(random_point.call_args_list, [call(region), call(region)])
         self.assertEqual(
@@ -2384,6 +4670,18 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.assertEqual(sleep.call_args_list, [call(0.15), call(0.15)])
         select.assert_not_called()
         forward_focus_calibrate.assert_not_called()
+
+    def test_favorite_focus_wrapper_delegates_to_neutral_helper(self):
+        with patch.object(
+            simple_brush,
+            "restore_candidate_page_focus",
+            return_value=False,
+        ) as restore_focus:
+            self.assertFalse(
+                simple_brush.restore_candidate_page_focus_after_favorite()
+            )
+
+        restore_focus.assert_called_once_with()
 
     def test_perform_favorite_action_restores_focus_after_favorite_click(self):
         region = simple_brush.ScreenRegion(left=100, top=200, width=300, height=100)
@@ -3406,7 +5704,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
 
         def view(_index, first_observation=None):
             events.append("view")
-            return False
+            return False, None
 
         with (
             patch.object(simple_brush, "parse_args", return_value={
@@ -3510,7 +5808,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "run_detail_load_gate",
                 return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
             ),
-            patch.object(simple_brush, "view_candidate", side_effect=record("view", False)),
+            patch.object(
+                simple_brush,
+                "view_candidate",
+                side_effect=record("view", (False, None)),
+            ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
             self.assertEqual(simple_brush.run(), 0)
@@ -3569,7 +5871,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "run_detail_load_gate",
                 return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
             ),
-            patch.object(simple_brush, "view_candidate", side_effect=record("view", False)),
+            patch.object(
+                simple_brush,
+                "view_candidate",
+                side_effect=record("view", (False, None)),
+            ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
             self.assertEqual(simple_brush.run(), 0)
@@ -3651,7 +5957,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "ensure_favorite_button_region_calibrated") as favorite_calibrate,
             patch.object(simple_brush, "ensure_ocr_region_calibrated", return_value=True),
             patch.object(simple_brush, "start_run_timer", return_value=None),
-            patch.object(simple_brush, "view_candidate", return_value=False),
+            patch.object(
+                simple_brush,
+                "view_candidate",
+                return_value=(False, None),
+            ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
             self.assertEqual(simple_brush.run(), 0)
@@ -3680,7 +5990,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "ensure_favorite_button_region_calibrated") as favorite_calibrate,
             patch.object(simple_brush, "ensure_ocr_region_calibrated", return_value=True),
             patch.object(simple_brush, "start_run_timer", return_value=None),
-            patch.object(simple_brush, "view_candidate", return_value=False),
+            patch.object(
+                simple_brush,
+                "view_candidate",
+                return_value=(False, None),
+            ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
             self.assertEqual(simple_brush.run(), 0)
@@ -3813,7 +6127,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(
                 simple_brush,
                 "view_candidate",
-                side_effect=record("view", False),
+                side_effect=record("view", (False, None)),
             ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
@@ -3979,7 +6293,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(
                 simple_brush,
                 "view_candidate",
-                side_effect=record("view", False),
+                side_effect=record("view", (False, None)),
             ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
@@ -4029,8 +6343,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 simple_brush.forward_consecutive = 3
             if view_calls == 3:
                 simple_brush.stop_event = True
-                return False
-            return True
+                return False, None
+            return True, None
 
         def next_candidate():
             events.append("next")
@@ -4115,7 +6429,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 return_value=True,
             ) as apply_filter,
             patch.object(simple_brush, "start_run_timer", return_value=None),
-            patch.object(simple_brush, "view_candidate", return_value=True) as view,
+            patch.object(
+                simple_brush,
+                "view_candidate",
+                return_value=(True, None),
+            ) as view,
             patch.object(simple_brush, "refresh_page", return_value=False) as refresh,
         ):
             self.assertEqual(simple_brush.run(), 0)
@@ -4156,7 +6474,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 side_effect=[True, False],
             ) as apply_filter,
             patch.object(simple_brush, "start_run_timer", return_value=None),
-            patch.object(simple_brush, "view_candidate", return_value=True) as view,
+            patch.object(
+                simple_brush,
+                "view_candidate",
+                return_value=(True, None),
+            ) as view,
             patch.object(simple_brush, "refresh_page", return_value=True) as refresh,
         ):
             self.assertEqual(simple_brush.run(), 0)
@@ -4191,7 +6513,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 side_effect=[True, False],
             ) as legacy_click,
             patch.object(simple_brush, "start_run_timer", return_value=None),
-            patch.object(simple_brush, "view_candidate", return_value=True),
+            patch.object(
+                simple_brush,
+                "view_candidate",
+                return_value=(True, None),
+            ),
             patch.object(simple_brush, "refresh_page", return_value=True),
         ):
             self.assertEqual(simple_brush.run(), 0)

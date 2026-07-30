@@ -330,6 +330,8 @@ class ScanObservation:
     ocr_box_count: Optional[int] = None
     ocr_text_length: Optional[int] = None
     fingerprint: Optional[ScreenFingerprint] = None
+    raw_items: Tuple[OCRItem, ...] = ()
+    captured_at: Optional[str] = None
 
 
 def bind_fingerprint_screen_index(
@@ -499,6 +501,9 @@ class OCRKeywordDetector:
         wait: Callable[[float], None] = time.sleep,
         settle_seconds: float = 0.6,
         confirmation_seconds: float = 0.7,
+        observation_callback: Optional[
+            Callable[[ScanObservation, str, bool, Optional[int]], None]
+        ] = None,
     ):
         if max_scans < 1:
             raise ValueError("max_scans must be at least 1")
@@ -511,6 +516,31 @@ class OCRKeywordDetector:
         self.wait = wait
         self.settle_seconds = settle_seconds
         self.confirmation_seconds = confirmation_seconds
+        self.observation_callback = observation_callback
+
+    def _notify_observation(
+        self,
+        observation: ScanObservation,
+        capture_type: str,
+        is_formal_screen: bool,
+        screen_index: Optional[int],
+    ) -> None:
+        """Notify optional stage-0 storage without affecting OCR behavior."""
+
+        if self.observation_callback is None:
+            return
+        try:
+            self.observation_callback(
+                observation,
+                capture_type,
+                is_formal_screen,
+                screen_index,
+            )
+        except Exception as exc:
+            logger.warning(
+                "event=ocr_observation_callback_failed error_type=%s",
+                type(exc).__name__,
+            )
 
     def capture_observation(self, scan_number: int) -> ScanObservation:
         started = time.perf_counter()
@@ -519,8 +549,12 @@ class OCRKeywordDetector:
         accepted_items = accepted_ocr_items(raw_items, self.min_confidence)
         ocr_box_count, ocr_text_length = calculate_load_metrics(accepted_items)
         text = searchable_text(accepted_items)
+        captured_at = datetime.now().astimezone()
         try:
-            fingerprint = build_screen_fingerprint(accepted_items)
+            fingerprint = build_screen_fingerprint(
+                accepted_items,
+                captured_at=captured_at,
+            )
         except Exception as exc:
             fingerprint = None
             _log_fingerprint_generation_failed(scan_number, type(exc).__name__)
@@ -532,6 +566,8 @@ class OCRKeywordDetector:
             ocr_box_count=ocr_box_count,
             ocr_text_length=ocr_text_length,
             fingerprint=fingerprint,
+            raw_items=tuple(raw_items),
+            captured_at=captured_at.isoformat(),
         )
         if fingerprint is not None:
             _log_fingerprint_generated(observation)
@@ -576,6 +612,12 @@ class OCRKeywordDetector:
                 bind_fingerprint_screen_index(first, scan_number)
                 first = self._match_observation(first, rules)
                 observations.append(first)
+                self._notify_observation(
+                    first,
+                    "formal_screen",
+                    True,
+                    scan_number,
+                )
                 if first is not first_observation:
                     logger.info(
                         "OCR scan %s/%s: %s items, %.3fs, match=%r",
@@ -591,6 +633,12 @@ class OCRKeywordDetector:
                 self.wait(self.confirmation_seconds)
                 confirmation = self._observe(scan_number, [first.matched_rule])
                 observations.append(confirmation)
+                self._notify_observation(
+                    confirmation,
+                    "scroll_confirmation",
+                    False,
+                    scan_number,
+                )
                 confirmed = confirmation.matched_rule == first.matched_rule
                 return DetectionResult(
                     success=True,

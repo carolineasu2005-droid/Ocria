@@ -24,6 +24,7 @@ import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Dict, Optional, Tuple
 import win32gui
 import win32con
 import win32clipboard
@@ -48,12 +49,19 @@ from calibration_profiles import (
 )
 from calibration_template import main as calibration_template_main
 from ocr_detector import (
+    DetectionResult,
     MSSScreenCapture,
     OCRKeywordDetector,
     RapidOCRBackend,
+    ScanObservation,
+    ScreenFingerprint,
+    compare_screen_fingerprints,
     evaluate_detail_page_load,
 )
 from ocr_text import parse_keyword_rules
+from ocr_candidate import CandidateOcrBuilder
+from ocr_records import CaptureStatus, CaptureType, RunStatus
+from ocr_store import JsonlOcrRecordStore
 from mouse_motion import (
     move_to_observable,
     windmouse_available,
@@ -170,10 +178,24 @@ OCR_SETTLE_SECONDS = 0.6
 OCR_CONFIRMATION_SECONDS = 0.7
 OCR_PREVIEW_PATH = Path('logs/ocr_calibration_preview.png')
 
+# R01 candidate-switch verification
+CANDIDATE_SWITCH_MAX_ACTIONS = 2
+CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION = 6
+CANDIDATE_SWITCH_STABLE_OBSERVATIONS = 2
+CANDIDATE_SWITCH_OBSERVATION_WAIT_SECONDS = 0.8
+
+CANDIDATE_SWITCH_PENDING = "switch_pending"
+CANDIDATE_SWITCH_LOADING = "switch_loading"
+CANDIDATE_SWITCH_OBSERVING = "switch_observing"
+CANDIDATE_SWITCH_UNCHANGED = "switch_unchanged"
+CANDIDATE_SWITCH_CONFIRMED = "switch_confirmed"
+CANDIDATE_SWITCH_UNVERIFIABLE = "switch_unverifiable"
+CANDIDATE_SWITCH_FAILED = "switch_failed"
+
 # 滚动
 SCROLL_PROBABILITY = 0.8
-SCROLL_MIN_STEPS = 10
-SCROLL_MAX_STEPS = 40
+SCROLL_MIN_STEPS = 30
+SCROLL_MAX_STEPS = 120
 SCROLL_MAX_TIMES = 3
 
 # ─── 转发功能配置 ────────────────────────────────────
@@ -196,6 +218,227 @@ class BatchFilterRegions:
     open_filter: ScreenRegion
     unseen_filter: ScreenRegion
     confirm_filter: ScreenRegion
+
+
+@dataclass(frozen=True)
+class CandidateSwitchContext:
+    """Immutable fingerprints retained for one candidate switch."""
+
+    formal_fingerprints: Tuple[ScreenFingerprint, ...]
+    pre_switch_fingerprint: ScreenFingerprint
+
+
+@dataclass(frozen=True)
+class CandidateSwitchResult:
+    """Pure terminal or intermediate candidate-switch result."""
+
+    state: str
+    action_attempt: int
+    observation_attempt: int
+    confirmed_observation: Optional[ScanObservation] = None
+    failure_reason: Optional[str] = None
+
+
+def is_comparable_screen_fingerprint(
+    fingerprint: Optional[ScreenFingerprint],
+) -> bool:
+    """Return whether an R03 fingerprint can be compared exactly."""
+
+    return compare_screen_fingerprints(fingerprint, fingerprint) is True
+
+
+def extract_formal_fingerprints(
+    result: Optional[DetectionResult],
+) -> Tuple[ScreenFingerprint, ...]:
+    """Return valid formal R03 fingerprints ordered by screen index."""
+
+    if result is None:
+        return ()
+
+    indexed_fingerprints = []
+    seen_indexes = set()
+    for observation in result.observations:
+        fingerprint = observation.fingerprint
+        if not is_comparable_screen_fingerprint(fingerprint):
+            continue
+
+        screen_index = fingerprint.screen_index
+        if screen_index is None:
+            continue
+        if (
+            isinstance(screen_index, bool)
+            or not isinstance(screen_index, int)
+            or not 1 <= screen_index <= 8
+        ):
+            raise ValueError("formal fingerprint invariant failed")
+        if screen_index in seen_indexes:
+            raise ValueError("formal fingerprint invariant failed")
+
+        seen_indexes.add(screen_index)
+        indexed_fingerprints.append((screen_index, fingerprint))
+
+    if len(indexed_fingerprints) > 8:
+        raise ValueError("formal fingerprint invariant failed")
+
+    indexed_fingerprints.sort(key=lambda item: item[0])
+    return tuple(fingerprint for _, fingerprint in indexed_fingerprints)
+
+
+def candidate_switch_references(
+    context: CandidateSwitchContext,
+) -> Tuple[ScreenFingerprint, ...]:
+    """Return formal fingerprints followed by the pre-switch baseline."""
+
+    if len(context.formal_fingerprints) > 8:
+        raise ValueError("candidate switch context invariant failed")
+
+    seen_indexes = set()
+    for fingerprint in context.formal_fingerprints:
+        screen_index = fingerprint.screen_index
+        if (
+            not is_comparable_screen_fingerprint(fingerprint)
+            or isinstance(screen_index, bool)
+            or not isinstance(screen_index, int)
+            or not 1 <= screen_index <= 8
+            or screen_index in seen_indexes
+        ):
+            raise ValueError("candidate switch context invariant failed")
+        seen_indexes.add(screen_index)
+
+    if (
+        context.pre_switch_fingerprint.screen_index is not None
+        or not is_comparable_screen_fingerprint(
+            context.pre_switch_fingerprint
+        )
+    ):
+        raise ValueError("candidate switch context invariant failed")
+
+    return context.formal_fingerprints + (
+        context.pre_switch_fingerprint,
+    )
+
+
+def matches_any_previous_fingerprint(
+    current: Optional[ScreenFingerprint],
+    previous: Tuple[ScreenFingerprint, ...],
+) -> Optional[bool]:
+    """Return whether current exactly matches any previous fingerprint."""
+
+    if not previous:
+        return None
+
+    saw_unverifiable = False
+    for fingerprint in previous:
+        comparison = compare_screen_fingerprints(current, fingerprint)
+        if comparison is True:
+            return True
+        if comparison is None:
+            saw_unverifiable = True
+
+    if saw_unverifiable:
+        return None
+    return False
+
+
+def differs_from_all_previous_fingerprints(
+    current: Optional[ScreenFingerprint],
+    previous: Tuple[ScreenFingerprint, ...],
+) -> Optional[bool]:
+    """Return whether current is provably different from every previous page."""
+
+    matches_any = matches_any_previous_fingerprint(current, previous)
+    if matches_any is True:
+        return False
+    if matches_any is False:
+        return True
+    return None
+
+
+def fingerprints_are_stable(
+    left: Optional[ScreenFingerprint],
+    right: Optional[ScreenFingerprint],
+) -> Optional[bool]:
+    """Return R03 exact-comparison stability for two observations."""
+
+    return compare_screen_fingerprints(left, right)
+
+
+def evaluate_candidate_switch_observation(
+    load_ready: Optional[bool],
+    current_fingerprint: Optional[ScreenFingerprint],
+    previous_fingerprints: Tuple[ScreenFingerprint, ...],
+    previous_ready_fingerprint: Optional[ScreenFingerprint],
+    previous_relation: Optional[str],
+) -> Tuple[str, Optional[str]]:
+    """Classify one candidate-switch observation without side effects."""
+
+    if load_ready is False:
+        return CANDIDATE_SWITCH_LOADING, None
+    if load_ready is None:
+        return CANDIDATE_SWITCH_UNVERIFIABLE, None
+    if (
+        not previous_fingerprints
+        or not is_comparable_screen_fingerprint(current_fingerprint)
+    ):
+        return CANDIDATE_SWITCH_UNVERIFIABLE, None
+
+    matches_previous = matches_any_previous_fingerprint(
+        current_fingerprint,
+        previous_fingerprints,
+    )
+    if matches_previous is None:
+        return CANDIDATE_SWITCH_UNVERIFIABLE, None
+
+    current_relation = "old" if matches_previous else "new"
+    if (
+        previous_ready_fingerprint is not None
+        and previous_relation == current_relation
+        and fingerprints_are_stable(
+            previous_ready_fingerprint,
+            current_fingerprint,
+        )
+        is True
+    ):
+        if current_relation == "old":
+            return CANDIDATE_SWITCH_UNCHANGED, current_relation
+        return CANDIDATE_SWITCH_CONFIRMED, current_relation
+
+    return CANDIDATE_SWITCH_OBSERVING, current_relation
+
+
+def candidate_switch_action_budget_exhausted(action_attempt: int) -> bool:
+    """Return whether the frozen two-action budget is exhausted."""
+
+    return action_attempt >= CANDIDATE_SWITCH_MAX_ACTIONS
+
+
+def candidate_switch_observation_budget_exhausted(
+    observation_attempt: int,
+) -> bool:
+    """Return whether the frozen six-observation budget is exhausted."""
+
+    return (
+        observation_attempt
+        >= CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION
+    )
+
+
+def candidate_switch_focus_recovery_allowed(
+    state: str,
+    action_attempt: int,
+) -> bool:
+    """Return whether one focus recovery and retry is permitted."""
+
+    return (
+        state == CANDIDATE_SWITCH_UNCHANGED
+        and action_attempt == 1
+    )
+
+
+def candidate_switch_scan_allowed(state: str) -> bool:
+    """Return whether formal scanning and counting are permitted."""
+
+    return state == CANDIDATE_SWITCH_CONFIRMED
 
 
 def region_around(x, y, radius):
@@ -331,6 +574,236 @@ ocr_detector = None
 ocr_initialization_attempted = False
 ocr_calibration_attempted = False
 ocr_calibration_in_progress = False
+
+# Stage-0 OCR persistence (one store per run, one builder per candidate).
+ocr_record_store = None
+current_candidate_builder = None
+candidate_record_sequence = 0
+recorded_observation_ids: Dict[int, ScanObservation] = {}
+
+
+def create_ocr_record_store():
+    """Create the best-effort stage-0 store for one application run."""
+
+    return JsonlOcrRecordStore(
+        action_mode=action_mode,
+        max_screen_count=OCR_MAX_SCANS,
+    )
+
+
+def initialize_run_ocr_storage():
+    """Initialize storage without allowing it to block the existing run."""
+
+    global ocr_record_store
+    try:
+        ocr_record_store = create_ocr_record_store()
+    except Exception as exc:
+        ocr_record_store = None
+        logger.warning(
+            "event=ocr_store_factory_failed error_type=%s",
+            type(exc).__name__,
+        )
+        return None
+    if ocr_record_store.enabled:
+        logger.info(
+            "event=ocr_store_ready run_id=%s",
+            ocr_record_store.run_id,
+        )
+    return ocr_record_store
+
+
+def start_candidate_ocr_recording(
+    candidate_in_batch: int,
+    total_viewed: int,
+):
+    """Create the sole in-memory builder for the current candidate."""
+
+    global current_candidate_builder
+    global candidate_record_sequence
+    global recorded_observation_ids
+    if current_candidate_builder is not None:
+        return current_candidate_builder
+    if ocr_record_store is None or not ocr_record_store.enabled:
+        return None
+    candidate_record_sequence += 1
+    current_candidate_builder = CandidateOcrBuilder(
+        ocr_record_store.run_id,
+        candidate_record_sequence,
+        metadata={
+            "candidate_in_batch": candidate_in_batch,
+            "total_viewed_before": total_viewed,
+        },
+    )
+    recorded_observation_ids = {}
+    return current_candidate_builder
+
+
+def record_ocr_observation(
+    observation: ScanObservation,
+    capture_type,
+    is_formal_screen: bool,
+    screen_index: Optional[int],
+):
+    """Append one already-completed OCR result without triggering OCR again."""
+
+    if current_candidate_builder is None or ocr_record_store is None:
+        return None
+    observation_identity = id(observation)
+    if observation_identity in recorded_observation_ids:
+        return None
+    try:
+        capture_type = (
+            capture_type
+            if isinstance(capture_type, CaptureType)
+            else CaptureType(capture_type)
+        )
+        fingerprint = getattr(observation, "fingerprint", None)
+        record = current_candidate_builder.build_screen_record(
+            getattr(observation, "raw_items", ()),
+            capture_type=capture_type,
+            is_formal_screen=is_formal_screen,
+            screen_index=screen_index,
+            captured_at=(
+                getattr(observation, "captured_at", None)
+                or (
+                    fingerprint.captured_at
+                    if fingerprint is not None
+                    else None
+                )
+            ),
+            exact_hash=(
+                fingerprint.exact_hash
+                if fingerprint is not None
+                else None
+            ),
+            fingerprint_version=(
+                fingerprint.fingerprint_version
+                if fingerprint is not None
+                else None
+            ),
+        )
+        recorded_observation_ids[observation_identity] = observation
+        ocr_record_store.save_screen(record)
+        return record
+    except Exception as exc:
+        ocr_record_store.save_error(
+            type(exc).__name__,
+            "record_ocr_observation",
+            {
+                "candidate_record_id": (
+                    current_candidate_builder.candidate_record_id
+                ),
+                "capture_type": str(capture_type),
+            },
+        )
+        return None
+
+
+def record_detection_observation(
+    observation: ScanObservation,
+    capture_type: str,
+    is_formal_screen: bool,
+    screen_index: Optional[int],
+) -> None:
+    """Detector callback for formal scans and their existing confirmations."""
+
+    record_ocr_observation(
+        observation,
+        capture_type,
+        is_formal_screen,
+        screen_index,
+    )
+
+
+def candidate_capture_status(detection_result):
+    """Classify only the current fixed maximum-screen outcome."""
+
+    if (
+        detection_result is not None
+        and not detection_result.confirmed_match
+        and detection_result.scans_completed >= OCR_MAX_SCANS
+    ):
+        return CaptureStatus.COMPLETED_WITH_LIMIT, "max_screen_limit"
+    return CaptureStatus.COMPLETED, "existing_flow_completed"
+
+
+def finalize_current_candidate_recording(
+    capture_status: CaptureStatus,
+    end_reason: Optional[str],
+    abort_reason: Optional[str] = None,
+):
+    """Save one candidate document and release its builder best-effort."""
+
+    global current_candidate_builder
+    global recorded_observation_ids
+    builder = current_candidate_builder
+    current_candidate_builder = None
+    recorded_observation_ids = {}
+    if builder is None:
+        return None
+    try:
+        document = builder.finalize(
+            capture_status,
+            end_reason=end_reason,
+            abort_reason=abort_reason,
+        )
+        if ocr_record_store is not None:
+            ocr_record_store.save_candidate(document)
+        return document
+    except Exception as exc:
+        if ocr_record_store is not None:
+            ocr_record_store.save_error(
+                type(exc).__name__,
+                "finalize_candidate",
+                {"candidate_record_id": builder.candidate_record_id},
+            )
+        return None
+
+
+def finalize_active_candidate_for_stop(
+    exception_type: Optional[str] = None,
+):
+    """Finalize an unfinished current candidate using existing stop state."""
+
+    if current_candidate_builder is None:
+        return None
+    if exception_type is not None:
+        return finalize_current_candidate_recording(
+            CaptureStatus.ABORTED,
+            None,
+            exception_type,
+        )
+    if stop_reason == "esc":
+        return finalize_current_candidate_recording(
+            CaptureStatus.INTERRUPTED,
+            None,
+            "user_interrupted",
+        )
+    if stop_reason == "run_duration_elapsed":
+        return finalize_current_candidate_recording(
+            CaptureStatus.INTERRUPTED,
+            None,
+            "runtime_expired",
+        )
+    return finalize_current_candidate_recording(
+        CaptureStatus.ABORTED,
+        None,
+        stop_reason or "existing_flow_aborted",
+    )
+
+
+def close_run_ocr_storage(status: RunStatus) -> None:
+    """Close the run store without masking the existing exit path."""
+
+    if ocr_record_store is None:
+        return
+    try:
+        ocr_record_store.close(status)
+    except Exception as exc:
+        logger.warning(
+            "event=ocr_store_close_failed error_type=%s",
+            type(exc).__name__,
+        )
 
 
 # ─── 安全控制 ───────────────────────────────────────
@@ -932,6 +1405,100 @@ def request_load_failed_stop(
     stop_event = True
 
 
+def log_candidate_switch_event(
+    event: str,
+    level: int,
+    *,
+    phase: Optional[str] = None,
+    state: Optional[str] = None,
+    action_attempt: Optional[int] = None,
+    observation_attempt: Optional[int] = None,
+    old_fingerprint_count: Optional[int] = None,
+    compare_relation: Optional[str] = None,
+    r02_ready: Optional[bool] = None,
+    r02_reason: Optional[str] = None,
+    failure_reason: Optional[str] = None,
+    event_stop_reason: Optional[str] = None,
+    candidate_in_batch: Optional[int] = None,
+    total_viewed: Optional[int] = None,
+    error_type: Optional[str] = None,
+) -> None:
+    """Write one fixed-field R01 event without page-derived content."""
+
+    log_method = {
+        logging.INFO: logger.info,
+        logging.WARNING: logger.warning,
+        logging.ERROR: logger.error,
+    }[level]
+    if r02_ready is True:
+        ready_value = "true"
+    elif r02_ready is False:
+        ready_value = "false"
+    else:
+        ready_value = "-"
+
+    message = (
+        "event=%s phase=%s state=%s action_attempt=%s "
+        "observation_attempt=%s old_fingerprint_count=%s "
+        "current_hash=- compare_relation=%s r02_ready=%s "
+        "r02_reason=%s failure_reason=%s stop_reason=%s "
+        "candidate_in_batch=%s total_viewed=%s"
+    )
+    values = [
+        event,
+        phase or "-",
+        state or "-",
+        action_attempt if action_attempt is not None else "-",
+        observation_attempt if observation_attempt is not None else "-",
+        (
+            old_fingerprint_count
+            if old_fingerprint_count is not None
+            else "-"
+        ),
+        compare_relation or "-",
+        ready_value,
+        r02_reason or "-",
+        failure_reason or "-",
+        event_stop_reason or "-",
+        candidate_in_batch if candidate_in_batch is not None else "-",
+        total_viewed if total_viewed is not None else "-",
+    ]
+    if error_type is not None:
+        message += " error_type=%s"
+        values.append(error_type)
+    log_method(message, *values)
+
+
+def request_candidate_switch_failed_stop(
+    result: CandidateSwitchResult,
+    candidate_in_batch: int,
+    total_viewed: int,
+) -> None:
+    """Record the first R01 failure and request a safe stop."""
+
+    global stop_event, stop_reason
+    if stop_event or stop_reason is not None:
+        return
+    stop_reason = "candidate_switch_failed"
+    stop_event = True
+    log_candidate_switch_event(
+        "candidate_switch_failed",
+        logging.ERROR,
+        phase=(
+            "pre_switch"
+            if result.action_attempt == 0
+            else "post_next"
+        ),
+        state=result.state,
+        action_attempt=result.action_attempt,
+        observation_attempt=result.observation_attempt,
+        failure_reason=result.failure_reason,
+        event_stop_reason=stop_reason,
+        candidate_in_batch=candidate_in_batch,
+        total_viewed=total_viewed,
+    )
+
+
 def start_run_timer(duration_seconds):
     """Start the optional run timer and return it for later cancellation."""
     if duration_seconds <= 0:
@@ -1192,9 +1759,14 @@ def perform_favorite_action():
 
 
 def restore_candidate_page_focus_after_favorite():
-    """Restore detail-page focus by clicking inside the calibrated OCR body region."""
+    """Restore detail-page focus after favorite through the neutral helper."""
+    return restore_candidate_page_focus()
+
+
+def restore_candidate_page_focus():
+    """Restore detail-page focus inside the calibrated OCR body region."""
     if ocr_detector is None:
-        logger.warning('OCR 正文区域未就绪，跳过收藏后的详情页焦点恢复')
+        logger.warning('OCR 正文区域未就绪，跳过详情页焦点恢复')
         return False
 
     region = ocr_detector.region
@@ -1330,6 +1902,7 @@ def ensure_ocr_region_calibrated():
         wait=ocr_wait,
         settle_seconds=OCR_SETTLE_SECONDS,
         confirmation_seconds=OCR_CONFIRMATION_SECONDS,
+        observation_callback=record_detection_observation,
     )
     logger.info(
         '✅ OCR 校准完成: left=%s top=%s width=%s height=%s',
@@ -1634,6 +2207,11 @@ def run_detail_load_gate(
     for retry_number in range(MAX_LOAD_RETRIES + 1):
         state = 'loading' if retry_number == 0 else 'load_retrying'
         attempt = 'initial' if retry_number == 0 else 'retry'
+        capture_type = (
+            CaptureType.LOAD_CHECK
+            if retry_number == 0
+            else CaptureType.LOAD_RETRY
+        )
 
         if retry_number > 0:
             if not safe_wait(LOAD_RETRY_WAIT_SECONDS):
@@ -1656,15 +2234,36 @@ def run_detail_load_gate(
             log = logger.warning
         else:
             if stop_event:
+                record_ocr_observation(
+                    observation,
+                    capture_type,
+                    False,
+                    None,
+                )
                 return None, None, retry_number, 'stopped'
-            loaded, reason = evaluate_detail_page_load(
-                observation.ocr_box_count,
-                observation.ocr_text_length,
-                OCR_BOX_COUNT_THRESHOLD,
-                OCR_TEXT_LENGTH_THRESHOLD,
-            )
+            try:
+                loaded, reason = evaluate_detail_page_load(
+                    observation.ocr_box_count,
+                    observation.ocr_text_length,
+                    OCR_BOX_COUNT_THRESHOLD,
+                    OCR_TEXT_LENGTH_THRESHOLD,
+                )
+            except Exception:
+                record_ocr_observation(
+                    observation,
+                    capture_type,
+                    False,
+                    None,
+                )
+                raise
             if loaded:
                 return 'loaded', observation, retry_number, reason
+            record_ocr_observation(
+                observation,
+                capture_type,
+                False,
+                None,
+            )
             ocr_box_count = observation.ocr_box_count
             ocr_text_length = observation.ocr_text_length
             decision = 'not_loaded'
@@ -1701,17 +2300,19 @@ def run_detail_load_gate(
     return outcome, None, MAX_LOAD_RETRIES, reason
 
 
-def detect_keywords(first_observation=None):
+def detect_keywords(
+    first_observation: Optional[ScanObservation] = None,
+) -> Tuple[bool, Optional[DetectionResult]]:
     """
     截取已校准的屏幕区域并执行最多 8 屏 OCR 精确匹配。
-    OCR 失败、空结果、低置信度或二次确认失败均返回 False。
+    返回关键词命中布尔值和同一个 DetectionResult；未检测时结果为 None。
     """
     if not forward_enabled or not forward_keywords:
-        return False
+        return False, None
 
     if not ensure_ocr_region_calibrated():
         logger.warning('🛡 OCR 未就绪，因安全原因跳过转发')
-        return False
+        return False, None
 
     logger.info(f'🔍 OCR 关键词规则检测中... 目标: {keyword_rule_sources()}')
     result = ocr_detector.detect(
@@ -1736,16 +2337,16 @@ def detect_keywords(first_observation=None):
 
     if not result.success:
         logger.error(f'🛡 OCR 错误，因安全原因跳过转发: {result.error}')
-        return False
+        return False, result
     if result.error:
         logger.warning(f'🛡 OCR 二次确认失败，因安全原因跳过转发: {result.error}')
-        return False
+        return False, result
     if result.confirmed_match:
         logger.info(f'🔑 OCR 二次确认命中规则: {result.matched_keyword}')
-        return True
+        return True, result
 
     logger.info('  → OCR 最多 8 屏未确认命中，跳过转发')
-    return False
+    return False, result
 
 
 # ─── 转发流程 ───────────────────────────────────────
@@ -1940,7 +2541,10 @@ def human_scroll_once():
         time.sleep(random.uniform(0.3, 1.0))
 
 
-def view_candidate(index_in_batch, first_observation=None):
+def view_candidate(
+    index_in_batch: int,
+    first_observation: Optional[ScanObservation] = None,
+) -> Tuple[bool, Optional[DetectionResult]]:
     """
     浏览当前候选人。
     流程：检测关键词 → 命中则转发 → 停留 12-18 秒 + 滚动。
@@ -1953,11 +2557,14 @@ def view_candidate(index_in_batch, first_observation=None):
 
     # ── 关键词检测（在浏览开始前） ──
     keyword_hit = False
+    detection_result = None
     if forward_enabled and forward_keywords:
-        keyword_hit = detect_keywords(first_observation=first_observation)
+        keyword_hit, detection_result = detect_keywords(
+            first_observation=first_observation
+        )
 
         if stop_event:
-            return False
+            return False, detection_result
 
         if keyword_hit:
             if action_mode == ACTION_MODE_FAVORITE:
@@ -1994,11 +2601,11 @@ def view_candidate(index_in_batch, first_observation=None):
             break
 
         if not safe_wait(segment):
-            return False
+            return False, detection_result
 
         human_scroll_once()
 
-    return True
+    return True, detection_result
 
 
 def next_candidate():
@@ -2007,6 +2614,470 @@ def next_candidate():
         return False
     pyautogui.press('right')
     return safe_wait(0.5)
+
+
+def prepare_candidate_switch_context(
+    detection_result: Optional[DetectionResult],
+    candidate_in_batch: int,
+    total_viewed: int,
+) -> Tuple[Optional[CandidateSwitchContext], Optional[str]]:
+    """Capture one dedicated pre-switch baseline and build R01 context."""
+
+    if stop_event:
+        return None, "stopped"
+
+    try:
+        formal_fingerprints = extract_formal_fingerprints(detection_result)
+    except ValueError:
+        return None, "formal_fingerprint_invariant_failed"
+
+    try:
+        if ocr_detector is None:
+            raise RuntimeError("OCR detector is not ready")
+        observation = ocr_detector.capture_observation(1)
+    except Exception as exc:
+        log_candidate_switch_event(
+            "candidate_switch_check",
+            logging.WARNING,
+            phase="pre_switch",
+            state=CANDIDATE_SWITCH_UNVERIFIABLE,
+            action_attempt=0,
+            observation_attempt=1,
+            old_fingerprint_count=len(formal_fingerprints),
+            r02_reason="ocr_error",
+            failure_reason="pre_switch_baseline_unavailable",
+            event_stop_reason=stop_reason,
+            candidate_in_batch=candidate_in_batch,
+            total_viewed=total_viewed,
+            error_type=type(exc).__name__,
+        )
+        if stop_event:
+            return None, "stopped"
+        return None, "pre_switch_baseline_unavailable"
+
+    record_ocr_observation(
+        observation,
+        CaptureType.SWITCH_CHECK,
+        False,
+        None,
+    )
+
+    if stop_event:
+        log_candidate_switch_event(
+            "candidate_switch_check",
+            logging.WARNING,
+            phase="pre_switch",
+            state=CANDIDATE_SWITCH_UNVERIFIABLE,
+            action_attempt=0,
+            observation_attempt=1,
+            old_fingerprint_count=len(formal_fingerprints),
+            r02_reason="stopped",
+            event_stop_reason=stop_reason,
+            candidate_in_batch=candidate_in_batch,
+            total_viewed=total_viewed,
+        )
+        return None, "stopped"
+
+    try:
+        loaded, load_reason = evaluate_detail_page_load(
+            observation.ocr_box_count,
+            observation.ocr_text_length,
+            OCR_BOX_COUNT_THRESHOLD,
+            OCR_TEXT_LENGTH_THRESHOLD,
+        )
+    except (TypeError, ValueError) as exc:
+        log_candidate_switch_event(
+            "candidate_switch_check",
+            logging.WARNING,
+            phase="pre_switch",
+            state=CANDIDATE_SWITCH_UNVERIFIABLE,
+            action_attempt=0,
+            observation_attempt=1,
+            old_fingerprint_count=len(formal_fingerprints),
+            r02_reason="invalid_r02_metrics",
+            failure_reason="pre_switch_baseline_unavailable",
+            candidate_in_batch=candidate_in_batch,
+            total_viewed=total_viewed,
+            error_type=type(exc).__name__,
+        )
+        return None, "pre_switch_baseline_unavailable"
+
+    fingerprint = observation.fingerprint
+    fingerprint_is_valid = (
+        fingerprint is not None
+        and fingerprint.screen_index is None
+        and is_comparable_screen_fingerprint(fingerprint)
+    )
+    if not loaded or not fingerprint_is_valid:
+        log_candidate_switch_event(
+            "candidate_switch_check",
+            logging.WARNING,
+            phase="pre_switch",
+            state=(
+                CANDIDATE_SWITCH_LOADING
+                if not loaded
+                else CANDIDATE_SWITCH_UNVERIFIABLE
+            ),
+            action_attempt=0,
+            observation_attempt=1,
+            old_fingerprint_count=len(formal_fingerprints),
+            r02_ready=loaded,
+            r02_reason=load_reason,
+            failure_reason="pre_switch_baseline_unavailable",
+            candidate_in_batch=candidate_in_batch,
+            total_viewed=total_viewed,
+        )
+        return None, "pre_switch_baseline_unavailable"
+
+    context = CandidateSwitchContext(
+        formal_fingerprints=formal_fingerprints,
+        pre_switch_fingerprint=fingerprint,
+    )
+    try:
+        references = candidate_switch_references(context)
+    except ValueError:
+        log_candidate_switch_event(
+            "candidate_switch_check",
+            logging.WARNING,
+            phase="pre_switch",
+            state=CANDIDATE_SWITCH_UNVERIFIABLE,
+            action_attempt=0,
+            observation_attempt=1,
+            old_fingerprint_count=len(formal_fingerprints),
+            r02_ready=True,
+            r02_reason=load_reason,
+            failure_reason="formal_fingerprint_invariant_failed",
+            candidate_in_batch=candidate_in_batch,
+            total_viewed=total_viewed,
+        )
+        return None, "formal_fingerprint_invariant_failed"
+    log_candidate_switch_event(
+        "candidate_switch_check",
+        logging.INFO,
+        phase="pre_switch",
+        state=CANDIDATE_SWITCH_PENDING,
+        action_attempt=0,
+        observation_attempt=1,
+        old_fingerprint_count=len(references),
+        r02_ready=True,
+        r02_reason=load_reason,
+        candidate_in_batch=candidate_in_batch,
+        total_viewed=total_viewed,
+    )
+    return context, None
+
+
+def confirm_candidate_switch(
+    context: CandidateSwitchContext,
+    candidate_in_batch: int,
+    total_viewed: int,
+) -> Optional[CandidateSwitchResult]:
+    """Confirm one bounded candidate switch with at most two next actions."""
+
+    if stop_event:
+        return None
+
+    try:
+        previous_fingerprints = candidate_switch_references(context)
+    except ValueError:
+        return CandidateSwitchResult(
+            state=CANDIDATE_SWITCH_FAILED,
+            action_attempt=0,
+            observation_attempt=0,
+            failure_reason="formal_fingerprint_invariant_failed",
+        )
+
+    action_attempt = 0
+    while not candidate_switch_action_budget_exhausted(action_attempt):
+        state = CANDIDATE_SWITCH_PENDING
+        action_attempt += 1
+        try:
+            switched = next_candidate()
+        except Exception:
+            if stop_event:
+                return None
+            return CandidateSwitchResult(
+                state=CANDIDATE_SWITCH_FAILED,
+                action_attempt=action_attempt,
+                observation_attempt=0,
+                failure_reason="next_action_failed",
+            )
+        if not switched:
+            if stop_event:
+                return None
+            return CandidateSwitchResult(
+                state=CANDIDATE_SWITCH_FAILED,
+                action_attempt=action_attempt,
+                observation_attempt=0,
+                failure_reason="next_action_failed",
+            )
+
+        previous_ready_fingerprint = None
+        previous_relation = None
+        saw_new = False
+        saw_loading = False
+        saw_unverifiable = False
+        saw_capture_error = False
+        all_observations_old = True
+
+        for observation_attempt in range(
+            1,
+            CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION + 1,
+        ):
+            if observation_attempt > 1:
+                if not safe_wait(CANDIDATE_SWITCH_OBSERVATION_WAIT_SECONDS):
+                    if stop_event:
+                        return None
+                    return CandidateSwitchResult(
+                        state=CANDIDATE_SWITCH_FAILED,
+                        action_attempt=action_attempt,
+                        observation_attempt=observation_attempt - 1,
+                        failure_reason="observation_budget_exhausted",
+                    )
+            if stop_event:
+                return None
+
+            try:
+                if ocr_detector is None:
+                    raise RuntimeError("OCR detector is not ready")
+                observation = ocr_detector.capture_observation(1)
+            except Exception as exc:
+                log_candidate_switch_event(
+                    "candidate_switch_check",
+                    logging.WARNING,
+                    phase="post_next",
+                    state=CANDIDATE_SWITCH_UNVERIFIABLE,
+                    action_attempt=action_attempt,
+                    observation_attempt=observation_attempt,
+                    old_fingerprint_count=len(previous_fingerprints),
+                    r02_reason="ocr_error",
+                    event_stop_reason=stop_reason,
+                    candidate_in_batch=candidate_in_batch,
+                    total_viewed=total_viewed,
+                    error_type=type(exc).__name__,
+                )
+                if stop_event:
+                    return None
+                saw_unverifiable = True
+                saw_capture_error = True
+                all_observations_old = False
+                previous_ready_fingerprint = None
+                previous_relation = None
+                continue
+
+            if stop_event:
+                record_ocr_observation(
+                    observation,
+                    CaptureType.SWITCH_CHECK,
+                    False,
+                    None,
+                )
+                log_candidate_switch_event(
+                    "candidate_switch_check",
+                    logging.WARNING,
+                    phase="post_next",
+                    state=CANDIDATE_SWITCH_UNVERIFIABLE,
+                    action_attempt=action_attempt,
+                    observation_attempt=observation_attempt,
+                    old_fingerprint_count=len(previous_fingerprints),
+                    r02_reason="stopped",
+                    event_stop_reason=stop_reason,
+                    candidate_in_batch=candidate_in_batch,
+                    total_viewed=total_viewed,
+                )
+                return None
+
+            load_error_type = None
+            try:
+                load_ready, load_reason = evaluate_detail_page_load(
+                    observation.ocr_box_count,
+                    observation.ocr_text_length,
+                    OCR_BOX_COUNT_THRESHOLD,
+                    OCR_TEXT_LENGTH_THRESHOLD,
+                )
+            except (TypeError, ValueError) as exc:
+                load_ready = None
+                load_reason = "invalid_r02_metrics"
+                load_error_type = type(exc).__name__
+
+            current_fingerprint = observation.fingerprint
+            if (
+                current_fingerprint is not None
+                and current_fingerprint.screen_index is not None
+            ):
+                current_fingerprint = None
+
+            state, relation = evaluate_candidate_switch_observation(
+                load_ready=load_ready,
+                current_fingerprint=current_fingerprint,
+                previous_fingerprints=previous_fingerprints,
+                previous_ready_fingerprint=previous_ready_fingerprint,
+                previous_relation=previous_relation,
+            )
+            if relation == "new":
+                saw_new = True
+            if relation != "old":
+                all_observations_old = False
+            if state == CANDIDATE_SWITCH_LOADING:
+                saw_loading = True
+            elif state == CANDIDATE_SWITCH_UNVERIFIABLE:
+                saw_unverifiable = True
+
+            if state != CANDIDATE_SWITCH_CONFIRMED:
+                record_ocr_observation(
+                    observation,
+                    CaptureType.SWITCH_CHECK,
+                    False,
+                    None,
+                )
+
+            log_candidate_switch_event(
+                "candidate_switch_check",
+                (
+                    logging.WARNING
+                    if state in (
+                        CANDIDATE_SWITCH_LOADING,
+                        CANDIDATE_SWITCH_UNVERIFIABLE,
+                    )
+                    else logging.INFO
+                ),
+                phase="post_next",
+                state=state,
+                action_attempt=action_attempt,
+                observation_attempt=observation_attempt,
+                old_fingerprint_count=len(previous_fingerprints),
+                compare_relation=relation,
+                r02_ready=load_ready,
+                r02_reason=load_reason,
+                candidate_in_batch=candidate_in_batch,
+                total_viewed=total_viewed,
+                error_type=load_error_type,
+            )
+
+            if state == CANDIDATE_SWITCH_CONFIRMED:
+                log_candidate_switch_event(
+                    "candidate_switch_confirmed",
+                    logging.INFO,
+                    phase="post_next",
+                    state=state,
+                    action_attempt=action_attempt,
+                    observation_attempt=observation_attempt,
+                    old_fingerprint_count=len(previous_fingerprints),
+                    compare_relation=relation,
+                    r02_ready=load_ready,
+                    r02_reason=load_reason,
+                    candidate_in_batch=candidate_in_batch,
+                    total_viewed=total_viewed,
+                )
+                return CandidateSwitchResult(
+                    state=state,
+                    action_attempt=action_attempt,
+                    observation_attempt=observation_attempt,
+                    confirmed_observation=observation,
+                )
+            if state in (
+                CANDIDATE_SWITCH_OBSERVING,
+                CANDIDATE_SWITCH_UNCHANGED,
+            ):
+                previous_ready_fingerprint = current_fingerprint
+                previous_relation = relation
+                continue
+
+            previous_ready_fingerprint = None
+            previous_relation = None
+        stable_unchanged_after_full_budget = (
+            state == CANDIDATE_SWITCH_UNCHANGED
+            and all_observations_old
+            and not saw_new
+            and not saw_loading
+            and not saw_unverifiable
+            and not saw_capture_error
+        )
+        if stable_unchanged_after_full_budget:
+            if not candidate_switch_focus_recovery_allowed(
+                state,
+                action_attempt,
+            ):
+                return CandidateSwitchResult(
+                    state=CANDIDATE_SWITCH_FAILED,
+                    action_attempt=action_attempt,
+                    observation_attempt=(
+                        CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION
+                    ),
+                    failure_reason="stable_unchanged_after_retry",
+                )
+            if stop_event:
+                return None
+            focus_error_type = None
+            try:
+                focus_recovered = restore_candidate_page_focus()
+            except Exception as exc:
+                focus_recovered = False
+                focus_error_type = type(exc).__name__
+            log_candidate_switch_event(
+                "candidate_switch_focus_recovery",
+                logging.WARNING,
+                phase="post_next",
+                state=state,
+                action_attempt=action_attempt,
+                observation_attempt=(
+                    CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION
+                ),
+                old_fingerprint_count=len(previous_fingerprints),
+                compare_relation=relation,
+                r02_ready=load_ready,
+                r02_reason=load_reason,
+                failure_reason=(
+                    None
+                    if focus_recovered
+                    else "focus_recovery_failed"
+                ),
+                event_stop_reason=stop_reason,
+                candidate_in_batch=candidate_in_batch,
+                total_viewed=total_viewed,
+                error_type=focus_error_type,
+            )
+            if stop_event:
+                return None
+            if not focus_recovered:
+                return CandidateSwitchResult(
+                    state=CANDIDATE_SWITCH_FAILED,
+                    action_attempt=action_attempt,
+                    observation_attempt=(
+                        CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION
+                    ),
+                    failure_reason="focus_recovery_failed",
+                )
+            log_candidate_switch_event(
+                "candidate_switch_retry",
+                logging.WARNING,
+                phase="post_next",
+                state=CANDIDATE_SWITCH_PENDING,
+                action_attempt=action_attempt + 1,
+                observation_attempt=0,
+                old_fingerprint_count=len(previous_fingerprints),
+                candidate_in_batch=candidate_in_batch,
+                total_viewed=total_viewed,
+            )
+            continue
+
+        return CandidateSwitchResult(
+            state=CANDIDATE_SWITCH_FAILED,
+            action_attempt=action_attempt,
+            observation_attempt=CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION,
+            failure_reason=(
+                "comparison_unverifiable"
+                if saw_unverifiable
+                else "observation_budget_exhausted"
+            ),
+        )
+
+    return CandidateSwitchResult(
+        state=CANDIDATE_SWITCH_FAILED,
+        action_attempt=action_attempt,
+        observation_attempt=CANDIDATE_SWITCH_MAX_OBSERVATIONS_PER_ACTION,
+        failure_reason="observation_budget_exhausted",
+    )
 
 
 def refresh_page(reason='已查看 100 位'):
@@ -2085,6 +3156,8 @@ def recover_detail_page():
 
 def run():
     global stop_event, stop_reason, forward_consecutive, no_forward_mode, simple_mouse_enabled, action_mode
+    global ocr_record_store, current_candidate_builder
+    global candidate_record_sequence, recorded_observation_ids
     stop_event = False
     stop_reason = None
     simple_mouse_enabled = False
@@ -2092,6 +3165,10 @@ def run():
     reset_focus_restore_calibration()
     reset_forward_click_calibration()
     reset_batch_filter_calibration()
+    ocr_record_store = None
+    current_candidate_builder = None
+    candidate_record_sequence = 0
+    recorded_observation_ids = {}
 
     # ── 交互/参数输入 ──
     try:
@@ -2112,12 +3189,18 @@ def run():
         print(f'[错误] {exc}')
         return 2
 
+    initialize_run_ocr_storage()
+
     # 提前初始化并复用 OCR 引擎；校准仍延迟到第一位详情打开之后。
     if forward_enabled and forward_keywords:
         initialize_ocr()
 
     # ── 启动键盘监听（必须在交互输入之后，避免 exe 中 input() 冲突） ──
-    listener.start()
+    try:
+        listener.start()
+    except Exception:
+        close_run_ocr_storage(RunStatus.ERROR)
+        raise
 
     logger.info('\n' + '=' * 50)
     logger.info('BOSS 直聘极简刷简历 v4 启动')
@@ -2133,13 +3216,21 @@ def run():
         logger.info('转发: 已禁用')
     logger.info('=' * 50)
 
-    if not bring_edge_foreground():
+    try:
+        foreground_ready = bring_edge_foreground()
+    except Exception:
+        close_run_ocr_storage(RunStatus.ERROR)
+        raise
+    if not foreground_ready:
+        close_run_ocr_storage(RunStatus.COMPLETED)
         return 0
 
     run_timer = None
     total_viewed = 0
     forward_consecutive = 0
     consecutive_load_recovery_count = 0
+    previous_candidate_context = None
+    run_exception_type = None
 
     try:
         if batch_filter_calibration_requested:
@@ -2184,6 +3275,7 @@ def run():
         while not stop_event:
             restart_current_batch = False
             if not first_candidate_opened:
+                previous_candidate_context = None
                 if not open_first_candidate_for_batch(legacy_point):
                     break
             first_candidate_opened = False
@@ -2193,87 +3285,163 @@ def run():
                 if stop_event:
                     break
 
+                start_candidate_ocr_recording(
+                    candidate_in_batch=i + 1,
+                    total_viewed=total_viewed,
+                )
+
                 if forward_enabled and forward_keywords:
-                    recovery_available = (
-                        batch_filter_enabled
-                        and batch_filter_regions is not None
-                    )
-                    (
-                        load_outcome,
-                        first_observation,
-                        load_retry_number,
-                        load_reason,
-                    ) = run_detail_load_gate(
-                        candidate_in_batch=i + 1,
-                        total_viewed=total_viewed,
-                        recovery_count=consecutive_load_recovery_count,
-                        recovery_available=recovery_available,
-                    )
-                    if load_outcome == 'load_recovering':
-                        consecutive_load_recovery_count += 1
-                        logger.warning(
-                            'event=detail_load_recovery_start '
-                            'candidate_in_batch=%s total_viewed=%s '
-                            'retry_number=%s reason=%s '
-                            'state=load_recovering recovery_count=%s '
-                            'next_action=hard_refresh',
-                            i + 1,
-                            total_viewed,
+                    if i == 0:
+                        recovery_available = (
+                            batch_filter_enabled
+                            and batch_filter_regions is not None
+                        )
+                        (
+                            load_outcome,
+                            first_observation,
                             load_retry_number,
                             load_reason,
-                            consecutive_load_recovery_count,
+                        ) = run_detail_load_gate(
+                            candidate_in_batch=i + 1,
+                            total_viewed=total_viewed,
+                            recovery_count=consecutive_load_recovery_count,
+                            recovery_available=recovery_available,
                         )
-                        recovery_success, _recovery_reason = recover_detail_page()
-                        if recovery_success is not True:
-                            if recovery_success is False:
+                        if load_outcome == 'load_recovering':
+                            previous_candidate_context = None
+                            consecutive_load_recovery_count += 1
+                            logger.warning(
+                                'event=detail_load_recovery_start '
+                                'candidate_in_batch=%s total_viewed=%s '
+                                'retry_number=%s reason=%s '
+                                'state=load_recovering recovery_count=%s '
+                                'next_action=hard_refresh',
+                                i + 1,
+                                total_viewed,
+                                load_retry_number,
+                                load_reason,
+                                consecutive_load_recovery_count,
+                            )
+                            recovery_success, _recovery_reason = (
+                                recover_detail_page()
+                            )
+                            if recovery_success is not True:
+                                if recovery_success is False:
+                                    request_load_failed_stop(
+                                        candidate_in_batch=i + 1,
+                                        total_viewed=total_viewed,
+                                        retry_number=load_retry_number,
+                                        reason=_recovery_reason,
+                                        recovery_count=(
+                                            consecutive_load_recovery_count
+                                        ),
+                                    )
+                                break
+                            first_candidate_opened = True
+                            restart_current_batch = True
+                            break
+                        if load_outcome != 'loaded':
+                            if load_outcome == 'retries_exhausted':
+                                if not recovery_available:
+                                    load_reason = (
+                                        'hard_recovery_unavailable'
+                                    )
+                                else:
+                                    load_reason = (
+                                        'max_consecutive_load_recoveries_reached'
+                                    )
                                 request_load_failed_stop(
                                     candidate_in_batch=i + 1,
                                     total_viewed=total_viewed,
                                     retry_number=load_retry_number,
-                                    reason=_recovery_reason,
+                                    reason=load_reason,
                                     recovery_count=(
                                         consecutive_load_recovery_count
                                     ),
                                 )
                             break
-                        first_candidate_opened = True
-                        restart_current_batch = True
-                        break
-                    if load_outcome != 'loaded':
-                        if load_outcome == 'retries_exhausted':
-                            if not recovery_available:
-                                load_reason = 'hard_recovery_unavailable'
-                            else:
-                                load_reason = (
-                                    'max_consecutive_load_recoveries_reached'
-                                )
-                            request_load_failed_stop(
+                    else:
+                        if previous_candidate_context is None:
+                            request_candidate_switch_failed_stop(
+                                CandidateSwitchResult(
+                                    state=CANDIDATE_SWITCH_FAILED,
+                                    action_attempt=0,
+                                    observation_attempt=0,
+                                    failure_reason=(
+                                        'formal_fingerprint_invariant_failed'
+                                    ),
+                                ),
                                 candidate_in_batch=i + 1,
                                 total_viewed=total_viewed,
-                                retry_number=load_retry_number,
-                                reason=load_reason,
-                                recovery_count=(
-                                    consecutive_load_recovery_count
-                                ),
                             )
-                        break
-                    total_viewed += 1
-                    logger.info(
-                        'event=detail_load_check candidate_in_batch=%s '
-                        'total_viewed=%s attempt=%s retry_number=%s '
-                        'ocr_box_count=%s ocr_text_length=%s decision=ready '
-                        'reason=%s state=loaded recovery_count=%s '
-                        'next_action=reuse_first_scan',
-                        i + 1,
-                        total_viewed,
-                        'initial' if load_retry_number == 0 else 'retry',
-                        load_retry_number,
-                        first_observation.ocr_box_count,
-                        first_observation.ocr_text_length,
-                        load_reason,
-                        consecutive_load_recovery_count,
+                            break
+                        switch_result = confirm_candidate_switch(
+                            previous_candidate_context,
+                            candidate_in_batch=i + 1,
+                            total_viewed=total_viewed,
+                        )
+                        previous_candidate_context = None
+                        if switch_result is None:
+                            break
+                        if (
+                            not candidate_switch_scan_allowed(
+                                switch_result.state
+                            )
+                            or switch_result.confirmed_observation is None
+                        ):
+                            if switch_result.state != CANDIDATE_SWITCH_FAILED:
+                                switch_result = CandidateSwitchResult(
+                                    state=CANDIDATE_SWITCH_FAILED,
+                                    action_attempt=(
+                                        switch_result.action_attempt
+                                    ),
+                                    observation_attempt=(
+                                        switch_result.observation_attempt
+                                    ),
+                                    failure_reason=(
+                                        'comparison_unverifiable'
+                                    ),
+                                )
+                            request_candidate_switch_failed_stop(
+                                switch_result,
+                                candidate_in_batch=i + 1,
+                                total_viewed=total_viewed,
+                            )
+                            break
+                        first_observation = (
+                            switch_result.confirmed_observation
+                        )
+
+                    record_ocr_observation(
+                        first_observation,
+                        CaptureType.FORMAL_SCREEN,
+                        True,
+                        1,
                     )
-                    if consecutive_load_recovery_count > 0:
+
+                    total_viewed += 1
+                    if i == 0:
+                        logger.info(
+                            'event=detail_load_check candidate_in_batch=%s '
+                            'total_viewed=%s attempt=%s retry_number=%s '
+                            'ocr_box_count=%s ocr_text_length=%s '
+                            'decision=ready reason=%s state=loaded '
+                            'recovery_count=%s '
+                            'next_action=reuse_first_scan',
+                            i + 1,
+                            total_viewed,
+                            (
+                                'initial'
+                                if load_retry_number == 0
+                                else 'retry'
+                            ),
+                            load_retry_number,
+                            first_observation.ocr_box_count,
+                            first_observation.ocr_text_length,
+                            load_reason,
+                            consecutive_load_recovery_count,
+                        )
+                    if i == 0 and consecutive_load_recovery_count > 0:
                         logger.info(
                             'event=detail_load_recovery_confirmed '
                             'candidate_in_batch=%s total_viewed=%s '
@@ -2295,26 +3463,73 @@ def run():
                             consecutive_load_recovery_count,
                         )
                         consecutive_load_recovery_count = 0
-                    if not view_candidate(
+                    view_completed, detection_result = view_candidate(
                         i,
                         first_observation=first_observation,
-                    ):
-                        break
-                else:
-                    total_viewed += 1
-                    if not view_candidate(i):
+                    )
+                    if not view_completed:
+                        finalize_active_candidate_for_stop()
                         break
 
-                if i < BATCH_SIZE - 1:
-                    if not next_candidate():
+                    capture_status, capture_end_reason = (
+                        candidate_capture_status(detection_result)
+                    )
+                    if i < BATCH_SIZE - 1:
+                        (
+                            previous_candidate_context,
+                            context_reason,
+                        ) = prepare_candidate_switch_context(
+                            detection_result,
+                            candidate_in_batch=i + 1,
+                            total_viewed=total_viewed,
+                        )
+                        finalize_current_candidate_recording(
+                            capture_status,
+                            capture_end_reason,
+                        )
+                        if previous_candidate_context is None:
+                            if context_reason != 'stopped':
+                                request_candidate_switch_failed_stop(
+                                    CandidateSwitchResult(
+                                        state=CANDIDATE_SWITCH_FAILED,
+                                        action_attempt=0,
+                                        observation_attempt=1,
+                                        failure_reason=(
+                                            context_reason
+                                            or 'pre_switch_baseline_unavailable'
+                                        ),
+                                    ),
+                                    candidate_in_batch=i + 1,
+                                    total_viewed=total_viewed,
+                                )
+                            break
+                    else:
+                        finalize_current_candidate_recording(
+                            capture_status,
+                            capture_end_reason,
+                        )
+                else:
+                    total_viewed += 1
+                    view_completed, _detection_result = view_candidate(i)
+                    if not view_completed:
+                        finalize_active_candidate_for_stop()
                         break
+                    finalize_current_candidate_recording(
+                        CaptureStatus.COMPLETED,
+                        "existing_flow_completed",
+                    )
+                    if i < BATCH_SIZE - 1:
+                        if not next_candidate():
+                            break
 
             if stop_event:
                 break
             if restart_current_batch:
+                previous_candidate_context = None
                 continue
 
             # 每 100 位刷新
+            previous_candidate_context = None
             forward_consecutive = 0  # 刷新后重置连续计数
             if not refresh_page():
                 break
@@ -2322,10 +3537,24 @@ def run():
             logger.info(f'📊 累计已查看: {total_viewed} 位')
 
     except Exception as e:
+        run_exception_type = type(e).__name__
         logger.exception(f'运行异常: {e}')
     finally:
+        previous_candidate_context = None
+        finalize_active_candidate_for_stop(run_exception_type)
         if run_timer is not None:
             run_timer.cancel()
+        if run_exception_type is not None:
+            run_status = RunStatus.ERROR
+        elif stop_reason in ("esc", "run_duration_elapsed") or (
+            stop_event and stop_reason is None
+        ):
+            run_status = RunStatus.INTERRUPTED
+        elif stop_reason is not None:
+            run_status = RunStatus.ERROR
+        else:
+            run_status = RunStatus.COMPLETED
+        close_run_ocr_storage(run_status)
         logger.info(f'\n🏁 停止运行。累计查看 {total_viewed} 位候选人。')
         logger.info(f'event=run_stopped stop_reason={stop_reason or "none"}')
         logger.info(f'日志文件: logs/simple_brush.log\n')

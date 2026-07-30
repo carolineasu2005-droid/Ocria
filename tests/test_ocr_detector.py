@@ -825,9 +825,10 @@ class DetectorTests(unittest.TestCase):
             seen["text_items"] = items
             return original_searchable_text(items)
 
-        def record_builder(items):
+        def record_builder(items, **kwargs):
             seen["fingerprint_items"] = items
-            return original_builder(items)
+            seen["fingerprint_kwargs"] = kwargs
+            return original_builder(items, **kwargs)
 
         with patch(
             "ocr_detector.accepted_ocr_items",
@@ -858,6 +859,11 @@ class DetectorTests(unittest.TestCase):
         self.assertIs(seen["metrics_items"], seen["accepted"])
         self.assertIs(seen["text_items"], seen["accepted"])
         self.assertIs(seen["fingerprint_items"], seen["accepted"])
+        self.assertEqual(
+            observation.captured_at,
+            seen["fingerprint_kwargs"]["captured_at"].isoformat(),
+        )
+        self.assertEqual(observation.raw_items, tuple(raw_items))
         self.assertEqual(observation.item_count, len(raw_items))
         self.assertEqual(
             (observation.ocr_box_count, observation.ocr_text_length),
@@ -1227,7 +1233,7 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(observation.ocr_text_length, 8)
         self.assertEqual(observation.text, "accepted")
 
-    def test_scan_observation_uses_only_r02_and_fingerprint_metadata_fields(
+    def test_scan_observation_adds_stage0_raw_evidence_without_r04_fields(
         self,
     ):
         field_names = [field.name for field in fields(ScanObservation)]
@@ -1242,12 +1248,15 @@ class DetectorTests(unittest.TestCase):
             "ocr_box_count",
             "ocr_text_length",
             "fingerprint",
+            "raw_items",
+            "captured_at",
         ])
         for forbidden_name in (
-            "ocr_items",
-            "raw_items",
             "accepted_items",
             "evidence",
+            "normalized_text",
+            "comparison_text",
+            "segments",
         ):
             self.assertNotIn(forbidden_name, field_names)
 
