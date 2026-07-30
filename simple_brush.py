@@ -752,11 +752,14 @@ def finalize_current_candidate_recording(
         return document
     except Exception as exc:
         if ocr_record_store is not None:
-            ocr_record_store.save_error(
-                type(exc).__name__,
-                "finalize_candidate",
-                {"candidate_record_id": builder.candidate_record_id},
-            )
+            try:
+                ocr_record_store.save_error(
+                    type(exc).__name__,
+                    "finalize_candidate",
+                    {"candidate_record_id": builder.candidate_record_id},
+                )
+            except Exception:
+                pass
         return None
 
 
@@ -3337,6 +3340,11 @@ def run():
                                         ),
                                     )
                                 break
+                            finalize_current_candidate_recording(
+                                CaptureStatus.ABORTED,
+                                None,
+                                "load_recovery_restart",
+                            )
                             first_candidate_opened = True
                             restart_current_batch = True
                             break
