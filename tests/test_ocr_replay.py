@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,19 +10,41 @@ from ocr_records import (
     CaptureSummary,
     CaptureType,
     DOCUMENT_VERSION,
+    LEGACY_STORAGE_SCHEMA_VERSION,
+    NormalizationStatus,
     OcrBox,
     OcrScreenRecord,
     RunManifest,
     RunStatus,
     STORAGE_SCHEMA_VERSION,
+    SUPPORTED_STORAGE_SCHEMA_VERSIONS,
 )
-from ocr_replay import OcrReplayError, OcrRunReader, load_ocr_run
+from ocr_candidate import CandidateOcrBuilder
+from ocr_normalization import (
+    DEFAULT_OCR_NORMALIZATION_CONFIG,
+    NORMALIZATION_VERSION,
+    NormalizationBox,
+    OcrNormalizationConfig,
+    canonical_normalization_config,
+    config_with_effective_min_confidence,
+    normalization_config_digest,
+    normalize_ocr_text,
+)
+from ocr_text import OCRItem
+from ocr_replay import (
+    OcrReplayError,
+    OcrRunReader,
+    load_ocr_run,
+    replay_screen_normalization,
+)
 
 
 class OcrRunReaderTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.run_dir = Path(self.temporary.name)
+        self.config = DEFAULT_OCR_NORMALIZATION_CONFIG
+        self.config_snapshot = canonical_normalization_config(self.config)
         self.manifest = RunManifest(
             run_id="run-replay",
             started_at="2026-07-30T12:00:00+08:00",
@@ -29,6 +52,14 @@ class OcrRunReaderTests(unittest.TestCase):
             status=RunStatus.COMPLETED,
             platform="Windows",
             python_version="3.13.5",
+            normalization_version=NORMALIZATION_VERSION,
+            normalization_config_version=self.config.normalization_config_version,
+            normalization_config_digest=normalization_config_digest(
+                self.config_snapshot
+            ),
+            effective_min_confidence=self.config.effective_min_confidence,
+            normalization_config=self.config_snapshot,
+            rule_evaluation_mode="legacy_shadow",
             data_files={
                 "manifest": "run.json",
                 "screens": "screens.jsonl",
@@ -116,6 +147,252 @@ class OcrRunReaderTests(unittest.TestCase):
         self.assertEqual(replay.screens, screens)
         self.assertEqual(replay.candidates, candidates)
         self.assertIn("虚构候选人", replay.screens[0].raw_text)
+
+    def test_offline_replay_uses_same_normalizer_without_mutating_record(self):
+        screen = self.make_screen()
+        before = screen.to_json()
+
+        with self.assertRaises(OcrReplayError):
+            replay_screen_normalization(screen)
+
+        replayed = replay_screen_normalization(
+            screen,
+            manifest=self.manifest,
+        )
+        expected = normalize_ocr_text(
+            screen.raw_boxes,
+            config=self.config,
+        )
+
+        self.assertEqual(replayed.normalized.normalized_text, expected.normalized_text)
+        self.assertEqual(replayed.normalized.screen_id, screen.screen_id)
+        self.assertEqual(replayed.effective_min_confidence, 0.85)
+        self.assertEqual(replayed.confidence_threshold_source, "run_manifest")
+        self.assertEqual(screen.to_json(), before)
+
+    def test_online_record_and_offline_replay_have_identical_r04_fields(self):
+        screen_id = "screen-online-offline"
+        items = (
+            OCRItem(
+                "Unity  2022.3 C++",
+                0.96,
+                ((0, 0), (100, 0), (100, 20), (0, 20)),
+            ),
+            OCRItem(
+                "3A UE5 iOS",
+                0.97,
+                ((0, 30), (100, 30), (100, 50), (0, 50)),
+            ),
+        )
+        boxes = tuple(
+            NormalizationBox(
+                "{0}:box:{1}".format(screen_id, index),
+                item.text,
+                item.box,
+                index,
+                item.confidence,
+            )
+            for index, item in enumerate(items)
+        )
+        online_result = normalize_ocr_text(boxes, config=self.config)
+        builder = CandidateOcrBuilder(
+            "run-replay",
+            1,
+            candidate_record_id="candidate-replay",
+            created_at="2026-07-30T12:00:00+08:00",
+        )
+        screen = builder.build_screen_record(
+            items,
+            capture_type=CaptureType.FORMAL_SCREEN,
+            is_formal_screen=True,
+            screen_index=1,
+            captured_at="2026-07-30T12:00:01+08:00",
+            screen_id=screen_id,
+            normalization=online_result,
+            ocr_min_confidence=0.85,
+        )
+
+        offline = replay_screen_normalization(
+            screen,
+            manifest=self.manifest,
+        )
+
+        self.assertEqual(screen.normalized_text, offline.normalized.normalized_text)
+        self.assertEqual(screen.comparison_text, offline.normalized.comparison_text)
+        self.assertEqual(screen.ordered_box_ids, offline.normalized.ordered_box_ids)
+        self.assertEqual(screen.effective_box_ids, offline.normalized.effective_box_ids)
+        self.assertEqual(
+            screen.suppressed_duplicate_box_ids,
+            offline.normalized.suppressed_duplicate_box_ids,
+        )
+        self.assertEqual(
+            screen.normalization_version,
+            offline.normalized.normalization_version,
+        )
+        self.assertEqual(screen.segments, offline.normalized.segments)
+        self.assertEqual(screen.duplicate_gray_pair_count, offline.normalized.duplicate_gray_pair_count)
+        self.assertEqual(screen.eligible_box_count, offline.normalized.eligible_box_count)
+        self.assertEqual(screen.low_confidence_box_count, offline.normalized.low_confidence_box_count)
+        self.assertEqual(screen.empty_normalized_box_count, offline.normalized.empty_normalized_box_count)
+
+    def test_replay_marks_version_difference_and_legacy_threshold_source(self):
+        screen = OcrScreenRecord.from_dict({
+            **self.make_screen().to_dict(),
+            "storage_schema_version": LEGACY_STORAGE_SCHEMA_VERSION,
+        })
+
+        assumed = replay_screen_normalization(screen)
+        overridden = replay_screen_normalization(
+            screen,
+            legacy_min_confidence_override=0.90,
+        )
+
+        self.assertEqual(
+            assumed.confidence_threshold_source,
+            "legacy_stage0_assumption",
+        )
+        self.assertEqual(assumed.effective_min_confidence, 0.85)
+        self.assertEqual(overridden.confidence_threshold_source, "caller_override")
+        self.assertEqual(overridden.effective_min_confidence, 0.90)
+        self.assertEqual(
+            overridden.normalized.confidence_threshold_source,
+            "caller_override",
+        )
+
+    def test_standalone_new_screen_requires_digest_matching_explicit_config(self):
+        source = self.make_screen()
+        completed = replay_screen_normalization(
+            source,
+            manifest=self.manifest,
+        ).normalized
+
+        replayed = replay_screen_normalization(completed, config=self.config)
+        self.assertEqual(replayed.normalized.normalized_text, completed.normalized_text)
+
+        wrong_config = replace(
+            self.config,
+            line_tolerance_height_ratio=0.46,
+        )
+        with self.assertRaises(OcrReplayError) as caught:
+            replay_screen_normalization(completed, config=wrong_config)
+        self.assertEqual(caught.exception.error_type, "ScreenConfigMismatchError")
+
+    def test_tolerant_config_mismatch_returns_sanitized_failed_raw_only_view(self):
+        private_text = "PRIVATE_REPLAY_BODY private@example.test 13800138000"
+        source = self.make_screen(suffix="private")
+        source = replace(
+            source,
+            raw_text=private_text,
+            raw_boxes=(replace(source.raw_boxes[0], raw_text=private_text),),
+        )
+        completed = replay_screen_normalization(
+            source,
+            manifest=self.manifest,
+        ).normalized
+        wrong_config = replace(self.config, duplicate_confirm_iou=0.86)
+
+        replayed = replay_screen_normalization(
+            completed,
+            config=wrong_config,
+            strict=False,
+        )
+
+        self.assertIsNotNone(replayed.issue)
+        self.assertEqual(replayed.issue.error_type, "ScreenConfigMismatchError")
+        self.assertEqual(replayed.normalized.normalization_status, NormalizationStatus.FAILED)
+        self.assertIsNone(replayed.normalized.normalized_text)
+        self.assertEqual(replayed.normalized.raw_text, private_text)
+        self.assertNotIn(private_text, str(replayed.issue))
+
+    def test_historical_manifest_config_controls_replay_and_full_trace_equality(self):
+        config = config_with_effective_min_confidence(
+            replace(self.config, line_tolerance_height_ratio=0.44),
+            0.90,
+        )
+        snapshot = canonical_normalization_config(config)
+        manifest = replace(
+            self.manifest,
+            normalization_config_version=config.normalization_config_version,
+            normalization_config_digest=normalization_config_digest(snapshot),
+            effective_min_confidence=config.effective_min_confidence,
+            normalization_config=snapshot,
+        )
+        screen_id = "screen-full-equality"
+        items = (
+            OCRItem("Unity 2022.3", 0.99, ((0, 0), (100, 0), (100, 20), (0, 20))),
+            OCRItem("Unity 2022.3", 0.98, ((1, 0), (101, 0), (101, 20), (1, 20))),
+            OCRItem("low", 0.50, ((0, 30), (30, 30), (30, 50), (0, 50))),
+            OCRItem("  ", 0.95, ((0, 60), (30, 60), (30, 80), (0, 80))),
+        )
+        boxes = tuple(
+            NormalizationBox(
+                "{0}:box:{1}".format(screen_id, index),
+                item.text,
+                item.box,
+                index,
+                item.confidence,
+            )
+            for index, item in enumerate(items)
+        )
+        online_result = normalize_ocr_text(boxes, config=config)
+        builder = CandidateOcrBuilder(
+            "run-replay",
+            1,
+            candidate_record_id="candidate-equality",
+        )
+        online = builder.build_screen_record(
+            items,
+            capture_type=CaptureType.LOAD_CHECK,
+            is_formal_screen=False,
+            screen_index=None,
+            screen_id=screen_id,
+            normalization=online_result,
+            ocr_min_confidence=0.90,
+        )
+        source_before = online.to_json()
+
+        offline = replay_screen_normalization(online, manifest=manifest).normalized
+
+        for field_name in (
+            "normalization_status",
+            "normalized_text",
+            "comparison_text",
+            "segments",
+            "suppressed_duplicate_box_ids",
+            "duplicate_gray_pair_count",
+            "eligible_box_count",
+            "low_confidence_box_count",
+            "empty_normalized_box_count",
+            "normalization_version",
+            "normalization_config_version",
+            "normalization_config_digest",
+            "effective_min_confidence",
+        ):
+            with self.subTest(field=field_name):
+                self.assertEqual(getattr(offline, field_name), getattr(online, field_name))
+        self.assertEqual(online.to_json(), source_before)
+        self.assertEqual(offline.raw_boxes, online.raw_boxes)
+        self.assertEqual(offline.raw_text, online.raw_text)
+        self.assertEqual(offline.exact_hash, online.exact_hash)
+
+    def test_invalid_bbox_is_strict_failure_and_tolerant_issue(self):
+        source = self.make_screen(suffix="bbox")
+        source = replace(
+            source,
+            raw_boxes=(replace(source.raw_boxes[0], bbox=(0, (1, 2), 3, 4)),),
+        )
+
+        with self.assertRaises(OcrReplayError) as caught:
+            replay_screen_normalization(source, manifest=self.manifest)
+        self.assertEqual(caught.exception.error_type, "layout_degraded")
+
+        tolerant = replay_screen_normalization(
+            source,
+            manifest=self.manifest,
+            strict=False,
+        )
+        self.assertEqual(tolerant.issue.error_type, "layout_degraded")
+        self.assertEqual(tolerant.normalized.normalization_status, NormalizationStatus.FAILED)
 
     def test_strict_mode_raises_with_corrupted_middle_line_number(self):
         path = self.run_dir / "screens.jsonl"
@@ -236,7 +513,7 @@ class OcrRunReaderTests(unittest.TestCase):
         self.assertEqual(issue.actual_version, "2.0.0")
         self.assertEqual(
             issue.supported_versions,
-            (STORAGE_SCHEMA_VERSION,),
+            SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
 
     def test_strict_mode_validates_every_restored_record_version_contract(self):
@@ -316,7 +593,7 @@ class OcrRunReaderTests(unittest.TestCase):
                     expected = (
                         (DOCUMENT_VERSION,)
                         if field == "document_version"
-                        else (STORAGE_SCHEMA_VERSION,)
+                        else SUPPORTED_STORAGE_SCHEMA_VERSIONS
                     )
                     self.assertEqual(error.supported_versions, expected)
                     message = str(error)
@@ -375,7 +652,7 @@ class OcrRunReaderTests(unittest.TestCase):
         self.assertEqual(issue.actual_version, "2.0.0")
         self.assertEqual(
             issue.supported_versions,
-            (STORAGE_SCHEMA_VERSION,),
+            SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
 
 

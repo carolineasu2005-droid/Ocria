@@ -8,9 +8,20 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from ocr_calibration import ScreenRegion
+import ocr_normalization
+from ocr_normalization import (
+    NORMALIZATION_COMPLETED,
+    NORMALIZATION_FAILED,
+)
 from ocr_detector import (
     FINGERPRINT_HASH_PATTERN,
     FINGERPRINT_VERSION,
+    RULE_COMPARISON_LEGACY_ONLY,
+    RULE_COMPARISON_NORMALIZATION_FAILED,
+    RULE_COMPARISON_R04_ONLY,
+    RULE_COMPARISON_SAME_MATCH,
+    RULE_COMPARISON_SAME_NO_MATCH,
+    RULE_EVALUATION_MODE_LEGACY_SHADOW,
     FingerprintBuildError,
     OCRKeywordDetector,
     RapidOCRBackend,
@@ -686,7 +697,7 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(capture.calls, 8)
         self.assertEqual(backend.calls, 8)
         self.assertEqual(len(scroll_calls), 7)
-        self.assertEqual(matcher.call_count, 8)
+        self.assertEqual(matcher.call_count, 16)
 
     def test_confirmation_fingerprint_has_no_formal_screen_index(self):
         class BoxBackend:
@@ -720,7 +731,7 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(len(result.observations), 2)
         self.assertEqual(result.observations[0].fingerprint.screen_index, 1)
         self.assertIsNone(result.observations[1].fingerprint.screen_index)
-        self.assertEqual(matcher.call_count, 2)
+        self.assertEqual(matcher.call_count, 4)
         self.assertEqual(
             sum(
                 observation.fingerprint is not None
@@ -843,6 +854,9 @@ class DetectorTests(unittest.TestCase):
             "ocr_detector.build_screen_fingerprint",
             side_effect=record_builder,
         ) as builder_call, patch(
+            "ocr_detector.normalize_ocr_text",
+            wraps=ocr_normalization.normalize_ocr_text,
+        ) as normalizer_call, patch(
             "ocr_detector.matching_keyword_rule",
         ) as matcher:
             observation = detector.capture_observation(1)
@@ -853,6 +867,7 @@ class DetectorTests(unittest.TestCase):
         metrics_call.assert_called_once()
         text_call.assert_called_once()
         builder_call.assert_called_once()
+        normalizer_call.assert_called_once()
         matcher.assert_not_called()
         scroll.assert_not_called()
         wait.assert_not_called()
@@ -864,6 +879,21 @@ class DetectorTests(unittest.TestCase):
             seen["fingerprint_kwargs"]["captured_at"].isoformat(),
         )
         self.assertEqual(observation.raw_items, tuple(raw_items))
+        self.assertEqual(
+            observation.normalization.raw_text,
+            "  Visible\tText  \nbelow threshold\n \t ",
+        )
+        self.assertNotIn(
+            "below threshold",
+            observation.normalization.normalized_text,
+        )
+        self.assertEqual(
+            normalizer_call.call_args.kwargs["eligible_box_ids"],
+            (
+                "{0}:box:0".format(observation.screen_id),
+                "{0}:box:2".format(observation.screen_id),
+            ),
+        )
         self.assertEqual(observation.item_count, len(raw_items))
         self.assertEqual(
             (observation.ocr_box_count, observation.ocr_text_length),
@@ -882,6 +912,259 @@ class DetectorTests(unittest.TestCase):
         self.assertIsNotNone(
             datetime.fromisoformat(observation.fingerprint.captured_at).tzinfo
         )
+
+    def test_r03_fingerprint_is_unchanged_by_every_r04_status(self):
+        item = self.make_box_item("Unity  2022.3 C++")
+        expected = build_screen_fingerprint([item])
+        box = ocr_normalization.NormalizationBox(
+            "screen:box:0",
+            item.text,
+            item.box,
+            0,
+            item.confidence,
+        )
+        completed = ocr_normalization.normalize_ocr_text((box,))
+        variants = (
+            ("completed", completed),
+            (
+                "completed_empty",
+                ocr_normalization.normalize_ocr_text(()),
+            ),
+            (
+                "failed",
+                ocr_normalization.failed_normalization_result(
+                    (box,),
+                    error_type="SyntheticError",
+                ),
+            ),
+        )
+
+        for name, normalization in variants:
+            with self.subTest(name=name):
+                backend = Mock()
+                backend.recognize.return_value = [item]
+                detector = OCRKeywordDetector(
+                    backend=backend,
+                    capture=FakeCapture(),
+                    region=self.region,
+                    wait=Mock(),
+                )
+                with patch(
+                    "ocr_detector.normalize_ocr_text",
+                    return_value=normalization,
+                ):
+                    observation = detector.capture_observation(1)
+
+                self.assertEqual(
+                    observation.fingerprint.raw_text,
+                    expected.raw_text,
+                )
+                self.assertEqual(
+                    observation.fingerprint.normalized_text,
+                    expected.normalized_text,
+                )
+                self.assertEqual(
+                    observation.fingerprint.exact_hash,
+                    expected.exact_hash,
+                )
+                self.assertEqual(
+                    observation.fingerprint.fingerprint_version,
+                    FINGERPRINT_VERSION,
+                )
+
+        not_attempted = ScanObservation(
+            1,
+            "unity2022.3c++",
+            1,
+            0.01,
+            fingerprint=expected,
+        )
+        detector._match_observation(not_attempted, single_rule("Unity"))
+        self.assertEqual(not_attempted.fingerprint, expected)
+        self.assertEqual(
+            not_attempted.rule_comparison.comparison_outcome,
+            RULE_COMPARISON_NORMALIZATION_FAILED,
+        )
+
+    def test_normalizer_exception_keeps_r03_hash_and_legacy_rule_authority(self):
+        backend = Mock()
+        item = self.make_box_item("Python C++")
+        backend.recognize.return_value = [item]
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=FakeCapture(),
+            region=self.region,
+            wait=Mock(),
+        )
+
+        with patch(
+            "ocr_detector.normalize_ocr_text",
+            side_effect=RuntimeError("PRIVATE_BODY_MUST_NOT_ESCAPE"),
+        ) as normalizer:
+            observation = detector.capture_observation(1)
+            detector._match_observation(observation, single_rule("Python"))
+
+        normalizer.assert_called_once()
+        self.assertEqual(observation.normalization.status, NORMALIZATION_FAILED)
+        self.assertEqual(
+            observation.normalization.normalization_error_type,
+            "RuntimeError",
+        )
+        self.assertEqual(
+            observation.fingerprint.exact_hash,
+            build_screen_fingerprint([item]).exact_hash,
+        )
+        self.assertEqual(
+            observation.fingerprint.fingerprint_version,
+            FINGERPRINT_VERSION,
+        )
+        self.assertIsNotNone(observation.matched_rule)
+        self.assertEqual(
+            observation.rule_comparison.comparison_outcome,
+            RULE_COMPARISON_NORMALIZATION_FAILED,
+        )
+        self.assertIsNone(observation.rule_comparison.r04_match)
+
+    def test_invalid_geometry_fails_r04_text_and_r03_fingerprint(self):
+        backend = Mock()
+        backend.recognize.return_value = [
+            OCRItem("C++ 文字仍保留", 0.99, (0, (1, 2), 3, 4)),
+        ]
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=FakeCapture(),
+            region=self.region,
+            wait=Mock(),
+        )
+
+        observation = detector.capture_observation(1)
+
+        self.assertEqual(observation.normalization.status, NORMALIZATION_FAILED)
+        self.assertEqual(observation.normalization.raw_text, "C++ 文字仍保留")
+        self.assertIsNone(observation.normalization.normalized_text)
+        self.assertIsNone(observation.normalization.comparison_text)
+        self.assertIsNone(observation.fingerprint)
+
+    def test_legacy_shadow_records_all_outcomes_without_changing_authority(self):
+        detector = OCRKeywordDetector(
+            backend=Mock(),
+            capture=FakeCapture(),
+            region=self.region,
+            wait=Mock(),
+        )
+        base = ocr_normalization.normalize_ocr_text((
+            ocr_normalization.NormalizationBox(
+                "box-1",
+                "placeholder",
+                ((0, 0), (20, 0), (20, 10), (0, 10)),
+                0,
+                0.99,
+            ),
+        ))
+        rules = single_rule("Python")
+        cases = (
+            (
+                "same_match",
+                "Python",
+                replace(base, comparison_text="python"),
+                RULE_COMPARISON_SAME_MATCH,
+                True,
+                True,
+            ),
+            (
+                "same_no_match",
+                "Java",
+                replace(base, comparison_text="java"),
+                RULE_COMPARISON_SAME_NO_MATCH,
+                False,
+                False,
+            ),
+            (
+                "legacy_only",
+                "Python",
+                replace(base, comparison_text="java"),
+                RULE_COMPARISON_LEGACY_ONLY,
+                True,
+                False,
+            ),
+            (
+                "r04_only",
+                "Java",
+                replace(base, comparison_text="python"),
+                RULE_COMPARISON_R04_ONLY,
+                False,
+                True,
+            ),
+            (
+                "normalization_failed",
+                "Python",
+                replace(base, status=NORMALIZATION_FAILED),
+                RULE_COMPARISON_NORMALIZATION_FAILED,
+                True,
+                None,
+            ),
+        )
+
+        for name, legacy_text, normalization, outcome, legacy, r04 in cases:
+            with self.subTest(name=name):
+                observation = ScanObservation(
+                    1,
+                    legacy_text,
+                    1,
+                    0.01,
+                    normalization=normalization,
+                )
+                detector._match_observation(observation, rules)
+
+                comparison = observation.rule_comparison
+                self.assertEqual(
+                    comparison.rule_evaluation_mode,
+                    RULE_EVALUATION_MODE_LEGACY_SHADOW,
+                )
+                self.assertEqual(comparison.comparison_outcome, outcome)
+                self.assertEqual(comparison.legacy_match, legacy)
+                self.assertEqual(comparison.r04_match, r04)
+                self.assertEqual(observation.matched_rule is not None, legacy)
+
+    def test_shadow_uses_comparison_text_and_records_different_rule_indexes(self):
+        detector = OCRKeywordDetector(
+            backend=Mock(),
+            capture=FakeCapture(),
+            region=self.region,
+            wait=Mock(),
+        )
+        rules = parse_keyword_rules('"Legacy"; "R04"')
+        normalization = ocr_normalization.normalize_ocr_text((
+            ocr_normalization.NormalizationBox(
+                "box-1",
+                "unused",
+                ((0, 0), (20, 0), (20, 10), (0, 10)),
+                0,
+                0.99,
+            ),
+        ))
+        normalization = replace(
+            normalization,
+            normalized_text="Legacy",
+            comparison_text="r04",
+        )
+        observation = ScanObservation(
+            1,
+            "Legacy",
+            1,
+            0.01,
+            normalization=normalization,
+        )
+
+        detector._match_observation(observation, rules)
+
+        self.assertEqual(observation.matched_rule, rules[0])
+        self.assertEqual(
+            observation.rule_comparison.comparison_outcome,
+            RULE_COMPARISON_SAME_MATCH,
+        )
+        self.assertEqual(observation.rule_comparison.legacy_rule_index, 0)
+        self.assertEqual(observation.rule_comparison.r04_rule_index, 1)
 
     def test_fingerprint_generated_log_has_only_allowed_metadata(self):
         private_marker = "PRIVATE_R03_OCR_BODY_9F3A"
@@ -1000,6 +1283,11 @@ class DetectorTests(unittest.TestCase):
         filter_call.assert_called_once()
         builder.assert_called_once()
         self.assertIsNone(observation.fingerprint)
+        self.assertEqual(
+            observation.normalization.status,
+            NORMALIZATION_COMPLETED,
+        )
+        self.assertIsNotNone(observation.normalization.comparison_text)
         self.assertEqual(observation.item_count, 2)
         self.assertEqual(observation.ocr_box_count, 1)
         self.assertEqual(
@@ -1233,7 +1521,7 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(observation.ocr_text_length, 8)
         self.assertEqual(observation.text, "accepted")
 
-    def test_scan_observation_adds_stage0_raw_evidence_without_r04_fields(
+    def test_scan_observation_carries_one_r04_result_without_parallel_text_fields(
         self,
     ):
         field_names = [field.name for field in fields(ScanObservation)]
@@ -1250,6 +1538,10 @@ class DetectorTests(unittest.TestCase):
             "fingerprint",
             "raw_items",
             "captured_at",
+            "screen_id",
+            "normalization",
+            "normalization_min_confidence",
+            "rule_comparison",
         ])
         for forbidden_name in (
             "accepted_items",
@@ -1314,6 +1606,116 @@ class DetectorTests(unittest.TestCase):
         matcher.assert_called_once()
         self.assertEqual(result.observations.count(first_observation), 1)
         self.assertEqual(result.scans_completed, 1)
+
+    def test_r04_only_shadow_never_triggers_confirmation_or_page_calls(self):
+        wait = Mock()
+        detector = OCRKeywordDetector(
+            backend=Mock(),
+            capture=FakeCapture(),
+            region=self.region,
+            max_scans=1,
+            wait=wait,
+        )
+        normalization = ocr_normalization.normalize_ocr_text((
+            ocr_normalization.NormalizationBox(
+                "box-1",
+                "Python",
+                ((0, 0), (20, 0), (20, 10), (0, 10)),
+                0,
+                0.99,
+            ),
+        ))
+        first_observation = ScanObservation(
+            1,
+            "legacy miss",
+            1,
+            0.01,
+            normalization=normalization,
+        )
+
+        with patch("ocr_detector.normalize_ocr_text") as normalizer:
+            result = detector.detect(
+                single_rule("Python"),
+                first_observation=first_observation,
+            )
+
+        self.assertFalse(result.confirmed_match)
+        self.assertEqual(
+            first_observation.rule_comparison.comparison_outcome,
+            RULE_COMPARISON_R04_ONLY,
+        )
+        self.assertEqual(detector.capture.calls, 0)
+        detector.backend.recognize.assert_not_called()
+        wait.assert_not_called()
+        normalizer.assert_not_called()
+
+    def test_legacy_only_and_failed_shadow_keep_original_confirmation_budget(self):
+        base = ocr_normalization.normalize_ocr_text((
+            ocr_normalization.NormalizationBox(
+                "box-1",
+                "placeholder",
+                ((0, 0), (20, 0), (20, 10), (0, 10)),
+                0,
+                0.99,
+            ),
+        ))
+        variants = (
+            (
+                "legacy_only",
+                replace(base, comparison_text="java"),
+                RULE_COMPARISON_LEGACY_ONLY,
+            ),
+            (
+                "normalization_failed",
+                replace(base, status=NORMALIZATION_FAILED),
+                RULE_COMPARISON_NORMALIZATION_FAILED,
+            ),
+        )
+
+        for name, normalization, expected_outcome in variants:
+            with self.subTest(name=name):
+                wait = Mock()
+                backend = Mock()
+                backend.recognize.return_value = [
+                    self.make_box_item("Python")
+                ]
+                detector = OCRKeywordDetector(
+                    backend=backend,
+                    capture=FakeCapture(),
+                    region=self.region,
+                    max_scans=1,
+                    wait=wait,
+                )
+                item = self.make_box_item("Python")
+                first_observation = ScanObservation(
+                    1,
+                    "Python",
+                    1,
+                    0.01,
+                    fingerprint=build_screen_fingerprint([item]),
+                    normalization=normalization,
+                )
+
+                result = detector.detect(
+                    single_rule("Python"),
+                    first_observation=first_observation,
+                )
+
+                self.assertTrue(result.confirmed_match)
+                self.assertEqual(
+                    first_observation.rule_comparison.comparison_outcome,
+                    expected_outcome,
+                )
+                self.assertEqual(detector.capture.calls, 1)
+                backend.recognize.assert_called_once()
+                wait.assert_called_once()
+                self.assertEqual(
+                    [
+                        observation.fingerprint.fingerprint_version
+                        for observation in result.observations
+                    ],
+                    [FINGERPRINT_VERSION, FINGERPRINT_VERSION],
+                )
 
     def test_prefetched_match_still_uses_independent_confirmation(self):
         detector = self.make_detector(["Python"], max_scans=8)

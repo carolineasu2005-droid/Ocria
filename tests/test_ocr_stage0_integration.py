@@ -2,7 +2,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 import simple_brush
+import ocr_normalization
 from ocr_detector import OCRKeywordDetector, ScanObservation
+from ocr_normalization import NormalizationBox, normalize_ocr_text
 from ocr_records import CaptureStatus, CaptureType, RunStatus
 from ocr_text import OCRItem
 
@@ -96,6 +98,14 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             0.96,
             ((1, 2), (50, 2), (50, 18), (1, 18)),
         )
+        screen_id = "screen-stage0-{0}".format(len(text))
+        normalization = normalize_ocr_text((NormalizationBox(
+            "{0}:box:0".format(screen_id),
+            item.text,
+            item.box,
+            0,
+            item.confidence,
+        ),))
         return ScanObservation(
             scan_number=1,
             text="python",
@@ -105,6 +115,9 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             ocr_text_length=40,
             raw_items=(item,),
             captured_at="2026-07-30T12:00:00+08:00",
+            screen_id=screen_id,
+            normalization=normalization,
+            normalization_min_confidence=0.85,
         )
 
     def start_builder(self, store):
@@ -123,14 +136,16 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
                 ((0, 0), (20, 0), (20, 10), (0, 10)),
             )
         ]
+        scroll = Mock()
+        wait = Mock()
         detector = OCRKeywordDetector(
             backend=backend,
             capture=capture,
             region=Mock(),
             max_scans=8,
             min_confidence=0.85,
-            scroll=Mock(),
-            wait=Mock(),
+            scroll=scroll,
+            wait=wait,
             observation_callback=simple_brush.record_detection_observation,
         )
         simple_brush.ocr_detector = detector
@@ -141,13 +156,19 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
 
         with patch.object(
             simple_brush, "ensure_ocr_region_calibrated", return_value=True
-        ):
+        ), patch(
+            "ocr_detector.normalize_ocr_text",
+            wraps=ocr_normalization.normalize_ocr_text,
+        ) as normalizer:
             matched, result = simple_brush.detect_keywords()
 
         self.assertTrue(matched)
         self.assertTrue(result.confirmed_match)
         self.assertEqual(capture.calls, 2)
         self.assertEqual(backend.recognize.call_count, 2)
+        self.assertEqual(normalizer.call_count, 2)
+        self.assertEqual(wait.call_count, 1)
+        scroll.assert_not_called()
         self.assertEqual(len(store.screens), 2)
         self.assertEqual(
             [record.capture_type for record in store.screens],
@@ -158,6 +179,18 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             [True, False],
         )
         self.assertEqual(store.screens[0].raw_boxes[0].raw_text, "虚构 Python")
+        for record in store.screens:
+            self.assertEqual(record.normalization_status.value, "completed")
+            self.assertEqual(record.normalization_version, "r04-v1")
+            self.assertIsNotNone(record.normalized_text)
+            self.assertIsNotNone(record.comparison_text)
+            self.assertEqual(record.ordered_box_ids, record.effective_box_ids)
+            self.assertEqual(record.rule_evaluation_mode, "legacy_shadow")
+            self.assertTrue(record.legacy_match)
+            self.assertTrue(record.r04_match)
+            self.assertEqual(record.comparison_outcome, "same_match")
+            self.assertEqual(record.legacy_rule_index, 0)
+            self.assertEqual(record.r04_rule_index, 0)
 
     def test_same_observation_is_saved_only_once_when_reused(self):
         store = FakeStore()
@@ -174,6 +207,97 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNone(second)
         self.assertEqual(len(store.screens), 1)
+
+    def test_normalizer_failure_keeps_raw_screen_and_does_not_add_page_calls(self):
+        store = FakeStore()
+        self.start_builder(store)
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.return_value = [
+            OCRItem(
+                "PRIVATE_SYNTHETIC_BODY Python",
+                0.99,
+                ((0, 0), (20, 0), (20, 10), (0, 10)),
+            )
+        ]
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=Mock(),
+            wait=Mock(),
+        )
+
+        with patch(
+            "ocr_detector.normalize_ocr_text",
+            side_effect=RuntimeError("PRIVATE_SYNTHETIC_BODY"),
+        ) as normalizer:
+            observation = detector.capture_observation(1)
+            record = simple_brush.record_ocr_observation(
+                observation,
+                CaptureType.LOAD_CHECK,
+                False,
+                None,
+            )
+
+        normalizer.assert_called_once()
+        self.assertEqual(capture.calls, 1)
+        self.assertEqual(backend.recognize.call_count, 1)
+        self.assertEqual(len(store.screens), 1)
+        self.assertIs(record, store.screens[0])
+        self.assertEqual(record.raw_boxes[0].raw_text, "PRIVATE_SYNTHETIC_BODY Python")
+        self.assertEqual(record.normalization_status.value, "failed")
+        self.assertEqual(record.normalization_error_type, "RuntimeError")
+        self.assertIsNone(record.normalized_text)
+        self.assertIsNone(record.comparison_text)
+        self.assertEqual(record.rule_evaluation_mode, "legacy_shadow")
+        self.assertIsNone(record.legacy_match)
+        self.assertIsNone(record.r04_match)
+        self.assertIsNone(record.comparison_outcome)
+
+    def test_failed_normalization_shadow_is_saved_without_extra_page_calls(self):
+        store = FakeStore()
+        self.start_builder(store)
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.return_value = [
+            OCRItem(
+                "虚构 Python",
+                0.99,
+                ((0, 0), (20, 0), (20, 10), (0, 10)),
+            )
+        ]
+        wait = Mock()
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=Mock(),
+            max_scans=1,
+            wait=wait,
+            observation_callback=simple_brush.record_detection_observation,
+        )
+
+        with patch(
+            "ocr_detector.normalize_ocr_text",
+            side_effect=RuntimeError("PRIVATE_SYNTHETIC_BODY"),
+        ) as normalizer:
+            result = detector.detect(simple_brush.parse_keyword_rules('"Python"'))
+
+        self.assertTrue(result.confirmed_match)
+        self.assertEqual(capture.calls, 2)
+        self.assertEqual(backend.recognize.call_count, 2)
+        self.assertEqual(normalizer.call_count, 2)
+        self.assertEqual(wait.call_count, 1)
+        self.assertEqual(len(store.screens), 2)
+        for record in store.screens:
+            self.assertEqual(record.rule_evaluation_mode, "legacy_shadow")
+            self.assertTrue(record.legacy_match)
+            self.assertIsNone(record.r04_match)
+            self.assertEqual(
+                record.comparison_outcome,
+                "normalization_failed",
+            )
+            self.assertEqual(record.legacy_rule_index, 0)
+            self.assertIsNone(record.r04_rule_index)
 
     def test_load_retry_recording_does_not_change_ocr_or_wait_counts(self):
         store = FakeStore(fail_screens=True)
@@ -219,6 +343,12 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         self.assertEqual(len(store.screens), 1)
         self.assertEqual(len(store.candidates), 1)
         self.assertIs(document, store.candidates[0])
+        self.assertEqual(document.screens, (store.screens[0],))
+        self.assertEqual(
+            document.screens[0].normalization_version,
+            "r04-v1",
+        )
+        self.assertIsNotNone(document.screens[0].comparison_text)
         self.assertEqual(document.capture_status, CaptureStatus.INTERRUPTED)
         self.assertEqual(
             document.capture_summary.abort_reason,

@@ -1,15 +1,32 @@
-"""Offline loading of stage-0 OCR run records without later-stage processing."""
+"""Offline loading and explicit R04 replay without later-stage aggregation."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Type, TypeVar
 
+from ocr_normalization import (
+    DEFAULT_OCR_NORMALIZATION_CONFIG,
+    NORMALIZATION_COMPLETED,
+    NORMALIZATION_VERSION,
+    RAW_TEXT_SOURCE_ENGINE_SCREEN,
+    OcrNormalizationConfig,
+    canonical_normalization_config,
+    config_with_effective_min_confidence,
+    normalization_config_digest,
+    normalization_config_from_snapshot,
+    normalize_ocr_text,
+)
+from ocr_candidate import normalization_record_fields
+
 from ocr_records import (
     CandidateOcrDocument,
+    LEGACY_STORAGE_SCHEMA_VERSION,
+    NormalizationStatus,
     OcrScreenRecord,
     RecordVersionError,
     RunManifest,
+    STORAGE_SCHEMA_VERSION,
     SUPPORTED_DOCUMENT_VERSIONS,
     SUPPORTED_STORAGE_SCHEMA_VERSIONS,
     validate_record_version,
@@ -255,6 +272,251 @@ class OcrRunReplay:
     candidates: List[CandidateOcrDocument]
     errors: List[Dict[str, Any]]
     issues: List[ReplayIssue]
+
+
+@dataclass(frozen=True)
+class NormalizationReplayResult:
+    """One non-persisting replay view with explicit historical provenance."""
+
+    source: OcrScreenRecord
+    normalized: OcrScreenRecord
+    effective_min_confidence: float
+    confidence_threshold_source: str
+    normalization_config_version: str
+    normalization_config_digest: str
+    issue: Optional[ReplayIssue] = None
+
+
+class _ReplayContractError(ValueError):
+    def __init__(self, error_type: str) -> None:
+        self.error_type = error_type
+        super().__init__(error_type)
+
+
+def _screen_replay_error(error_type: str) -> OcrReplayError:
+    return OcrReplayError(Path("<screen-replay>"), 0, error_type)
+
+
+def _replay_issue(error_type: str) -> ReplayIssue:
+    return ReplayIssue(Path("<screen-replay>"), 0, error_type)
+
+
+def _validate_manifest_config(manifest: RunManifest) -> OcrNormalizationConfig:
+    if manifest.storage_schema_version != STORAGE_SCHEMA_VERSION:
+        raise _ReplayContractError("ManifestSchemaMismatchError")
+    try:
+        config = normalization_config_from_snapshot(
+            manifest.normalization_config
+        )
+        digest = normalization_config_digest(manifest.normalization_config)
+    except Exception as exc:
+        raise _ReplayContractError("ManifestConfigError") from exc
+    if (
+        manifest.normalization_version != NORMALIZATION_VERSION
+        or manifest.normalization_config_version
+        != config.normalization_config_version
+        or manifest.normalization_config_digest != digest
+        or manifest.effective_min_confidence
+        != config.effective_min_confidence
+        or manifest.rule_evaluation_mode != "legacy_shadow"
+    ):
+        raise _ReplayContractError("ManifestConfigMismatchError")
+    return config
+
+
+def _validate_screen_config_identity(
+    record: OcrScreenRecord,
+    config: OcrNormalizationConfig,
+    digest: str,
+) -> None:
+    if record.normalization_status == NormalizationStatus.NOT_ATTEMPTED:
+        return
+    if (
+        record.normalization_version != NORMALIZATION_VERSION
+        or record.normalization_config_version
+        != config.normalization_config_version
+        or record.normalization_config_digest != digest
+        or record.effective_min_confidence
+        != config.effective_min_confidence
+        or record.rule_evaluation_mode != "legacy_shadow"
+    ):
+        raise _ReplayContractError("ScreenConfigMismatchError")
+
+
+def _failed_replay_view(
+    record: OcrScreenRecord,
+    config: OcrNormalizationConfig,
+    threshold_source: str,
+    error_type: str,
+) -> OcrScreenRecord:
+    from ocr_normalization import failed_normalization_result
+
+    failed = failed_normalization_result(
+        record.raw_boxes,
+        engine_raw_text=(
+            record.raw_text
+            if record.raw_text_source == RAW_TEXT_SOURCE_ENGINE_SCREEN
+            else None
+        ),
+        error_type=error_type,
+        config=config,
+    )
+    fields = normalization_record_fields(
+        failed,
+        screen_id=record.screen_id,
+        screen_index=record.screen_index,
+        raw_box_ids=tuple(box.box_id for box in record.raw_boxes),
+        confidence_threshold_source=threshold_source,
+    )
+    return replace(
+        record,
+        storage_schema_version=STORAGE_SCHEMA_VERSION,
+        legacy_match=None,
+        r04_match=None,
+        comparison_outcome=None,
+        legacy_rule_index=None,
+        r04_rule_index=None,
+        **fields,
+    )
+
+
+def replay_screen_normalization(
+    record: OcrScreenRecord,
+    *,
+    manifest: Optional[RunManifest] = None,
+    config: Optional[OcrNormalizationConfig] = None,
+    legacy_min_confidence_override: Optional[float] = None,
+    strict: bool = True,
+) -> NormalizationReplayResult:
+    """Recompute one screen from immutable evidence and explicit history."""
+
+    resolved_config: Optional[OcrNormalizationConfig] = None
+    threshold_source = "run_manifest"
+    try:
+        if not isinstance(record, OcrScreenRecord):
+            raise _ReplayContractError("InvalidScreenRecordError")
+        if record.storage_schema_version == STORAGE_SCHEMA_VERSION:
+            if legacy_min_confidence_override is not None:
+                raise _ReplayContractError("LegacyOverrideNotAllowedError")
+            if manifest is not None:
+                resolved_config = _validate_manifest_config(manifest)
+                if manifest.run_id != record.run_id:
+                    raise _ReplayContractError("ManifestRunMismatchError")
+                if config is not None and normalization_config_digest(config) != normalization_config_digest(
+                    resolved_config
+                ):
+                    raise _ReplayContractError("ExplicitConfigMismatchError")
+            else:
+                if config is None:
+                    raise _ReplayContractError("HistoricalConfigRequiredError")
+                resolved_config = config
+                if record.normalization_status == NormalizationStatus.NOT_ATTEMPTED:
+                    raise _ReplayContractError("ScreenConfigIdentityRequiredError")
+            digest = normalization_config_digest(resolved_config)
+            _validate_screen_config_identity(record, resolved_config, digest)
+            threshold_source = "run_manifest" if manifest is not None else "caller_config"
+        elif record.storage_schema_version == LEGACY_STORAGE_SCHEMA_VERSION:
+            if manifest is not None and manifest.storage_schema_version != LEGACY_STORAGE_SCHEMA_VERSION:
+                raise _ReplayContractError("ManifestSchemaMismatchError")
+            threshold = (
+                0.85
+                if legacy_min_confidence_override is None
+                else float(legacy_min_confidence_override)
+            )
+            threshold_source = (
+                "legacy_stage0_assumption"
+                if legacy_min_confidence_override is None
+                else "caller_override"
+            )
+            resolved_config = config_with_effective_min_confidence(
+                config or DEFAULT_OCR_NORMALIZATION_CONFIG,
+                threshold,
+            )
+            digest = normalization_config_digest(resolved_config)
+        else:
+            raise _ReplayContractError("UnsupportedStorageSchemaError")
+
+        result = normalize_ocr_text(
+            record.raw_boxes,
+            engine_raw_text=(
+                record.raw_text
+                if record.raw_text_source == RAW_TEXT_SOURCE_ENGINE_SCREEN
+                else None
+            ),
+            config=resolved_config,
+        )
+        if result.status != NORMALIZATION_COMPLETED:
+            raise _ReplayContractError(
+                result.normalization_error_type or "NormalizationFailedError"
+            )
+        fields = normalization_record_fields(
+            result,
+            screen_id=record.screen_id,
+            screen_index=record.screen_index,
+            raw_box_ids=tuple(box.box_id for box in record.raw_boxes),
+            confidence_threshold_source=threshold_source,
+        )
+        normalized = replace(
+            record,
+            storage_schema_version=STORAGE_SCHEMA_VERSION,
+            legacy_match=None if record.storage_schema_version == LEGACY_STORAGE_SCHEMA_VERSION else record.legacy_match,
+            r04_match=None if record.storage_schema_version == LEGACY_STORAGE_SCHEMA_VERSION else record.r04_match,
+            comparison_outcome=None if record.storage_schema_version == LEGACY_STORAGE_SCHEMA_VERSION else record.comparison_outcome,
+            legacy_rule_index=None if record.storage_schema_version == LEGACY_STORAGE_SCHEMA_VERSION else record.legacy_rule_index,
+            r04_rule_index=None if record.storage_schema_version == LEGACY_STORAGE_SCHEMA_VERSION else record.r04_rule_index,
+            **fields,
+        )
+        if normalized.raw_boxes != record.raw_boxes or normalized.raw_text != record.raw_text:
+            raise _ReplayContractError("RawEvidenceMutationError")
+        return NormalizationReplayResult(
+            source=record,
+            normalized=normalized,
+            effective_min_confidence=resolved_config.effective_min_confidence,
+            confidence_threshold_source=threshold_source,
+            normalization_config_version=resolved_config.normalization_config_version,
+            normalization_config_digest=digest,
+        )
+    except Exception as exc:
+        error_type = (
+            exc.error_type
+            if isinstance(exc, _ReplayContractError)
+            else type(exc).__name__
+        )
+        if strict:
+            raise _screen_replay_error(error_type) from exc
+        issue = _replay_issue(error_type)
+        normalized = record
+        if resolved_config is not None:
+            try:
+                normalized = _failed_replay_view(
+                    record,
+                    resolved_config,
+                    threshold_source,
+                    error_type,
+                )
+            except Exception:
+                normalized = record
+        return NormalizationReplayResult(
+            source=record,
+            normalized=normalized,
+            effective_min_confidence=(
+                resolved_config.effective_min_confidence
+                if resolved_config is not None
+                else 0.85
+            ),
+            confidence_threshold_source=threshold_source,
+            normalization_config_version=(
+                resolved_config.normalization_config_version
+                if resolved_config is not None
+                else "r04-config-v1"
+            ),
+            normalization_config_digest=(
+                normalization_config_digest(resolved_config)
+                if resolved_config is not None
+                else ""
+            ),
+            issue=issue,
+        )
 
 
 def load_ocr_run(run_dir: Path, *, strict: bool = True) -> OcrRunReplay:

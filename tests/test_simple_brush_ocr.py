@@ -1,7 +1,11 @@
 import unittest
 from contextlib import ExitStack
 from dataclasses import FrozenInstanceError, fields
+import hashlib
+import logging
+import os
 from pathlib import Path
+import tempfile
 from unittest.mock import Mock, call, patch
 
 import simple_brush
@@ -137,6 +141,191 @@ def render_log_calls(*loggers):
             message, *values = log_call.args
             rendered.append(message % tuple(values) if values else message)
     return rendered
+
+
+def file_snapshot(path):
+    path = Path(path)
+    if not path.exists():
+        return None
+    stat = path.stat()
+    return (
+        stat.st_size,
+        stat.st_mtime_ns,
+        hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+
+
+class LoggingIsolationTests(unittest.TestCase):
+    def test_imported_module_has_no_default_file_handler_or_real_log_write(self):
+        real_log_path = simple_brush.DEFAULT_LOG_PATH.resolve()
+        before = file_snapshot(real_log_path)
+
+        matching_handlers = [
+            handler
+            for handler in logging.getLogger().handlers
+            if isinstance(handler, logging.FileHandler)
+            and Path(handler.baseFilename).resolve() == real_log_path
+        ]
+        self.assertEqual(matching_handlers, [])
+
+        simple_brush.logger.info(
+            "event=test_logging_isolation state=imported_without_file_handler"
+        )
+        simple_brush.logger.warning(
+            "event=test_logging_isolation error_type=FictionalError"
+        )
+
+        self.assertEqual(file_snapshot(real_log_path), before)
+
+    def test_absent_default_log_is_not_created_by_logging_calls(self):
+        previous_working_directory = Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            try:
+                os.chdir(temporary_path)
+                simple_brush.logger.info(
+                    "event=test_logging_isolation state=absent_default"
+                )
+                self.assertFalse(Path("logs/simple_brush.log").exists())
+            finally:
+                os.chdir(previous_working_directory)
+
+    def test_explicit_temporary_file_handler_is_idempotent_private_and_closed(self):
+        private_email = "private-user@privacy-marker.invalid"
+        private_rule = "PRIVATE_RULE_SOURCE_7F2A"
+        private_body = "PRIVATE_OCR_BODY_9C4D"
+        private_markers = (private_email, private_rule, private_body)
+        temporary_directory_path = None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_directory_path = Path(temporary)
+            temporary_log_path = temporary_directory_path / "test-simple-brush.log"
+            handler = simple_brush.configure_file_logging(temporary_log_path)
+            repeated = simple_brush.configure_file_logging(temporary_log_path)
+            self.assertIs(repeated, handler)
+            self.assertEqual(
+                sum(
+                    isinstance(candidate, logging.FileHandler)
+                    and Path(candidate.baseFilename).resolve()
+                    == temporary_log_path.resolve()
+                    for candidate in logging.getLogger().handlers
+                ),
+                1,
+            )
+
+            saved_rules = simple_brush.forward_keywords
+            saved_forward_enabled = simple_brush.forward_enabled
+            saved_detector = simple_brush.ocr_detector
+            saved_backup_email = simple_brush.backup_email
+            saved_forward_count = simple_brush.forward_consecutive
+            try:
+                simple_brush.forward_keywords = simple_brush.parse_keyword_rules(
+                    '"{0}"'.format(private_rule)
+                )
+                simple_brush.forward_enabled = True
+                detector = Mock()
+                detector.detect.return_value = DetectionResult(
+                    success=True,
+                    confirmed_match=True,
+                    matched_keyword=private_rule,
+                    scans_completed=1,
+                    observations=[ScanObservation(
+                        1,
+                        private_body,
+                        1,
+                        0.01,
+                        private_rule,
+                    )],
+                )
+                simple_brush.ocr_detector = detector
+                with patch.object(
+                    simple_brush,
+                    "ensure_ocr_region_calibrated",
+                    return_value=True,
+                ):
+                    matched, _result = simple_brush.detect_keywords()
+                self.assertTrue(matched)
+
+                simple_brush.backup_email = private_email
+                simple_brush.forward_consecutive = 0
+                with (
+                    patch.object(simple_brush, "click_in_region"),
+                    patch.object(simple_brush, "human_click"),
+                    patch.object(
+                        simple_brush,
+                        "random_point_in_region",
+                        return_value=(500, 400),
+                    ),
+                    patch.object(simple_brush, "human_delay", return_value=True),
+                    patch.object(simple_brush, "get_clipboard_text", return_value=""),
+                    patch.object(
+                        simple_brush,
+                        "type_text_human",
+                        return_value=True,
+                    ) as type_text,
+                    patch.object(simple_brush.pyautogui, "hotkey"),
+                    patch.object(simple_brush.pyautogui, "press"),
+                    patch.object(simple_brush.time, "sleep"),
+                ):
+                    self.assertTrue(simple_brush.forward_one_candidate())
+                type_text.assert_called_once_with(private_email)
+
+                simple_brush.forward_consecutive = 0
+                with (
+                    patch.object(simple_brush, "click_in_region"),
+                    patch.object(simple_brush, "human_click"),
+                    patch.object(
+                        simple_brush,
+                        "random_point_in_region",
+                        return_value=(500, 400),
+                    ),
+                    patch.object(simple_brush, "human_delay", return_value=True),
+                    patch.object(
+                        simple_brush,
+                        "get_clipboard_text",
+                        return_value=private_email,
+                    ),
+                    patch.object(simple_brush, "type_text_human") as type_text,
+                    patch.object(simple_brush.pyautogui, "hotkey"),
+                    patch.object(simple_brush.pyautogui, "press"),
+                    patch.object(simple_brush.time, "sleep"),
+                ):
+                    self.assertTrue(simple_brush.forward_one_candidate())
+                type_text.assert_not_called()
+
+                simple_brush.logger.error("运行异常 error_type=RuntimeError")
+            finally:
+                simple_brush.forward_keywords = saved_rules
+                simple_brush.forward_enabled = saved_forward_enabled
+                simple_brush.ocr_detector = saved_detector
+                simple_brush.backup_email = saved_backup_email
+                simple_brush.forward_consecutive = saved_forward_count
+                simple_brush.close_file_logging(handler)
+
+            self.assertNotIn(handler, logging.getLogger().handlers)
+            self.assertIsNone(handler.stream)
+            rendered = temporary_log_path.read_text(encoding="utf-8")
+            self.assertIn("rule_count=1", rendered)
+            self.assertIn("email_source=manual", rendered)
+            self.assertIn("email_source=recent_contact", rendered)
+            self.assertIn("error_type=RuntimeError", rendered)
+            for marker in private_markers:
+                self.assertNotIn(marker, rendered)
+
+        self.assertFalse(temporary_directory_path.exists())
+
+    def test_console_handler_installation_is_idempotent(self):
+        console_handlers = [
+            handler
+            for handler in simple_brush.logger.handlers
+            if getattr(
+                handler,
+                simple_brush._CONSOLE_HANDLER_MARKER,
+                False,
+            )
+        ]
+
+        self.assertEqual(console_handlers, [simple_brush.console])
 
 
 class CandidateSwitchPureTests(unittest.TestCase):
@@ -1280,6 +1469,17 @@ class SimpleBrushOCRTests(unittest.TestCase):
             context.pre_switch_fingerprint,
             baseline_observation.fingerprint,
         )
+        self.assertEqual(
+            [
+                fingerprint.fingerprint_version
+                for fingerprint in context.formal_fingerprints
+            ],
+            ["r03-v1", "r03-v1"],
+        )
+        self.assertEqual(
+            context.pre_switch_fingerprint.fingerprint_version,
+            "r03-v1",
+        )
         self.assertIsNone(context.pre_switch_fingerprint.screen_index)
         detector.capture_observation.assert_called_once_with(1)
         detector.detect.assert_not_called()
@@ -1370,6 +1570,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
         )
         self.assertIsNone(new_first.fingerprint.screen_index)
         self.assertIsNone(new_second.fingerprint.screen_index)
+        self.assertEqual(new_first.fingerprint.fingerprint_version, "r03-v1")
+        self.assertEqual(new_second.fingerprint.fingerprint_version, "r03-v1")
         self.assertEqual(readiness.call_count, 2)
         self.assertEqual(
             readiness.call_args_list[0],
@@ -2554,6 +2756,43 @@ class SimpleBrushOCRTests(unittest.TestCase):
             simple_brush.forward_keywords,
             first_observation=None,
         )
+
+    def test_detect_keyword_logs_do_not_expose_rule_or_matched_keyword(self):
+        private_rule_marker = "R04_PRIVATE_RULE_MARKER_7F2A"
+        rules = simple_brush.parse_keyword_rules(
+            '"{0}"'.format(private_rule_marker)
+        )
+        observation = ScanObservation(
+            1,
+            private_rule_marker,
+            1,
+            0.05,
+            private_rule_marker,
+        )
+        detector = Mock()
+        detector.detect.return_value = DetectionResult(
+            success=True,
+            confirmed_match=True,
+            matched_keyword=private_rule_marker,
+            scans_completed=1,
+            observations=[observation],
+        )
+        simple_brush.forward_keywords = rules
+        simple_brush.ocr_detector = detector
+
+        with (
+            patch.object(simple_brush.logger, "info") as info,
+            patch.object(simple_brush.logger, "warning") as warning,
+            patch.object(simple_brush.logger, "error") as error,
+        ):
+            keyword_hit, result = simple_brush.detect_keywords()
+
+        self.assertTrue(keyword_hit)
+        self.assertIs(result, detector.detect.return_value)
+        rendered = "\n".join(render_log_calls(info, warning, error))
+        self.assertNotIn(private_rule_marker, rendered)
+        self.assertIn("rule_count=1", rendered)
+        self.assertIn("matched=true", rendered)
 
     def test_detect_keywords_passes_the_complete_not_rule_to_ocr(self):
         rules = simple_brush.parse_keyword_rules('"短剧" and not "销售"')
@@ -3789,6 +4028,97 @@ class SimpleBrushOCRTests(unittest.TestCase):
         )
         self.assert_focus_restored_twice(click, choose_point)
 
+    def test_forward_email_marker_is_not_logged_but_is_typed_unchanged(self):
+        private_email = (
+            "r04-private-user-7f2a@privacy-marker.invalid"
+        )
+        private_user, private_domain = private_email.split("@", 1)
+        simple_brush.backup_email = private_email
+        with (
+            patch.object(simple_brush, "click_in_region") as region_click,
+            patch.object(simple_brush, "human_click") as click,
+            patch.object(
+                simple_brush,
+                "random_point_in_region",
+                return_value=(500, 400),
+            ) as choose_point,
+            patch.object(simple_brush, "human_delay", return_value=True),
+            patch.object(simple_brush, "get_clipboard_text", return_value=""),
+            patch.object(
+                simple_brush,
+                "type_text_human",
+                return_value=True,
+            ) as type_text,
+            patch.object(simple_brush.pyautogui, "hotkey"),
+            patch.object(simple_brush.pyautogui, "press"),
+            patch.object(simple_brush.time, "sleep"),
+            patch.object(simple_brush.logger, "info") as info,
+            patch.object(simple_brush.logger, "warning") as warning,
+            patch.object(simple_brush.logger, "error") as error,
+        ):
+            self.assertTrue(simple_brush.forward_one_candidate())
+
+        type_text.assert_called_once_with(private_email)
+        self.assertEqual(
+            region_click.call_args_list,
+            [
+                call(simple_brush.forward_click_regions.forward_icon),
+                call(simple_brush.forward_click_regions.email_tab),
+                call(simple_brush.forward_click_regions.recent_email),
+                call(simple_brush.forward_click_regions.input_box),
+                call(simple_brush.forward_click_regions.input_box),
+                call(simple_brush.forward_click_regions.forward_button),
+            ],
+        )
+        self.assert_focus_restored_twice(click, choose_point)
+        rendered = "\n".join(render_log_calls(info, warning, error))
+        self.assertNotIn(private_email, rendered)
+        self.assertNotIn(private_user, rendered)
+        self.assertNotIn(private_domain, rendered)
+        self.assertIn(
+            "alternate_email_provided=true email_source=manual",
+            rendered,
+        )
+
+    def test_recent_contact_email_marker_is_not_logged_or_retyped(self):
+        private_email = (
+            "r04-recent-user-8c3b@recent-privacy.invalid"
+        )
+        private_user, private_domain = private_email.split("@", 1)
+        with (
+            patch.object(simple_brush, "click_in_region"),
+            patch.object(simple_brush, "human_click"),
+            patch.object(
+                simple_brush,
+                "random_point_in_region",
+                return_value=(500, 400),
+            ),
+            patch.object(simple_brush, "human_delay", return_value=True),
+            patch.object(
+                simple_brush,
+                "get_clipboard_text",
+                return_value=private_email,
+            ),
+            patch.object(simple_brush, "type_text_human") as type_text,
+            patch.object(simple_brush.pyautogui, "hotkey"),
+            patch.object(simple_brush.pyautogui, "press"),
+            patch.object(simple_brush.time, "sleep"),
+            patch.object(simple_brush.logger, "info") as info,
+            patch.object(simple_brush.logger, "warning") as warning,
+            patch.object(simple_brush.logger, "error") as error,
+        ):
+            self.assertTrue(simple_brush.forward_one_candidate())
+
+        type_text.assert_not_called()
+        rendered = "\n".join(render_log_calls(info, warning, error))
+        self.assertNotIn(private_email, rendered)
+        self.assertNotIn(private_user, rendered)
+        self.assertNotIn(private_domain, rendered)
+        self.assertIn(
+            "email_provided=true email_source=recent_contact",
+            rendered,
+        )
+
     def test_forward_restores_focus_at_consecutive_limit(self):
         simple_brush.forward_consecutive = simple_brush.FORWARD_MAX_CONSEC
         with (
@@ -3963,7 +4293,9 @@ class SimpleBrushOCRTests(unittest.TestCase):
         )
         delay.assert_called_once_with(0.3, 0.5)
         log_error.assert_called_once()
-        self.assertIn("第 1 次", log_error.call_args.args[0])
+        rendered = render_log_calls(log_error)[0]
+        self.assertIn("第 1 次", rendered)
+        self.assertIn("error_type=RuntimeError", rendered)
 
     def test_calibration_escape_does_not_stop_browsing(self):
         simple_brush.ocr_calibration_in_progress = True

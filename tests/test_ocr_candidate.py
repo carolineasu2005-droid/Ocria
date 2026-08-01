@@ -1,4 +1,5 @@
 import gc
+import json
 import unittest
 import weakref
 
@@ -6,7 +7,14 @@ from ocr_candidate import (
     CandidateBuilderFinalizedError,
     CandidateOcrBuilder,
 )
-from ocr_records import CaptureStatus, CaptureType, NOT_IMPLEMENTED
+from ocr_detector import RuleComparisonResult
+from ocr_records import (
+    CaptureStatus,
+    CaptureType,
+    NOT_IMPLEMENTED,
+    OcrScreenRecord,
+)
+from ocr_normalization import NormalizationBox, normalize_ocr_text
 from ocr_text import OCRItem
 
 
@@ -73,6 +81,203 @@ class CandidateOcrBuilderTests(unittest.TestCase):
         self.assertEqual(document.capture_summary.end_screen_index, 1)
         self.assertEqual(record.raw_boxes[0].original_index, 0)
         self.assertEqual(record.raw_boxes[0].raw_text, self.make_item().text)
+
+    def test_screen_record_flattens_legacy_shadow_result(self):
+        builder = self.make_builder()
+        screen_id = "screen-shadow"
+        item = self.make_item()
+        normalization = normalize_ocr_text((NormalizationBox(
+            "{0}:box:0".format(screen_id),
+            item.text,
+            item.box,
+            0,
+            item.confidence,
+        ),))
+        comparison = RuleComparisonResult(
+            rule_evaluation_mode="legacy_shadow",
+            legacy_match=False,
+            r04_match=True,
+            comparison_outcome="r04_only",
+            legacy_rule_index=None,
+            r04_rule_index=1,
+        )
+
+        record = builder.build_screen_record(
+            [item],
+            capture_type=CaptureType.FORMAL_SCREEN,
+            is_formal_screen=True,
+            screen_index=1,
+            captured_at="2026-07-30T12:00:01+08:00",
+            screen_id=screen_id,
+            normalization=normalization,
+            ocr_min_confidence=0.85,
+            rule_comparison=comparison,
+        )
+
+        self.assertEqual(record.rule_evaluation_mode, "legacy_shadow")
+        self.assertFalse(record.legacy_match)
+        self.assertTrue(record.r04_match)
+        self.assertEqual(record.comparison_outcome, "r04_only")
+        self.assertIsNone(record.legacy_rule_index)
+        self.assertEqual(record.r04_rule_index, 1)
+
+    def test_r04_result_projects_into_existing_screen_and_candidate_models(self):
+        builder = self.make_builder()
+        screen_id = "screen-r04"
+        items = (
+            OCRItem(
+                "Unity  2022.3 C++",
+                0.91,
+                ((0, 0), (100, 0), (100, 20), (0, 20)),
+            ),
+            OCRItem(
+                "Unity  2022.3 C++",
+                0.99,
+                ((1, 0), (101, 0), (101, 20), (1, 20)),
+            ),
+        )
+        normalization = normalize_ocr_text(tuple(
+            NormalizationBox(
+                "{0}:box:{1}".format(screen_id, index),
+                item.text,
+                item.box,
+                index,
+                item.confidence,
+            )
+            for index, item in enumerate(items)
+        ))
+
+        record = builder.build_screen_record(
+            items,
+            capture_type=CaptureType.FORMAL_SCREEN,
+            is_formal_screen=True,
+            screen_index=1,
+            captured_at="2026-07-30T12:00:01+08:00",
+            screen_id=screen_id,
+            normalization=normalization,
+            ocr_min_confidence=0.85,
+        )
+        document = builder.finalize(
+            CaptureStatus.COMPLETED,
+            end_reason="existing_flow_completed",
+        )
+
+        self.assertEqual(record.raw_text, "\n".join(item.text for item in items))
+        self.assertEqual(record.raw_text_length, len(record.raw_text))
+        self.assertEqual(record.normalized_text, normalization.normalized_text)
+        self.assertEqual(record.comparison_text, normalization.comparison_text)
+        self.assertEqual(record.ordered_box_ids, normalization.ordered_box_ids)
+        self.assertEqual(record.effective_box_ids, normalization.effective_box_ids)
+        self.assertEqual(
+            record.suppressed_duplicate_box_ids,
+            normalization.suppressed_duplicate_box_ids,
+        )
+        self.assertEqual(len(record.duplicate_groups), 1)
+        self.assertEqual(record.segments[0].segment_id, "screen-r04:line:0")
+        self.assertEqual(record.ocr_min_confidence, 0.85)
+        self.assertEqual(
+            document.versions["normalization"],
+            normalization.normalization_version,
+        )
+        self.assertEqual(document.screens, (record,))
+        self.assertIsNone(document.document_text)
+        self.assertEqual(
+            OcrScreenRecord.from_dict(json.loads(record.to_json())),
+            record,
+        )
+
+    def test_invalid_mixed_bbox_keeps_raw_box_and_text_in_record(self):
+        builder = self.make_builder()
+        screen_id = "screen-invalid-bbox"
+        item = OCRItem("仍需保留的文字", 0.95, (0, (1, 2), 3, 4))
+        normalization = normalize_ocr_text((NormalizationBox(
+            "{0}:box:0".format(screen_id),
+            item.text,
+            item.box,
+            0,
+            item.confidence,
+        ),))
+
+        record = builder.build_screen_record(
+            (item,),
+            capture_type=CaptureType.LOAD_CHECK,
+            is_formal_screen=False,
+            screen_index=None,
+            captured_at="2026-07-30T12:00:01+08:00",
+            screen_id=screen_id,
+            normalization=normalization,
+            ocr_min_confidence=0.85,
+        )
+        restored = OcrScreenRecord.from_dict(json.loads(record.to_json()))
+
+        self.assertEqual(restored.raw_boxes[0].raw_text, item.text)
+        self.assertEqual(restored.raw_boxes[0].bbox, item.box)
+        self.assertEqual(restored.normalization_status.value, "failed")
+        self.assertIsNone(restored.normalized_text)
+        self.assertIsNone(restored.comparison_text)
+        self.assertEqual(restored.raw_text, item.text)
+
+    def test_candidate_normalization_summary_is_recomputed_by_formality_and_state(self):
+        builder = self.make_builder()
+        completed_id = "summary-completed"
+        completed_item = self.make_item("completed")
+        completed = normalize_ocr_text((NormalizationBox(
+            "{0}:box:0".format(completed_id),
+            completed_item.text,
+            completed_item.box,
+            0,
+            completed_item.confidence,
+        ),))
+        builder.build_screen_record(
+            (completed_item,),
+            capture_type=CaptureType.FORMAL_SCREEN,
+            is_formal_screen=True,
+            screen_index=1,
+            screen_id=completed_id,
+            normalization=completed,
+            ocr_min_confidence=0.85,
+        )
+        failed_id = "summary-failed"
+        failed_item = OCRItem("虚构失败框", 0.95, (0, (1, 2), 3, 4))
+        failed = normalize_ocr_text((NormalizationBox(
+            "{0}:box:0".format(failed_id),
+            failed_item.text,
+            failed_item.box,
+            0,
+            failed_item.confidence,
+        ),))
+        builder.build_screen_record(
+            (failed_item,),
+            capture_type=CaptureType.LOAD_CHECK,
+            is_formal_screen=False,
+            screen_index=None,
+            screen_id=failed_id,
+            normalization=failed,
+            ocr_min_confidence=0.85,
+        )
+        self.add_screen(builder, 2)
+        self.add_screen(builder, 3, CaptureType.LOAD_RETRY, formal=False)
+
+        document = builder.finalize(
+            CaptureStatus.COMPLETED,
+            end_reason="existing_flow_completed",
+        )
+        summary = document.normalization_summary
+
+        self.assertEqual(summary.formal_normalization_completed_count, 1)
+        self.assertEqual(summary.formal_normalization_failed_count, 0)
+        self.assertEqual(summary.formal_normalization_not_attempted_count, 1)
+        self.assertEqual(summary.nonformal_normalization_completed_count, 0)
+        self.assertEqual(summary.nonformal_normalization_failed_count, 1)
+        self.assertEqual(summary.nonformal_normalization_not_attempted_count, 1)
+        self.assertEqual(document.versions["normalization"], "r04-v1")
+
+        serialized = document.to_dict()
+        serialized["normalization_summary"][
+            "formal_normalization_completed_count"
+        ] += 1
+        with self.assertRaisesRegex(ValueError, "summary"):
+            type(document).from_dict(serialized)
 
     def test_eight_formal_screens_report_completed_with_limit(self):
         builder = self.make_builder()

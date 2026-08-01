@@ -11,6 +11,15 @@ import threading
 from typing import Any, Dict, Mapping, Optional, Protocol
 from uuid import uuid4
 
+from ocr_normalization import (
+    DEFAULT_OCR_NORMALIZATION_CONFIG,
+    NORMALIZATION_VERSION,
+    canonical_normalization_config,
+    config_with_effective_min_confidence,
+    normalization_config_digest as calculate_normalization_config_digest,
+    normalization_config_from_snapshot,
+)
+
 from ocr_records import (
     CandidateOcrDocument,
     OcrScreenRecord,
@@ -31,6 +40,11 @@ SCREENS_NAME = "screens.jsonl"
 CANDIDATES_NAME = "candidates.jsonl"
 ERRORS_NAME = "errors.jsonl"
 DEFAULT_CONSECUTIVE_FAILURE_LIMIT = 3
+RULE_EVALUATION_MODE_LEGACY_SHADOW = "legacy_shadow"
+
+
+class ScreenManifestIdentityMismatchError(ValueError):
+    """Sanitized rejection for a screen produced under another run config."""
 
 
 class OcrRecordStore(Protocol):
@@ -65,6 +79,13 @@ class JsonlOcrRecordStore:
         max_screen_count: Optional[int] = None,
         app_version: Optional[str] = None,
         git_commit: Optional[str] = None,
+        normalization_version: Optional[str] = None,
+        ocr_min_confidence: Optional[float] = None,
+        normalization_config_version: Optional[str] = None,
+        normalization_config_digest: Optional[str] = None,
+        effective_min_confidence: Optional[float] = None,
+        normalization_config: Optional[Mapping[str, Any]] = None,
+        rule_evaluation_mode: str = RULE_EVALUATION_MODE_LEGACY_SHADOW,
         fsync: bool = False,
         run_id: Optional[str] = None,
         started_at: Optional[datetime] = None,
@@ -94,6 +115,43 @@ class JsonlOcrRecordStore:
         self.screens_path = self.run_dir / SCREENS_NAME
         self.candidates_path = self.run_dir / CANDIDATES_NAME
         self.errors_path = self.run_dir / ERRORS_NAME
+        threshold = (
+            effective_min_confidence
+            if effective_min_confidence is not None
+            else ocr_min_confidence
+            if ocr_min_confidence is not None
+            else DEFAULT_OCR_NORMALIZATION_CONFIG.effective_min_confidence
+        )
+        if normalization_config is None:
+            run_config = config_with_effective_min_confidence(
+                DEFAULT_OCR_NORMALIZATION_CONFIG,
+                threshold,
+            )
+            config_snapshot = canonical_normalization_config(run_config)
+        else:
+            config_snapshot = dict(normalization_config)
+            run_config = normalization_config_from_snapshot(config_snapshot)
+        if (
+            effective_min_confidence is not None
+            and float(effective_min_confidence)
+            != float(run_config.effective_min_confidence)
+        ):
+            raise ValueError("effective confidence does not match normalization config")
+        if (
+            ocr_min_confidence is not None
+            and float(ocr_min_confidence)
+            != float(run_config.effective_min_confidence)
+        ):
+            raise ValueError("OCR confidence does not match normalization config")
+        actual_version = normalization_version or NORMALIZATION_VERSION
+        actual_config_version = (
+            normalization_config_version
+            or run_config.normalization_config_version
+        )
+        actual_digest = (
+            normalization_config_digest
+            or calculate_normalization_config_digest(config_snapshot)
+        )
         self.manifest = RunManifest(
             run_id=self.run_id,
             started_at=started_at_text,
@@ -104,6 +162,13 @@ class JsonlOcrRecordStore:
             max_screen_count=max_screen_count,
             app_version=app_version,
             git_commit=git_commit,
+            normalization_version=actual_version,
+            normalization_config_version=actual_config_version,
+            normalization_config_digest=actual_digest,
+            effective_min_confidence=run_config.effective_min_confidence,
+            normalization_config=config_snapshot,
+            rule_evaluation_mode=rule_evaluation_mode,
+            ocr_min_confidence=ocr_min_confidence,
             data_files={
                 "manifest": RUN_MANIFEST_NAME,
                 "screens": SCREENS_NAME,
@@ -279,12 +344,41 @@ class JsonlOcrRecordStore:
             "capture_type": getattr(record, "capture_type", None),
         }
         with self._lock:
+            try:
+                self._validate_screen_identity(record)
+            except Exception as exc:
+                self._record_failure("save_screen", exc, context)
+                return False
             saved = self._save_record(
                 self.screens_path, record, "save_screen", context
             )
             if saved:
                 self.manifest.screen_record_count += 1
         return saved
+
+    def _validate_screen_identity(self, record: OcrScreenRecord) -> None:
+        if not isinstance(record, OcrScreenRecord):
+            return
+        if record.normalization_status.value == "not_attempted":
+            return
+        screen_identity = (
+            record.normalization_version,
+            record.normalization_config_version,
+            record.normalization_config_digest,
+            record.effective_min_confidence,
+            record.rule_evaluation_mode,
+        )
+        manifest_identity = (
+            self.manifest.normalization_version,
+            self.manifest.normalization_config_version,
+            self.manifest.normalization_config_digest,
+            self.manifest.effective_min_confidence,
+            self.manifest.rule_evaluation_mode,
+        )
+        if screen_identity != manifest_identity:
+            raise ScreenManifestIdentityMismatchError(
+                "screen normalization identity does not match run manifest"
+            )
 
     def save_candidate(self, document: CandidateOcrDocument) -> bool:
         context = {
@@ -294,6 +388,12 @@ class JsonlOcrRecordStore:
             "record_type": getattr(document, "record_type", None),
         }
         with self._lock:
+            try:
+                for screen in document.screens:
+                    self._validate_screen_identity(screen)
+            except Exception as exc:
+                self._record_failure("save_candidate", exc, context)
+                return False
             saved = self._save_record(
                 self.candidates_path,
                 document,

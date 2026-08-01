@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from ocr_normalization import build_comparison_text
 from ocr_text import (
     KeywordAnyGroup,
     KeywordTerm,
@@ -18,6 +19,18 @@ from ocr_text import (
 class OCRTextTests(unittest.TestCase):
     def test_normalization_removes_layout_whitespace_and_folds_width(self):
         self.assertEqual(normalize_text("广东 工贸\n职业技术学院 ＡＩ"), "广东工贸职业技术学院ai")
+
+    def test_legacy_normalization_delegates_to_comparison_contract(self):
+        values = (
+            " Ab C ",
+            "C++ C# .NET SLG+X 0-1 2D/3D v1.2.3 A_B",
+            "Straße ẞ",
+            "（ＵＥ５），。—…",
+        )
+
+        for value in values:
+            with self.subTest(value=value):
+                self.assertEqual(normalize_text(value), build_comparison_text(value))
 
     def test_exact_match_accepts_keyword_split_across_ocr_lines(self):
         text = "广东工贸职业\n技术学院"

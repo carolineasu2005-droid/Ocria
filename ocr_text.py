@@ -1,9 +1,9 @@
 """Pure text processing for screen-based OCR keyword detection."""
 
 from dataclasses import dataclass
-import re
-import unicodedata
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
+
+from ocr_normalization import build_comparison_text
 
 
 @dataclass(frozen=True)
@@ -277,21 +277,40 @@ def parse_keyword_rules(value: str) -> List[KeywordRule]:
 def normalize_text(value: str) -> str:
     """Normalize layout noise without introducing fuzzy matching."""
 
-    normalized = unicodedata.normalize("NFKC", value or "").lower()
-    return re.sub(r"\s+", "", normalized)
+    return build_comparison_text(value or "")
 
 
 def order_items(items: Iterable[OCRItem]) -> List[OCRItem]:
     """Return OCR boxes in adaptive line order, then left-to-right order."""
 
     items = list(items)
-    positioned = [item for item in items if item.vertical_bounds is not None]
-    unpositioned = [item for item in items if item.vertical_bounds is None]
-    positioned.sort(key=lambda item: (item.anchor[1], item.anchor[0]))
+    positioned = []
+    unpositioned = []
+    bounds_by_id = {}
+    anchor_by_id = {}
+    for item in items:
+        try:
+            bounds = item.vertical_bounds
+            anchor = item.anchor
+        except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+            bounds = None
+            anchor = None
+        if bounds is None or anchor is None:
+            unpositioned.append(item)
+            continue
+        positioned.append(item)
+        bounds_by_id[id(item)] = bounds
+        anchor_by_id[id(item)] = anchor
+    positioned.sort(
+        key=lambda item: (
+            anchor_by_id[id(item)][1],
+            anchor_by_id[id(item)][0],
+        )
+    )
 
     lines = []
     for item in positioned:
-        top, bottom = item.vertical_bounds
+        top, bottom = bounds_by_id[id(item)]
         center = (top + bottom) / 2.0
         height = max(1.0, bottom - top)
         target = None
@@ -312,7 +331,10 @@ def order_items(items: Iterable[OCRItem]) -> List[OCRItem]:
 
     ordered = []
     for line in sorted(lines, key=lambda value: value["center"]):
-        ordered.extend(sorted(line["items"], key=lambda item: item.anchor[0]))
+        ordered.extend(sorted(
+            line["items"],
+            key=lambda item: anchor_by_id[id(item)][0],
+        ))
     ordered.extend(unpositioned)
     return ordered
 

@@ -60,6 +60,13 @@ from ocr_detector import (
 )
 from ocr_text import parse_keyword_rules
 from ocr_candidate import CandidateOcrBuilder
+from ocr_normalization import (
+    DEFAULT_OCR_NORMALIZATION_CONFIG,
+    NORMALIZATION_VERSION,
+    canonical_normalization_config,
+    config_with_effective_min_confidence,
+    normalization_config_digest,
+)
 from ocr_records import CaptureStatus, CaptureType, RunStatus
 from ocr_store import JsonlOcrRecordStore
 from mouse_motion import (
@@ -177,6 +184,7 @@ OCR_SCROLL_MAX_STEPS = 140
 OCR_SETTLE_SECONDS = 0.6
 OCR_CONFIRMATION_SECONDS = 0.7
 OCR_PREVIEW_PATH = Path('logs/ocr_calibration_preview.png')
+R04_RULE_EVALUATION_MODE = "legacy_shadow"
 
 # R01 candidate-switch verification
 CANDIDATE_SWITCH_MAX_ACTIONS = 2
@@ -511,20 +519,76 @@ DEFAULT_FORWARD_CLICK_REGIONS = ForwardClickRegions(
     forward_button=region_around(FORWARD_BTN_X, FORWARD_BTN_Y, 5),
 )
 
-# 日志
-os.makedirs('logs', exist_ok=True)
-logging.basicConfig(
-    filename='logs/simple_brush.log',
-    filemode='a',
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    level=logging.INFO,
-    encoding='utf-8'
-)
+# 日志。Import 只装配 console；生产文件日志由脚本入口显式初始化，
+# 避免 unittest/import 触碰真实运营日志。
+DEFAULT_LOG_PATH = Path('logs/simple_brush.log')
+_FILE_LOG_FORMAT = '%(asctime)s [%(levelname)s] %(message)s'
+_CONSOLE_HANDLER_MARKER = '_bossocr_console_handler'
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-console = logging.StreamHandler(sys.stdout)
-console.setFormatter(logging.Formatter('%(asctime)s %(message)s', datefmt='%H:%M:%S'))
-logger.addHandler(console)
+
+def configure_file_logging(log_path=DEFAULT_LOG_PATH):
+    """Install one explicit root FileHandler and return it.
+
+    Calling this function repeatedly for the same resolved path is idempotent.
+    Tests must pass a temporary path and close the returned handler with
+    ``close_file_logging()``.  Importing this module never calls this function.
+    """
+
+    resolved_path = Path(log_path).resolve()
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if not isinstance(handler, logging.FileHandler):
+            continue
+        try:
+            handler_path = Path(handler.baseFilename).resolve()
+        except (AttributeError, OSError, TypeError, ValueError):
+            continue
+        if handler_path == resolved_path:
+            root_logger.setLevel(logging.INFO)
+            return handler
+
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(
+        resolved_path,
+        mode='a',
+        encoding='utf-8',
+    )
+    handler.setFormatter(logging.Formatter(_FILE_LOG_FORMAT))
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)
+    return handler
+
+
+def close_file_logging(handler):
+    """Remove, flush, and close a handler returned by configure_file_logging."""
+
+    root_logger = logging.getLogger()
+    if handler in root_logger.handlers:
+        root_logger.removeHandler(handler)
+    try:
+        handler.flush()
+    finally:
+        handler.close()
+
+
+console = next(
+    (
+        handler
+        for handler in logger.handlers
+        if getattr(handler, _CONSOLE_HANDLER_MARKER, False)
+    ),
+    None,
+)
+if console is None:
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(logging.Formatter(
+        '%(asctime)s %(message)s',
+        datefmt='%H:%M:%S',
+    ))
+    setattr(console, _CONSOLE_HANDLER_MARKER, True)
+    logger.addHandler(console)
 
 # ─── 运行时状态 ─────────────────────────────────────
 stop_event = False
@@ -585,9 +649,21 @@ recorded_observation_ids: Dict[int, ScanObservation] = {}
 def create_ocr_record_store():
     """Create the best-effort stage-0 store for one application run."""
 
+    config = config_with_effective_min_confidence(
+        DEFAULT_OCR_NORMALIZATION_CONFIG,
+        OCR_MIN_CONFIDENCE,
+    )
+    snapshot = canonical_normalization_config(config)
     return JsonlOcrRecordStore(
         action_mode=action_mode,
         max_screen_count=OCR_MAX_SCANS,
+        normalization_version=NORMALIZATION_VERSION,
+        ocr_min_confidence=OCR_MIN_CONFIDENCE,
+        normalization_config_version=config.normalization_config_version,
+        normalization_config_digest=normalization_config_digest(snapshot),
+        effective_min_confidence=config.effective_min_confidence,
+        normalization_config=snapshot,
+        rule_evaluation_mode=R04_RULE_EVALUATION_MODE,
     )
 
 
@@ -681,6 +757,19 @@ def record_ocr_observation(
                 if fingerprint is not None
                 else None
             ),
+            screen_id=getattr(observation, "screen_id", None),
+            normalization=getattr(observation, "normalization", None),
+            ocr_min_confidence=getattr(
+                observation,
+                "normalization_min_confidence",
+                None,
+            ),
+            rule_comparison=getattr(
+                observation,
+                "rule_comparison",
+                None,
+            ),
+            confidence_threshold_source="run_manifest",
         )
         recorded_observation_ids[observation_identity] = observation
         ocr_record_store.save_screen(record)
@@ -1183,8 +1272,11 @@ def get_user_input(
             action_mode_value=action_mode,
         )
         print()
-        print(f'  关键词规则: {keyword_rule_sources() if forward_keywords else "(无，转发已禁用)"}')
-        print(f'  备选邮箱: {backup_email if backup_email else "(未设置)"}')
+        print(f'  关键词规则数量: {len(forward_keywords)}')
+        print(
+            '  备选邮箱已提供: '
+            f'{"是" if backup_email else "否"}'
+        )
         if loaded_profile is not None:
             print(f'  校准模板: {loaded_profile.profile_name}')
         print(f'  运行时间: {run_duration_seconds or "持续运行"}')
@@ -1207,7 +1299,7 @@ def get_user_input(
         try:
             forward_keywords = parse_keyword_rules(raw)
             forward_enabled = True
-            print(f'  已录入 {len(forward_keywords)} 条关键词规则: {keyword_rule_sources()}')
+            print(f'  已录入 {len(forward_keywords)} 条关键词规则')
             break
         except ValueError as exc:
             print(f'  关键词规则格式错误：{exc}')
@@ -1215,7 +1307,10 @@ def get_user_input(
 
     if forward_enabled and action_mode == ACTION_MODE_FORWARD and not no_forward:
         backup_email = input('\n请输入备选邮箱（最近联系中无邮箱时兜底）:\n> ').strip()
-        print(f'  备选邮箱: {backup_email if backup_email else "(未设置)"}')
+        print(
+            '  备选邮箱已提供: '
+            f'{"是" if backup_email else "否"}'
+        )
     else:
         backup_email = ""
 
@@ -1351,7 +1446,7 @@ def bring_edge_foreground():
         logger.info(f'✅ Edge 已置顶: {title}')
         return True
     except Exception as e:
-        logger.error(f'❌ 置顶失败: {e}')
+        logger.error('❌ 置顶失败 error_type=%s', type(e).__name__)
         return False
 
 
@@ -1838,7 +1933,11 @@ def initialize_ocr():
     except Exception as exc:
         ocr_backend = None
         ocr_capture = None
-        logger.exception(f'❌ OCR 初始化失败，自动转发已安全禁用: {exc}')
+        logger.exception(
+            '❌ OCR 初始化失败，自动转发已安全禁用 error_type=%s',
+            type(exc).__name__,
+            exc_info=False,
+        )
         return False
 
 
@@ -1890,7 +1989,12 @@ def ensure_ocr_region_calibrated():
         logger.warning('🛡 OCR 校准已取消，本次运行禁用自动转发并继续浏览')
         return False
     except Exception as exc:
-        logger.exception(f'🛡 OCR 校准失败，本次运行禁用自动转发并继续浏览: {exc}')
+        logger.exception(
+            '🛡 OCR 校准失败，本次运行禁用自动转发并继续浏览 '
+            'error_type=%s',
+            type(exc).__name__,
+            exc_info=False,
+        )
         return False
     finally:
         ocr_calibration_in_progress = False
@@ -1906,6 +2010,11 @@ def ensure_ocr_region_calibrated():
         settle_seconds=OCR_SETTLE_SECONDS,
         confirmation_seconds=OCR_CONFIRMATION_SECONDS,
         observation_callback=record_detection_observation,
+        normalization_config=config_with_effective_min_confidence(
+            DEFAULT_OCR_NORMALIZATION_CONFIG,
+            OCR_MIN_CONFIDENCE,
+        ),
+        rule_evaluation_mode=R04_RULE_EVALUATION_MODE,
     )
     logger.info(
         '✅ OCR 校准完成: left=%s top=%s width=%s height=%s',
@@ -2036,13 +2145,22 @@ def ensure_batch_filter_regions_calibrated():
     except Exception as exc:
         batch_filter_regions = None
         batch_filter_enabled = False
-        logger.exception(f'自动筛选归位区域校准失败，本次运行使用旧流程: {exc}')
+        logger.exception(
+            '自动筛选归位区域校准失败，本次运行使用旧流程 '
+            'error_type=%s',
+            type(exc).__name__,
+            exc_info=False,
+        )
     finally:
         if panel_may_be_open and not panel_close_attempted:
             try:
                 close_batch_filter_panel_after_calibration()
             except Exception as exc:
-                logger.warning(f'校准后关闭筛选面板失败，本次运行使用旧流程: {exc}')
+                logger.warning(
+                    '校准后关闭筛选面板失败，本次运行使用旧流程 '
+                    'error_type=%s',
+                    type(exc).__name__,
+                )
         batch_filter_calibration_in_progress = False
 
     return batch_filter_regions
@@ -2120,12 +2238,20 @@ def ensure_forward_click_regions_calibrated():
         logger.warning('完整转发点击区域校准已取消，本次运行全部使用默认区域')
     except Exception as exc:
         forward_click_regions = DEFAULT_FORWARD_CLICK_REGIONS
-        logger.exception(f'完整转发点击区域校准失败，本次运行全部使用默认区域: {exc}')
+        logger.exception(
+            '完整转发点击区域校准失败，本次运行全部使用默认区域 '
+            'error_type=%s',
+            type(exc).__name__,
+            exc_info=False,
+        )
     finally:
         try:
             close_forward_dialog_after_calibration()
         except Exception as exc:
-            logger.warning(f'校准后关闭转发弹窗失败，继续本次运行: {exc}')
+            logger.warning(
+                '校准后关闭转发弹窗失败，继续本次运行 error_type=%s',
+                type(exc).__name__,
+            )
         forward_click_calibration_in_progress = False
 
     return forward_click_regions
@@ -2162,7 +2288,11 @@ def ensure_focus_restore_region_calibrated():
         logger.warning('焦点恢复区域校准已取消，本次运行使用默认区域')
     except Exception as exc:
         focus_restore_region = DEFAULT_FOCUS_RESTORE_REGION
-        logger.exception(f'焦点恢复区域校准失败，本次运行使用默认区域: {exc}')
+        logger.exception(
+            '焦点恢复区域校准失败，本次运行使用默认区域 error_type=%s',
+            type(exc).__name__,
+            exc_info=False,
+        )
     finally:
         focus_restore_calibration_in_progress = False
 
@@ -2196,7 +2326,12 @@ def ensure_favorite_button_region_calibrated():
         return None
     except Exception as exc:
         favorite_button_region = None
-        logger.exception(f'收藏按钮区域校准失败，本次不会盲点收藏按钮: {exc}')
+        logger.exception(
+            '收藏按钮区域校准失败，本次不会盲点收藏按钮 '
+            'error_type=%s',
+            type(exc).__name__,
+            exc_info=False,
+        )
         return None
 
 
@@ -2317,7 +2452,10 @@ def detect_keywords(
         logger.warning('🛡 OCR 未就绪，因安全原因跳过转发')
         return False, None
 
-    logger.info(f'🔍 OCR 关键词规则检测中... 目标: {keyword_rule_sources()}')
+    logger.info(
+        'event=ocr_rule_detection_started rule_count=%s',
+        len(forward_keywords),
+    )
     result = ocr_detector.detect(
         forward_keywords,
         first_observation=first_observation,
@@ -2329,23 +2467,33 @@ def detect_keywords(
             observation.scan_number == result.observations[sequence - 2].scan_number
         ) else '扫描'
         logger.info(
-            '  OCR %s: 屏=%s 耗时=%.3fs 文字框=%s 命中=%s 规则=%s',
+            '  OCR %s: 屏=%s 耗时=%.3fs 文字框=%s 命中=%s 规则序号=%s',
             phase,
             observation.scan_number,
             observation.elapsed_seconds,
             observation.item_count,
             bool(observation.matched_keyword),
-            observation.matched_keyword or '-',
+            (
+                observation.rule_comparison.legacy_rule_index
+                if observation.rule_comparison is not None
+                and observation.rule_comparison.legacy_rule_index is not None
+                else '-'
+            ),
         )
 
     if not result.success:
-        logger.error(f'🛡 OCR 错误，因安全原因跳过转发: {result.error}')
+        logger.error(
+            '🛡 OCR 错误，因安全原因跳过转发 error_type=detection_failed'
+        )
         return False, result
     if result.error:
-        logger.warning(f'🛡 OCR 二次确认失败，因安全原因跳过转发: {result.error}')
+        logger.warning(
+            '🛡 OCR 二次确认失败，因安全原因跳过转发 '
+            'error_type=confirmation_failed'
+        )
         return False, result
     if result.confirmed_match:
-        logger.info(f'🔑 OCR 二次确认命中规则: {result.matched_keyword}')
+        logger.info('event=ocr_rule_confirmed matched=true')
         return True, result
 
     logger.info('  → OCR 最多 8 屏未确认命中，跳过转发')
@@ -2407,12 +2555,18 @@ def forward_one_candidate():
         box_text = get_clipboard_text().strip()
 
         if '@' in box_text and '.' in box_text:
-            logger.info(f'  ✓ 邮箱已自动填入: {box_text}')
+            logger.info(
+                'email_provided=true email_source=recent_contact'
+            )
         else:
-            logger.warning(f'  ⚠ "最近联系"未自动填入邮箱 (读到: "{box_text}")')
+            logger.warning(
+                'email_provided=false email_source=recent_contact'
+            )
             if backup_email:
                 # 手动输入备选邮箱
-                logger.info(f'  ⌨ 正在手动输入备选邮箱: {backup_email}')
+                logger.info(
+                    'alternate_email_provided=true email_source=manual'
+                )
                 click_in_region(forward_click_regions.input_box)
                 time.sleep(0.1)
                 if stop_event:
@@ -2428,7 +2582,10 @@ def forward_one_candidate():
                 if not human_delay(0.3, 0.5):
                     return False
             else:
-                logger.warning('  ✗ 无备选邮箱，放弃本次转发')
+                logger.warning(
+                    'alternate_email_provided=false email_source=manual '
+                    'decision=skip_forward'
+                )
                 # 关闭弹窗（程序触发 ESC，不停止主循环）
                 _programmatic_esc = True
                 pyautogui.press('esc')
@@ -2460,7 +2617,11 @@ def forward_one_candidate():
                 )
                 human_delay(0.3, 0.5)
             except Exception as exc:
-                logger.error(f'❌ 转发流程第 {attempt} 次焦点恢复点击失败: {exc}')
+                logger.error(
+                    '❌ 转发流程第 %s 次焦点恢复点击失败 error_type=%s',
+                    attempt,
+                    type(exc).__name__,
+                )
 
 
 # ─── 刷简历核心 ─────────────────────────────────────
@@ -2508,7 +2669,11 @@ def apply_batch_filter_and_open_first_candidate():
         click_in_region(batch_filter_regions.first_candidate)
         return safe_wait(CLICK_WAIT_SECONDS)
     except Exception as exc:
-        logger.exception(f'自动筛选归位失败，停止本轮运行: {exc}')
+        logger.exception(
+            '自动筛选归位失败，停止本轮运行 error_type=%s',
+            type(exc).__name__,
+            exc_info=False,
+        )
         return False
 
 
@@ -3209,11 +3374,14 @@ def run():
     logger.info('BOSS 直聘极简刷简历 v4 启动')
     logger.info(f'停留: {MIN_STAY_SECONDS}-{MAX_STAY_SECONDS}s | 每 {BATCH_SIZE} 人刷新')
     if forward_enabled:
-        logger.info(f'转发关键词规则: {keyword_rule_sources()}')
+        logger.info('rule_count=%s', len(forward_keywords))
         if no_forward_mode:
             logger.info('模式: 只执行 OCR 检测，真实邮件转发已禁用 (--no-forward)')
         else:
-            logger.info(f'备选邮箱: {backup_email}')
+            logger.info(
+                'alternate_email_provided=%s',
+                str(bool(backup_email)).lower(),
+            )
             logger.info(f'连续转发上限: {FORWARD_MAX_CONSEC}')
     else:
         logger.info('转发: 已禁用')
@@ -3546,7 +3714,7 @@ def run():
 
     except Exception as e:
         run_exception_type = type(e).__name__
-        logger.exception(f'运行异常: {e}')
+        logger.error('运行异常 error_type=%s', run_exception_type)
     finally:
         previous_candidate_context = None
         finalize_active_candidate_for_stop(run_exception_type)
@@ -3590,6 +3758,7 @@ def main():
 
 
 if __name__ == '__main__':
+    file_log_handler = configure_file_logging()
     exit_code = 0
     try:
         exit_code = main() or 0
@@ -3597,6 +3766,9 @@ if __name__ == '__main__':
         pass
     finally:
         stop_event = True
-        listener.stop()
+        try:
+            listener.stop()
+        finally:
+            close_file_logging(file_log_handler)
     if exit_code:
         sys.exit(exit_code)

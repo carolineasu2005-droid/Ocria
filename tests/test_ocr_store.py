@@ -5,6 +5,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from ocr_candidate import CandidateOcrBuilder
+from ocr_normalization import NormalizationBox, normalize_ocr_text
 from ocr_records import (
     CandidateOcrDocument,
     CaptureStatus,
@@ -15,6 +17,7 @@ from ocr_records import (
     RunStatus,
 )
 from ocr_store import JsonlOcrRecordStore
+from ocr_text import OCRItem
 
 
 class JsonlOcrRecordStoreTests(unittest.TestCase):
@@ -110,7 +113,11 @@ class JsonlOcrRecordStoreTests(unittest.TestCase):
 
     def test_candidate_append_and_manifest_statistics(self):
         with tempfile.TemporaryDirectory() as temporary:
-            store = self.make_store(temporary)
+            store = self.make_store(
+                temporary,
+                normalization_version="r04-v1",
+                ocr_min_confidence=0.85,
+            )
             screen = self.make_screen()
             self.assertTrue(store.save_screen(screen))
             self.assertTrue(store.save_candidate(self.make_document([screen])))
@@ -124,6 +131,18 @@ class JsonlOcrRecordStoreTests(unittest.TestCase):
             self.assertIsNotNone(manifest["ended_at"])
             self.assertEqual(manifest["screen_record_count"], 1)
             self.assertEqual(manifest["candidate_record_count"], 1)
+            self.assertEqual(manifest["normalization_version"], "r04-v1")
+            self.assertEqual(manifest["ocr_min_confidence"], 0.85)
+            self.assertEqual(
+                manifest["normalization_config_version"], "r04-config-v1"
+            )
+            self.assertEqual(len(manifest["normalization_config_digest"]), 64)
+            self.assertEqual(manifest["effective_min_confidence"], 0.85)
+            self.assertEqual(manifest["rule_evaluation_mode"], "legacy_shadow")
+            self.assertEqual(
+                manifest["normalization_config"]["effective_min_confidence"],
+                0.85,
+            )
             self.assertEqual(manifest["data_files"]["screens"], "screens.jsonl")
             self.assertEqual(
                 len(store.candidates_path.read_text(encoding="utf-8").splitlines()),
@@ -269,6 +288,48 @@ class JsonlOcrRecordStoreTests(unittest.TestCase):
             self.assertEqual(
                 record["context"], {"candidate_record_id": "candidate-test"}
             )
+
+    def test_screen_manifest_identity_mismatch_is_rejected_without_partial_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = self.make_store(temporary, effective_min_confidence=0.90)
+            screen_id = "screen-config-mismatch"
+            item = OCRItem(
+                "虚构配置不一致",
+                0.95,
+                ((0, 0), (20, 0), (20, 10), (0, 10)),
+            )
+            result = normalize_ocr_text((NormalizationBox(
+                "{0}:box:0".format(screen_id),
+                item.text,
+                item.box,
+                0,
+                item.confidence,
+            ),))
+            builder = CandidateOcrBuilder(
+                "run-test",
+                1,
+                candidate_record_id="candidate-test",
+            )
+            screen = builder.build_screen_record(
+                (item,),
+                capture_type=CaptureType.FORMAL_SCREEN,
+                is_formal_screen=True,
+                screen_index=1,
+                screen_id=screen_id,
+                normalization=result,
+                ocr_min_confidence=0.85,
+            )
+
+            self.assertFalse(store.save_screen(screen))
+            self.assertEqual(store.screens_path.read_bytes(), b"")
+            issue = json.loads(
+                store.errors_path.read_text(encoding="utf-8").strip()
+            )
+            self.assertEqual(
+                issue["error_type"], "ScreenManifestIdentityMismatchError"
+            )
+            self.assertNotIn(item.text, store.errors_path.read_text(encoding="utf-8"))
+            store.close()
 
 
 if __name__ == "__main__":

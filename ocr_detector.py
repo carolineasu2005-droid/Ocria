@@ -8,8 +8,20 @@ import math
 import re
 import time
 from typing import Callable, Iterable, List, Optional, Protocol, Sequence, Tuple
+from uuid import uuid4
 
 from ocr_calibration import ScreenRegion
+from ocr_normalization import (
+    DEFAULT_OCR_NORMALIZATION_CONFIG,
+    NORMALIZATION_COMPLETED,
+    NormalizationBox,
+    OcrNormalizationConfig,
+    TextNormalizationResult,
+    config_with_effective_min_confidence,
+    eligible_box_ids_for_config,
+    failed_normalization_result,
+    normalize_ocr_text,
+)
 from ocr_text import KeywordRule, OCRItem, matching_keyword_rule, searchable_text
 
 
@@ -255,7 +267,7 @@ def build_screen_fingerprint(
     *,
     captured_at: Optional[datetime] = None,
 ) -> ScreenFingerprint:
-    """Build one valid r03-v1 fingerprint or raise FingerprintBuildError."""
+    """Build the authoritative R03 exact fingerprint from accepted OCR items."""
 
     if captured_at is not None and (
         not isinstance(captured_at, datetime)
@@ -283,6 +295,7 @@ def build_screen_fingerprint(
         ocr_box_count=len(accepted_items),
         captured_at=captured_at.isoformat(),
         exact_hash=exact_hash,
+        fingerprint_version=FINGERPRINT_VERSION,
     )
 
 
@@ -319,6 +332,43 @@ class ScreenCapture(Protocol):
         ...
 
 
+RULE_EVALUATION_MODE_LEGACY_SHADOW = "legacy_shadow"
+RULE_COMPARISON_SAME_MATCH = "same_match"
+RULE_COMPARISON_SAME_NO_MATCH = "same_no_match"
+RULE_COMPARISON_LEGACY_ONLY = "legacy_only"
+RULE_COMPARISON_R04_ONLY = "r04_only"
+RULE_COMPARISON_NORMALIZATION_FAILED = "normalization_failed"
+
+
+@dataclass(frozen=True)
+class RuleComparisonResult:
+    """One non-authoritative R04 comparison beside the legacy rule result."""
+
+    rule_evaluation_mode: str
+    legacy_match: bool
+    r04_match: Optional[bool]
+    comparison_outcome: str
+    legacy_rule_index: Optional[int]
+    r04_rule_index: Optional[int]
+
+
+def _matched_rule_index(
+    matched_rule: Optional[KeywordRule],
+    rules: Sequence[KeywordRule],
+) -> Optional[int]:
+    """Return the stable zero-based index of a matched configured rule."""
+
+    if matched_rule is None:
+        return None
+    for index, rule in enumerate(rules):
+        if rule is matched_rule:
+            return index
+    for index, rule in enumerate(rules):
+        if rule == matched_rule:
+            return index
+    return None
+
+
 @dataclass
 class ScanObservation:
     scan_number: int
@@ -332,6 +382,10 @@ class ScanObservation:
     fingerprint: Optional[ScreenFingerprint] = None
     raw_items: Tuple[OCRItem, ...] = ()
     captured_at: Optional[str] = None
+    screen_id: Optional[str] = None
+    normalization: Optional[TextNormalizationResult] = None
+    normalization_min_confidence: Optional[float] = None
+    rule_comparison: Optional[RuleComparisonResult] = None
 
 
 def bind_fingerprint_screen_index(
@@ -504,6 +558,10 @@ class OCRKeywordDetector:
         observation_callback: Optional[
             Callable[[ScanObservation, str, bool, Optional[int]], None]
         ] = None,
+        normalization_config: OcrNormalizationConfig = (
+            DEFAULT_OCR_NORMALIZATION_CONFIG
+        ),
+        rule_evaluation_mode: str = RULE_EVALUATION_MODE_LEGACY_SHADOW,
     ):
         if max_scans < 1:
             raise ValueError("max_scans must be at least 1")
@@ -517,6 +575,13 @@ class OCRKeywordDetector:
         self.settle_seconds = settle_seconds
         self.confirmation_seconds = confirmation_seconds
         self.observation_callback = observation_callback
+        if rule_evaluation_mode != RULE_EVALUATION_MODE_LEGACY_SHADOW:
+            raise ValueError("unsupported rule evaluation mode")
+        self.rule_evaluation_mode = rule_evaluation_mode
+        self.normalization_config = config_with_effective_min_confidence(
+            normalization_config,
+            min_confidence,
+        )
 
     def _notify_observation(
         self,
@@ -550,6 +615,7 @@ class OCRKeywordDetector:
         ocr_box_count, ocr_text_length = calculate_load_metrics(accepted_items)
         text = searchable_text(accepted_items)
         captured_at = datetime.now().astimezone()
+        screen_id = str(uuid4())
         try:
             fingerprint = build_screen_fingerprint(
                 accepted_items,
@@ -558,6 +624,32 @@ class OCRKeywordDetector:
         except Exception as exc:
             fingerprint = None
             _log_fingerprint_generation_failed(scan_number, type(exc).__name__)
+        normalization_boxes = tuple(
+            NormalizationBox(
+                box_id="{0}:box:{1}".format(screen_id, original_index),
+                raw_text=item.text,
+                bbox=item.box,
+                original_index=original_index,
+                confidence=getattr(item, "confidence", None),
+            )
+            for original_index, item in enumerate(raw_items)
+        )
+        try:
+            eligible_box_ids = eligible_box_ids_for_config(
+                normalization_boxes,
+                self.normalization_config,
+            )
+            normalization = normalize_ocr_text(
+                normalization_boxes,
+                eligible_box_ids=eligible_box_ids,
+                config=self.normalization_config,
+            )
+        except Exception as exc:
+            normalization = failed_normalization_result(
+                normalization_boxes,
+                error_type=type(exc).__name__,
+                config=self.normalization_config,
+            )
         observation = ScanObservation(
             scan_number=scan_number,
             text=text,
@@ -568,6 +660,9 @@ class OCRKeywordDetector:
             fingerprint=fingerprint,
             raw_items=tuple(raw_items),
             captured_at=captured_at.isoformat(),
+            screen_id=screen_id,
+            normalization=normalization,
+            normalization_min_confidence=self.min_confidence,
         )
         if fingerprint is not None:
             _log_fingerprint_generated(observation)
@@ -578,9 +673,49 @@ class OCRKeywordDetector:
         observation: ScanObservation,
         rules: Iterable[KeywordRule],
     ) -> ScanObservation:
-        matched_rule = matching_keyword_rule(observation.text, rules)
-        observation.matched_keyword = matched_rule.source if matched_rule else None
-        observation.matched_rule = matched_rule
+        rules = tuple(rules)
+        legacy_rule = matching_keyword_rule(observation.text, rules)
+        legacy_rule_index = _matched_rule_index(legacy_rule, rules)
+        normalization = observation.normalization
+        if (
+            normalization is None
+            or normalization.status != NORMALIZATION_COMPLETED
+            or normalization.comparison_text is None
+        ):
+            r04_rule = None
+            r04_match = None
+            r04_rule_index = None
+            comparison_outcome = RULE_COMPARISON_NORMALIZATION_FAILED
+        else:
+            r04_rule = matching_keyword_rule(
+                normalization.comparison_text,
+                rules,
+            )
+            r04_match = r04_rule is not None
+            r04_rule_index = _matched_rule_index(r04_rule, rules)
+            if legacy_rule is not None and r04_match:
+                comparison_outcome = RULE_COMPARISON_SAME_MATCH
+            elif legacy_rule is None and not r04_match:
+                comparison_outcome = RULE_COMPARISON_SAME_NO_MATCH
+            elif legacy_rule is not None:
+                comparison_outcome = RULE_COMPARISON_LEGACY_ONLY
+            else:
+                comparison_outcome = RULE_COMPARISON_R04_ONLY
+
+        observation.rule_comparison = RuleComparisonResult(
+            rule_evaluation_mode=self.rule_evaluation_mode,
+            legacy_match=legacy_rule is not None,
+            r04_match=r04_match,
+            comparison_outcome=comparison_outcome,
+            legacy_rule_index=legacy_rule_index,
+            r04_rule_index=r04_rule_index,
+        )
+        # Change 5A keeps legacy rule evaluation authoritative.  R04 is
+        # observational only and cannot trigger confirmation or actions.
+        observation.matched_keyword = (
+            legacy_rule.source if legacy_rule is not None else None
+        )
+        observation.matched_rule = legacy_rule
         return observation
 
     def _observe(self, scan_number: int, rules: Iterable[KeywordRule]):
@@ -656,7 +791,10 @@ class OCRKeywordDetector:
                 observations=observations,
             )
         except Exception as exc:
-            logger.exception("OCR keyword detection failed")
+            logger.error(
+                "OCR keyword detection failed error_type=%s",
+                type(exc).__name__,
+            )
             return DetectionResult(
                 success=False,
                 confirmed_match=False,
