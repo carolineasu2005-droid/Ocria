@@ -17,9 +17,15 @@ from ocr_records import (
     RunManifest,
     RunStatus,
     STORAGE_SCHEMA_VERSION,
+    SUPPORTED_DOCUMENT_VERSIONS,
     SUPPORTED_STORAGE_SCHEMA_VERSIONS,
 )
 from ocr_candidate import CandidateOcrBuilder
+from ocr_aggregation import (
+    DEFAULT_OCR_AGGREGATION_CONFIG,
+    aggregation_config_digest,
+    aggregation_config_snapshot,
+)
 from ocr_normalization import (
     DEFAULT_OCR_NORMALIZATION_CONFIG,
     NORMALIZATION_VERSION,
@@ -35,6 +41,7 @@ from ocr_replay import (
     OcrReplayError,
     OcrRunReader,
     load_ocr_run,
+    replay_candidate_aggregation,
     replay_screen_normalization,
 )
 
@@ -120,6 +127,41 @@ class OcrRunReaderTests(unittest.TestCase):
             capture_summary=summary,
         )
 
+    def make_legacy_r04_candidate(self, specifications, candidate_id="candidate-r05"):
+        """Build valid frozen R04 members whose order may be malformed for R05."""
+
+        builder = CandidateOcrBuilder(
+            "run-replay", 1, candidate_record_id=candidate_id,
+            created_at="2026-07-30T12:00:00+08:00",
+        )
+        for position, (screen_id, screen_index, text) in enumerate(specifications):
+            item = OCRItem(
+                text, 0.95,
+                ((0, position * 30), (160, position * 30),
+                 (160, position * 30 + 20), (0, position * 30 + 20)),
+            )
+            normalization = normalize_ocr_text((NormalizationBox(
+                "{}:box:0".format(screen_id), item.text, item.box, 0,
+                item.confidence,
+            ),))
+            builder.build_screen_record(
+                (item,), capture_type=CaptureType.FORMAL_SCREEN,
+                is_formal_screen=True, screen_index=screen_index,
+                screen_id=screen_id,
+                captured_at="2026-07-30T12:00:{:02d}+08:00".format(position),
+                normalization=normalization, ocr_min_confidence=0.85,
+            )
+        document = builder.finalize(
+            CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+            completed_at="2026-07-30T12:01:00+08:00",
+        )
+        payload = document.to_dict()
+        payload["storage_schema_version"] = "1.1.0"
+        payload["document_version"] = DOCUMENT_VERSION
+        for screen in payload["screens"]:
+            screen["storage_schema_version"] = "1.1.0"
+        return CandidateOcrDocument.from_dict(payload)
+
     @staticmethod
     def write_records(path, records):
         path.write_text(
@@ -169,6 +211,98 @@ class OcrRunReaderTests(unittest.TestCase):
         self.assertEqual(replayed.effective_min_confidence, 0.85)
         self.assertEqual(replayed.confidence_threshold_source, "run_manifest")
         self.assertEqual(screen.to_json(), before)
+
+    def test_r05_replay_uses_manifest_snapshot_without_override(self):
+        source = self.make_screen()
+        builder = CandidateOcrBuilder(
+            "run-replay", 1, candidate_record_id="candidate-1",
+            created_at="2026-07-30T12:00:00+08:00", aggregation_mode="record",
+        )
+        builder.add_screen(source)
+        candidate = builder.finalize(
+            CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+            completed_at="2026-07-30T12:01:00+08:00",
+        )
+        snapshot = aggregation_config_snapshot()
+        manifest = replace(
+            self.manifest, aggregation_mode="record", aggregation_version="r05-v1",
+            aggregation_config_version="r05-config-v1",
+            aggregation_config_digest=aggregation_config_digest(snapshot),
+            aggregation_config=snapshot,
+        )
+        replayed = replay_candidate_aggregation(candidate, manifest)
+        self.assertEqual(replayed.config_source, "manifest")
+        self.assertEqual(replayed.rebuilt, candidate)
+        with self.assertRaises(OcrReplayError):
+            replay_candidate_aggregation(candidate, manifest, aggregation_config=object())
+
+    def test_tolerant_candidate_replay_preserves_duplicate_and_out_of_order_members(self):
+        cases = (
+            (
+                "duplicate_index",
+                (
+                    ("duplicate-index-a", 1, "first duplicate index body long enough"),
+                    ("duplicate-index-b", 1, "second duplicate index body long enough"),
+                ),
+                "duplicate_formal_screen_index",
+            ),
+            (
+                "same_id_conflict",
+                (
+                    ("same-id", 1, "first same identifier body long enough"),
+                    ("same-id", 2, "conflicting same identifier body long enough"),
+                ),
+                "duplicate_screen_id_conflict",
+            ),
+            (
+                "out_of_order",
+                (
+                    ("out-order-two", 2, "out of order second body long enough"),
+                    ("out-order-one", 1, "out of order first body long enough"),
+                ),
+                "formal_screen_out_of_order",
+            ),
+        )
+        for label, specifications, expected_issue in cases:
+            with self.subTest(label=label):
+                source = self.make_legacy_r04_candidate(specifications, "candidate-{}".format(label))
+                before = source.to_json()
+                with self.assertRaises(OcrReplayError):
+                    replay_candidate_aggregation(
+                        source, self.manifest,
+                        aggregation_config=DEFAULT_OCR_AGGREGATION_CONFIG,
+                    )
+                tolerant = replay_candidate_aggregation(
+                    source, self.manifest, strict=False,
+                    aggregation_config=DEFAULT_OCR_AGGREGATION_CONFIG,
+                )
+                self.assertEqual(source.to_json(), before)
+                self.assertIsNotNone(tolerant.rebuilt)
+                self.assertEqual(tolerant.rebuilt.document_build_status.value, "partial")
+                self.assertEqual(tolerant.rebuilt.aggregation_duplicate_risk.value, "elevated")
+                self.assertIn(expected_issue, tuple(issue.error_type for issue in tolerant.issues))
+                self.assertGreaterEqual(
+                    len(tolerant.rebuilt.document_segments), len(specifications)
+                )
+
+    def test_tolerant_candidate_replay_keeps_identical_duplicate_and_uses_candidate_members(self):
+        source = self.make_legacy_r04_candidate((
+            ("same-identical", 1, "identical source body long enough"),
+            ("same-identical", 1, "identical source body long enough"),
+        ))
+        before = source.to_json()
+        # The run-level screens file is intentionally empty: candidate members
+        # remain the replay authority and no source JSONL is changed.
+        tolerant = replay_candidate_aggregation(
+            source, self.manifest, strict=False,
+            aggregation_config=DEFAULT_OCR_AGGREGATION_CONFIG,
+        )
+        self.assertEqual(source.to_json(), before)
+        self.assertIsNotNone(tolerant.rebuilt)
+        self.assertGreaterEqual(len(tolerant.rebuilt.document_segments), 1)
+        self.assertIn("duplicate_formal_screen_index", tuple(
+            issue.error_type for issue in tolerant.issues
+        ))
 
     def test_online_record_and_offline_replay_have_identical_r04_fields(self):
         screen_id = "screen-online-offline"
@@ -591,7 +725,7 @@ class OcrRunReaderTests(unittest.TestCase):
                     self.assertEqual(error.version_field, field)
                     self.assertEqual(error.actual_version, actual)
                     expected = (
-                        (DOCUMENT_VERSION,)
+                        SUPPORTED_DOCUMENT_VERSIONS
                         if field == "document_version"
                         else SUPPORTED_STORAGE_SCHEMA_VERSIONS
                     )

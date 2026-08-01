@@ -17,13 +17,16 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple, Type, TypeVar
 
 
 LEGACY_STORAGE_SCHEMA_VERSION = "1.0.0"
-STORAGE_SCHEMA_VERSION = "1.1.0"
+R04_STORAGE_SCHEMA_VERSION = "1.1.0"
+STORAGE_SCHEMA_VERSION = "1.2.0"
 DOCUMENT_VERSION = "stage0-v1"
+R05_DOCUMENT_VERSION = "r05-document-v1"
 SUPPORTED_STORAGE_SCHEMA_VERSIONS = (
     LEGACY_STORAGE_SCHEMA_VERSION,
+    R04_STORAGE_SCHEMA_VERSION,
     STORAGE_SCHEMA_VERSION,
 )
-SUPPORTED_DOCUMENT_VERSIONS = (DOCUMENT_VERSION,)
+SUPPORTED_DOCUMENT_VERSIONS = (DOCUMENT_VERSION, R05_DOCUMENT_VERSION)
 NOT_IMPLEMENTED = "not_implemented"
 R04_NORMALIZATION_VERSION = "r04-v1"
 R04_NORMALIZATION_CONFIG_VERSION = "r04-config-v1"
@@ -69,6 +72,74 @@ class NormalizationStatus(str, Enum):
     NOT_ATTEMPTED = "not_attempted"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class AggregationStatus(str, Enum):
+    """R05 per-screen aggregation status, independent from R04 normalization."""
+
+    NOT_ATTEMPTED = "not_attempted"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class DocumentBuildStatus(str, Enum):
+    """R05 per-candidate document status, independent from capture status."""
+
+    NOT_ATTEMPTED = "not_attempted"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class AggregationMatchType(str, Enum):
+    ADJACENT_EXACT = "adjacent_exact"
+    ADJACENT_FUZZY_1_1 = "adjacent_fuzzy_1_1"
+    ADJACENT_FUZZY_1_2 = "adjacent_fuzzy_1_2"
+    ADJACENT_FUZZY_2_1 = "adjacent_fuzzy_2_1"
+    HISTORICAL_EXACT = "historical_exact"
+
+
+class AggregationDuplicateRisk(str, Enum):
+    NONE = "none"
+    LOW = "low"
+    ELEVATED = "elevated"
+
+
+class AggregationOccurrenceRole(str, Enum):
+    ORIGIN = "origin"
+    MATCHED = "matched"
+    UNCERTAIN_ORIGIN = "uncertain_origin"
+
+
+AGGREGATION_WARNING_CODES = frozenset({
+    "no_formal_screen",
+    "r04_not_completed",
+    "segment_mapping_invalid",
+    "formal_screen_index_invalid",
+    "formal_screen_out_of_order",
+    "duplicate_screen_id_conflict",
+    "duplicate_formal_screen_index",
+    "screen_segment_limit_exceeded",
+    "fuzzy_below_threshold",
+    "fuzzy_ambiguous_tie",
+    "fuzzy_candidate_limit_exceeded",
+    "historical_duplicate_ambiguous",
+    "historical_context_insufficient",
+    "historical_mapping_conflict",
+    "exact_stage_failed",
+    "fuzzy_stage_failed",
+    "historical_stage_failed",
+    "candidate_interrupted",
+    "candidate_aborted",
+    "screen_aggregation_partial",
+    "screen_aggregation_failed",
+    "mixed_aggregation_version",
+    "finalize_failed",
+})
+
+_DOCUMENT_SEGMENT_ID_PATTERN = re.compile(r"document:segment:(0|[1-9][0-9]*)\Z")
+_MATCH_ID_PATTERN = re.compile(r"match:([1-9][0-9]*):(0|[1-9][0-9]*)\Z")
 
 
 class RunStatus(str, Enum):
@@ -365,6 +436,253 @@ class OcrTextSegment(JsonRecordMixin):
         return cls(**values)
 
 
+def _is_non_negative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _validate_nonempty_unique_strings(name: str, values: Tuple[str, ...]) -> None:
+    if not isinstance(values, tuple):
+        raise ValueError("{0} must be a tuple".format(name))
+    if not values or any(not isinstance(value, str) or not value for value in values):
+        raise ValueError("{0} must contain non-empty strings".format(name))
+    if len(set(values)) != len(values):
+        raise ValueError("{0} cannot contain duplicates".format(name))
+
+
+def _validate_ordered_source_ids(
+    values: Tuple[str, ...],
+    *,
+    source_screen_id: str,
+    marker: str,
+    name: str,
+) -> None:
+    _validate_nonempty_unique_strings(name, values)
+    prefix = "{0}:{1}:".format(source_screen_id, marker)
+    orders = []
+    for value in values:
+        if not value.startswith(prefix):
+            raise ValueError("{0} has an invalid source screen".format(name))
+        suffix = value[len(prefix):]
+        if not suffix.isdecimal():
+            raise ValueError("{0} has an invalid ID".format(name))
+        orders.append(int(suffix))
+    if orders != sorted(orders):
+        raise ValueError("{0} are not in source order".format(name))
+
+
+def _validate_document_segment_id(segment_id: str, order: int) -> None:
+    if not isinstance(segment_id, str):
+        raise ValueError("document segment ID is invalid")
+    matched = _DOCUMENT_SEGMENT_ID_PATTERN.fullmatch(segment_id)
+    if matched is None or int(matched.group(1)) != order:
+        raise ValueError("document segment ID does not match order")
+
+
+def _validate_match_id(value: str, screen_index: Optional[int] = None) -> None:
+    if not isinstance(value, str):
+        raise ValueError("match ID is invalid")
+    matched = _MATCH_ID_PATTERN.fullmatch(value)
+    if matched is None:
+        raise ValueError("match ID is invalid")
+    if screen_index is not None and int(matched.group(1)) != screen_index:
+        raise ValueError("match ID screen index is invalid")
+
+
+@dataclass(frozen=True)
+class OcrSourceOccurrence(JsonRecordMixin):
+    occurrence_order: int
+    source_screen_id: str
+    source_screen_index: int
+    source_segment_ids: Tuple[str, ...]
+    source_ocr_box_ids: Tuple[str, ...]
+    occurrence_role: AggregationOccurrenceRole
+    match_id: Optional[str]
+
+    def __post_init__(self) -> None:
+        if not _is_non_negative_int(self.occurrence_order):
+            raise ValueError("occurrence order is invalid")
+        if not isinstance(self.source_screen_id, str) or not self.source_screen_id:
+            raise ValueError("source screen ID is invalid")
+        if (
+            not isinstance(self.source_screen_index, int)
+            or isinstance(self.source_screen_index, bool)
+            or self.source_screen_index < 1
+        ):
+            raise ValueError("source screen index is invalid")
+        _validate_ordered_source_ids(
+            self.source_segment_ids,
+            source_screen_id=self.source_screen_id,
+            marker="line",
+            name="source segment IDs",
+        )
+        _validate_ordered_source_ids(
+            self.source_ocr_box_ids,
+            source_screen_id=self.source_screen_id,
+            marker="box",
+            name="source OCR box IDs",
+        )
+        role = _enum_value(AggregationOccurrenceRole, self.occurrence_role)
+        if role == AggregationOccurrenceRole.MATCHED:
+            if self.match_id is None:
+                raise ValueError("matched occurrence requires match ID")
+        elif self.match_id is not None:
+            raise ValueError("origin occurrence cannot have match ID")
+        if self.match_id is not None:
+            _validate_match_id(self.match_id, self.source_screen_index)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OcrSourceOccurrence":
+        values = _known_values(cls, data)
+        values["source_segment_ids"] = tuple(values.get("source_segment_ids") or ())
+        values["source_ocr_box_ids"] = tuple(values.get("source_ocr_box_ids") or ())
+        values["occurrence_role"] = _enum_value(
+            AggregationOccurrenceRole, values["occurrence_role"]
+        )
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class OcrDocumentSegment(JsonRecordMixin):
+    document_segment_id: str
+    order: int
+    normalized_text: str
+    comparison_text: str
+    comparison_char_count: int
+    source_occurrences: Tuple[OcrSourceOccurrence, ...]
+
+    def __post_init__(self) -> None:
+        if not _is_non_negative_int(self.order):
+            raise ValueError("document segment order is invalid")
+        _validate_document_segment_id(self.document_segment_id, self.order)
+        if not isinstance(self.normalized_text, str) or not self.normalized_text:
+            raise ValueError("document segment normalized text is invalid")
+        if not isinstance(self.comparison_text, str) or not self.comparison_text:
+            raise ValueError("document segment comparison text is invalid")
+        from ocr_normalization import build_comparison_text
+
+        if self.comparison_text != build_comparison_text(self.normalized_text):
+            raise ValueError("document segment comparison text is invalid")
+        if any(character.isspace() for character in self.comparison_text):
+            raise ValueError("document segment comparison text has whitespace")
+        if (
+            not _is_non_negative_int(self.comparison_char_count)
+            or self.comparison_char_count != len(self.comparison_text)
+        ):
+            raise ValueError("document segment comparison character count is invalid")
+        if not isinstance(self.source_occurrences, tuple):
+            raise ValueError("document segment occurrences must be a tuple")
+        if not self.source_occurrences:
+            raise ValueError("document segment requires source occurrences")
+        if any(
+            not isinstance(item, OcrSourceOccurrence)
+            for item in self.source_occurrences
+        ):
+            raise ValueError("document segment occurrence is invalid")
+        if tuple(item.occurrence_order for item in self.source_occurrences) != tuple(
+            range(len(self.source_occurrences))
+        ):
+            raise ValueError("document segment occurrence order is invalid")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OcrDocumentSegment":
+        values = _known_values(cls, data)
+        values["source_occurrences"] = tuple(
+            item
+            if isinstance(item, OcrSourceOccurrence)
+            else OcrSourceOccurrence.from_dict(item)
+            for item in values.get("source_occurrences") or ()
+        )
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class OcrSegmentMatchEvidence(JsonRecordMixin):
+    match_id: str
+    match_type: AggregationMatchType
+    current_screen_id: str
+    current_screen_index: int
+    current_segment_ids: Tuple[str, ...]
+    current_ocr_box_ids: Tuple[str, ...]
+    matched_document_segment_ids: Tuple[str, ...]
+    score: Optional[float]
+    exact_basis: Optional[str]
+    risk: AggregationDuplicateRisk
+    warning_codes: Tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.current_screen_index, int)
+            or isinstance(self.current_screen_index, bool)
+            or self.current_screen_index < 1
+        ):
+            raise ValueError("current screen index is invalid")
+        _validate_match_id(self.match_id, self.current_screen_index)
+        if not isinstance(self.current_screen_id, str) or not self.current_screen_id:
+            raise ValueError("current screen ID is invalid")
+        _validate_ordered_source_ids(
+            self.current_segment_ids,
+            source_screen_id=self.current_screen_id,
+            marker="line",
+            name="current segment IDs",
+        )
+        _validate_ordered_source_ids(
+            self.current_ocr_box_ids,
+            source_screen_id=self.current_screen_id,
+            marker="box",
+            name="current OCR box IDs",
+        )
+        _validate_nonempty_unique_strings(
+            "matched document segment IDs", self.matched_document_segment_ids
+        )
+        for index, segment_id in enumerate(self.matched_document_segment_ids):
+            _validate_document_segment_id(segment_id, int(segment_id.rsplit(":", 1)[1]))
+        match_type = _enum_value(AggregationMatchType, self.match_type)
+        risk = _enum_value(AggregationDuplicateRisk, self.risk)
+        exact_types = {
+            AggregationMatchType.ADJACENT_EXACT,
+            AggregationMatchType.HISTORICAL_EXACT,
+        }
+        if match_type in exact_types:
+            if self.score is not None:
+                raise ValueError("exact match score must be null")
+            if not isinstance(self.exact_basis, str) or not self.exact_basis:
+                raise ValueError("exact match basis is invalid")
+            if risk != AggregationDuplicateRisk.NONE:
+                raise ValueError("exact match risk is invalid")
+        else:
+            if (
+                isinstance(self.score, bool)
+                or not isinstance(self.score, (int, float))
+                or not math.isfinite(float(self.score))
+                or not 0.0 <= float(self.score) <= 1.0
+            ):
+                raise ValueError("fuzzy match score is invalid")
+            if self.exact_basis is not None:
+                raise ValueError("fuzzy match cannot have exact basis")
+            if risk != AggregationDuplicateRisk.LOW:
+                raise ValueError("fuzzy match risk is invalid")
+        if any(code not in AGGREGATION_WARNING_CODES for code in self.warning_codes):
+            raise ValueError("aggregation warning code is invalid")
+        if len(set(self.warning_codes)) != len(self.warning_codes):
+            raise ValueError("aggregation warning codes cannot repeat")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OcrSegmentMatchEvidence":
+        values = _known_values(cls, data)
+        for field_name in (
+            "current_segment_ids",
+            "current_ocr_box_ids",
+            "matched_document_segment_ids",
+            "warning_codes",
+        ):
+            values[field_name] = tuple(values.get(field_name) or ())
+        values["match_type"] = _enum_value(
+            AggregationMatchType, values["match_type"]
+        )
+        values["risk"] = _enum_value(AggregationDuplicateRisk, values["risk"])
+        return cls(**values)
+
+
 @dataclass(frozen=True)
 class OcrLineMapping(JsonRecordMixin):
     box_id: str
@@ -500,7 +818,19 @@ class OcrScreenRecord(JsonRecordMixin):
     effective_min_confidence: Optional[float] = None
     confidence_threshold_source: Optional[str] = None
     ocr_min_confidence: Optional[float] = None
+    aggregation_status: AggregationStatus = AggregationStatus.NOT_ATTEMPTED
     aggregation_version: Optional[str] = None
+    aggregation_config_version: Optional[str] = None
+    aggregation_config_digest: Optional[str] = None
+    matched_segment_ids: Tuple[str, ...] = ()
+    new_segment_ids: Tuple[str, ...] = ()
+    uncertain_segment_ids: Tuple[str, ...] = ()
+    match_evidence: Tuple[OcrSegmentMatchEvidence, ...] = ()
+    aggregation_warning_codes: Tuple[str, ...] = ()
+    aggregation_duplicate_risk: Optional[AggregationDuplicateRisk] = None
+    certain_new_segment_count: Optional[int] = None
+    uncertain_segment_count: Optional[int] = None
+    uncertain_char_count: Optional[int] = None
     similarity_version: Optional[str] = None
     dynamic_end_version: Optional[str] = None
 
@@ -511,8 +841,13 @@ class OcrScreenRecord(JsonRecordMixin):
             "storage_schema_version",
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
-        if self.storage_schema_version == STORAGE_SCHEMA_VERSION:
+        if self.storage_schema_version in (
+            R04_STORAGE_SCHEMA_VERSION,
+            STORAGE_SCHEMA_VERSION,
+        ):
             self._validate_r04_contract()
+        if self.storage_schema_version == STORAGE_SCHEMA_VERSION:
+            self._validate_r05_contract()
 
     def _validate_r04_contract(self) -> None:
         status = _enum_value(NormalizationStatus, self.normalization_status)
@@ -681,6 +1016,127 @@ class OcrScreenRecord(JsonRecordMixin):
                 ):
                     raise ValueError("legacy shadow rule index is invalid")
 
+    def _validate_r05_contract(self) -> None:
+        status = _enum_value(AggregationStatus, self.aggregation_status)
+        identity = (
+            self.aggregation_version,
+            self.aggregation_config_version,
+            self.aggregation_config_digest,
+        )
+        classifications = (
+            self.matched_segment_ids,
+            self.new_segment_ids,
+            self.uncertain_segment_ids,
+        )
+        projections = (
+            self.overlap_text,
+            self.new_text,
+            self.overlap_char_count,
+            self.new_text_char_count,
+            self.overlap_segment_count,
+            self.new_segment_count,
+            self.certain_new_segment_count,
+            self.uncertain_segment_count,
+            self.uncertain_char_count,
+        )
+        if status == AggregationStatus.NOT_ATTEMPTED:
+            if (
+                any(value is not None for value in identity)
+                or any(classifications)
+                or self.match_evidence
+                or self.aggregation_warning_codes
+                or self.aggregation_duplicate_risk is not None
+                or any(value is not None for value in projections)
+            ):
+                raise ValueError("not-attempted aggregation has derived fields")
+            return
+        if (
+            self.aggregation_version != "r05-v1"
+            or self.aggregation_config_version != "r05-config-v1"
+            or not isinstance(self.aggregation_config_digest, str)
+            or _SHA256_PATTERN.fullmatch(self.aggregation_config_digest) is None
+        ):
+            raise ValueError("attempted aggregation requires config identity")
+        if any(
+            not isinstance(value, tuple) for value in classifications + (
+                self.match_evidence, self.aggregation_warning_codes,
+            )
+        ):
+            raise ValueError("aggregation collections must be tuples")
+        if any(code not in AGGREGATION_WARNING_CODES for code in self.aggregation_warning_codes):
+            raise ValueError("aggregation warning code is invalid")
+        if len(set(self.aggregation_warning_codes)) != len(self.aggregation_warning_codes):
+            raise ValueError("aggregation warning code is duplicated")
+        if status == AggregationStatus.FAILED:
+            if any(classifications) or self.match_evidence or any(value is not None for value in projections):
+                raise ValueError("failed aggregation cannot have classifications")
+            if not self.aggregation_warning_codes or self.aggregation_duplicate_risk != AggregationDuplicateRisk.ELEVATED:
+                raise ValueError("failed aggregation requires elevated warning risk")
+            return
+        if self.normalization_status != NormalizationStatus.COMPLETED:
+            raise ValueError("successful aggregation requires completed normalization")
+        segment_by_id = {segment.segment_id: segment for segment in self.segments}
+        classified = self.matched_segment_ids + self.new_segment_ids + self.uncertain_segment_ids
+        if (
+            len(classified) != len(set(classified))
+            or any(identifier not in segment_by_id for identifier in classified)
+            or classified != tuple(
+                segment.segment_id for segment in self.segments
+                if segment.segment_id in classified
+            )
+            or set(classified) != set(segment_by_id)
+        ):
+            raise ValueError("aggregation segment classifications are invalid")
+        evidence_ids = set()
+        evidence_match_ids = set()
+        for evidence in self.match_evidence:
+            if not isinstance(evidence, OcrSegmentMatchEvidence):
+                raise ValueError("aggregation evidence is invalid")
+            if evidence.current_screen_id != self.screen_id or evidence.current_screen_index != self.screen_index:
+                raise ValueError("aggregation evidence screen identity is invalid")
+            if evidence.match_id in evidence_match_ids:
+                raise ValueError("aggregation evidence match ID is duplicated")
+            evidence_match_ids.add(evidence.match_id)
+            if (
+                any(identifier not in segment_by_id for identifier in evidence.current_segment_ids)
+                or any(identifier not in {box.box_id for box in self.raw_boxes}
+                       for identifier in evidence.current_ocr_box_ids)
+                or evidence_ids.intersection(evidence.current_segment_ids)
+            ):
+                raise ValueError("aggregation evidence source is invalid")
+            evidence_ids.update(evidence.current_segment_ids)
+        if evidence_ids != set(self.matched_segment_ids):
+            raise ValueError("matched aggregation segments lack evidence")
+        def project(identifiers: Tuple[str, ...]) -> Tuple[str, int]:
+            selected = tuple(segment_by_id[identifier] for identifier in identifiers)
+            return "\n".join(segment.normalized_text for segment in selected), sum(
+                len(segment.comparison_text) for segment in selected
+            )
+        expected_overlap, expected_overlap_chars = project(self.matched_segment_ids)
+        contribution_ids = self.new_segment_ids + self.uncertain_segment_ids
+        expected_new, expected_new_chars = project(contribution_ids)
+        expected_uncertain_chars = project(self.uncertain_segment_ids)[1]
+        expected_projections = (
+            expected_overlap,
+            expected_new,
+            expected_overlap_chars,
+            expected_new_chars,
+            len(self.matched_segment_ids),
+            len(contribution_ids),
+            len(self.new_segment_ids),
+            len(self.uncertain_segment_ids),
+            expected_uncertain_chars,
+        )
+        if projections != expected_projections:
+            raise ValueError("aggregation projection is invalid")
+        risk = _enum_value(AggregationDuplicateRisk, self.aggregation_duplicate_risk)
+        if status == AggregationStatus.COMPLETED:
+            if self.uncertain_segment_ids or self.aggregation_warning_codes or risk == AggregationDuplicateRisk.ELEVATED:
+                raise ValueError("completed aggregation cannot be uncertain")
+        elif status == AggregationStatus.PARTIAL:
+            if not (self.uncertain_segment_ids or self.aggregation_warning_codes) or risk != AggregationDuplicateRisk.ELEVATED:
+                raise ValueError("partial aggregation requires uncertainty")
+
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "OcrScreenRecord":
         storage_version = validate_record_version(
@@ -689,7 +1145,7 @@ class OcrScreenRecord(JsonRecordMixin):
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
         values = _known_values(cls, data)
-        if storage_version == STORAGE_SCHEMA_VERSION:
+        if storage_version in (R04_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION):
             required_fields = (
                 "processing_status",
                 "normalization_status",
@@ -704,6 +1160,19 @@ class OcrScreenRecord(JsonRecordMixin):
             )
             if any(field_name not in data for field_name in required_fields):
                 raise ValueError("R04 screen schema fields are incomplete")
+        if storage_version == STORAGE_SCHEMA_VERSION:
+            required_aggregation_fields = (
+                "aggregation_status", "aggregation_version",
+                "aggregation_config_version", "aggregation_config_digest",
+                "matched_segment_ids", "new_segment_ids", "uncertain_segment_ids",
+                "match_evidence", "aggregation_warning_codes",
+                "aggregation_duplicate_risk", "overlap_text", "new_text",
+                "overlap_char_count", "new_text_char_count", "overlap_segment_count",
+                "new_segment_count", "certain_new_segment_count",
+                "uncertain_segment_count", "uncertain_char_count",
+            )
+            if any(field_name not in data for field_name in required_aggregation_fields):
+                raise ValueError("R05 screen schema fields are incomplete")
         if storage_version == LEGACY_STORAGE_SCHEMA_VERSION:
             for field_name in (
                 "normalization_version",
@@ -740,6 +1209,28 @@ class OcrScreenRecord(JsonRecordMixin):
             values["line_mapping"] = ()
             values["duplicate_groups"] = ()
             values["normalization_warnings"] = ()
+        if storage_version != STORAGE_SCHEMA_VERSION:
+            values.update({
+                "aggregation_status": AggregationStatus.NOT_ATTEMPTED,
+                "aggregation_version": None,
+                "aggregation_config_version": None,
+                "aggregation_config_digest": None,
+                "matched_segment_ids": (),
+                "new_segment_ids": (),
+                "uncertain_segment_ids": (),
+                "match_evidence": (),
+                "aggregation_warning_codes": (),
+                "aggregation_duplicate_risk": None,
+                "overlap_text": None,
+                "new_text": None,
+                "overlap_char_count": None,
+                "new_text_char_count": None,
+                "overlap_segment_count": None,
+                "new_segment_count": None,
+                "certain_new_segment_count": None,
+                "uncertain_segment_count": None,
+                "uncertain_char_count": None,
+            })
         values["capture_type"] = _enum_value(
             CaptureType, values["capture_type"]
         )
@@ -753,6 +1244,10 @@ class OcrScreenRecord(JsonRecordMixin):
                 "normalization_status",
                 NormalizationStatus.NOT_ATTEMPTED,
             ),
+        )
+        values["aggregation_status"] = _enum_value(
+            AggregationStatus,
+            values.get("aggregation_status", AggregationStatus.NOT_ATTEMPTED),
         )
         values["raw_boxes"] = tuple(
             item if isinstance(item, OcrBox) else OcrBox.from_dict(item)
@@ -789,6 +1284,20 @@ class OcrScreenRecord(JsonRecordMixin):
             else OcrNormalizationWarning.from_dict(item)
             for item in values.get("normalization_warnings") or ()
         )
+        for field_name in (
+            "matched_segment_ids", "new_segment_ids", "uncertain_segment_ids",
+            "aggregation_warning_codes",
+        ):
+            values[field_name] = tuple(values.get(field_name) or ())
+        values["match_evidence"] = tuple(
+            item if isinstance(item, OcrSegmentMatchEvidence)
+            else OcrSegmentMatchEvidence.from_dict(item)
+            for item in values.get("match_evidence") or ()
+        )
+        if values.get("aggregation_duplicate_risk") is not None:
+            values["aggregation_duplicate_risk"] = _enum_value(
+                AggregationDuplicateRisk, values["aggregation_duplicate_risk"]
+            )
         return cls(**values)
 
 
@@ -856,6 +1365,52 @@ def recompute_normalization_summary(
 
 
 @dataclass(frozen=True)
+class AggregationSummary(JsonRecordMixin):
+    formal_screen_count: int = 0
+    completed_screen_count: int = 0
+    partial_screen_count: int = 0
+    failed_screen_count: int = 0
+    matched_segment_count: int = 0
+    new_segment_count: int = 0
+    uncertain_segment_count: int = 0
+    matched_char_count: int = 0
+    new_char_count: int = 0
+    uncertain_char_count: int = 0
+
+    def __post_init__(self) -> None:
+        for item in fields(self):
+            _validate_non_negative_optional_count(item.name, getattr(self, item.name))
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "AggregationSummary":
+        return cls(**_known_values(cls, data))
+
+
+def recompute_aggregation_summary(
+    screens: Tuple[OcrScreenRecord, ...],
+) -> AggregationSummary:
+    counts = {item.name: 0 for item in fields(AggregationSummary)}
+    for screen in screens:
+        if not (screen.capture_type == CaptureType.FORMAL_SCREEN and screen.is_formal_screen):
+            continue
+        counts["formal_screen_count"] += 1
+        status = _enum_value(AggregationStatus, screen.aggregation_status)
+        if status == AggregationStatus.COMPLETED:
+            counts["completed_screen_count"] += 1
+        elif status == AggregationStatus.PARTIAL:
+            counts["partial_screen_count"] += 1
+        elif status == AggregationStatus.FAILED:
+            counts["failed_screen_count"] += 1
+        counts["matched_segment_count"] += len(screen.matched_segment_ids)
+        counts["new_segment_count"] += len(screen.new_segment_ids)
+        counts["uncertain_segment_count"] += len(screen.uncertain_segment_ids)
+        counts["matched_char_count"] += screen.overlap_char_count or 0
+        counts["new_char_count"] += screen.new_text_char_count or 0
+        counts["uncertain_char_count"] += screen.uncertain_char_count or 0
+    return AggregationSummary(**counts)
+
+
+@dataclass(frozen=True)
 class CandidateOcrDocument(JsonRecordMixin):
     run_id: str
     candidate_record_id: str
@@ -866,12 +1421,17 @@ class CandidateOcrDocument(JsonRecordMixin):
     screens: Tuple[OcrScreenRecord, ...]
     capture_summary: CaptureSummary
     record_type: str = "candidate_ocr_document"
-    document_version: str = DOCUMENT_VERSION
+    document_version: str = R05_DOCUMENT_VERSION
     storage_schema_version: str = STORAGE_SCHEMA_VERSION
     document_text: Optional[str] = None
-    document_segments: Tuple[OcrTextSegment, ...] = ()
-    document_build_status: str = NOT_IMPLEMENTED
+    document_segments: Tuple[OcrDocumentSegment, ...] = ()
+    document_build_status: DocumentBuildStatus = DocumentBuildStatus.NOT_ATTEMPTED
     normalization_summary: Optional[NormalizationSummary] = None
+    aggregation_config_version: Optional[str] = None
+    aggregation_config_digest: Optional[str] = None
+    aggregation_warning_codes: Tuple[str, ...] = ()
+    aggregation_duplicate_risk: Optional[AggregationDuplicateRisk] = None
+    aggregation_summary: Optional[AggregationSummary] = None
     versions: Dict[str, Optional[str]] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -903,7 +1463,10 @@ class CandidateOcrDocument(JsonRecordMixin):
             object.__setattr__(self, "normalization_summary", expected_summary)
         elif self.normalization_summary != expected_summary:
             raise ValueError("candidate normalization summary does not match screens")
-        if self.storage_schema_version == STORAGE_SCHEMA_VERSION:
+        if self.storage_schema_version in (
+            R04_STORAGE_SCHEMA_VERSION,
+            STORAGE_SCHEMA_VERSION,
+        ):
             attempted_versions = {
                 screen.normalization_version
                 for screen in self.screens
@@ -919,15 +1482,112 @@ class CandidateOcrDocument(JsonRecordMixin):
             )
             if self.versions.get("normalization") != expected_version:
                 raise ValueError("candidate normalization version index is invalid")
+        if self.storage_schema_version == STORAGE_SCHEMA_VERSION:
+            self._validate_r05_contract()
+
+    def _validate_r05_contract(self) -> None:
+        status = _enum_value(DocumentBuildStatus, self.document_build_status)
+        expected_summary = recompute_aggregation_summary(self.screens)
+        if self.aggregation_summary is None:
+            object.__setattr__(self, "aggregation_summary", expected_summary)
+        elif self.aggregation_summary != expected_summary:
+            raise ValueError("candidate aggregation summary does not match screens")
+        if any(code not in AGGREGATION_WARNING_CODES for code in self.aggregation_warning_codes):
+            raise ValueError("candidate aggregation warning is invalid")
+        if len(set(self.aggregation_warning_codes)) != len(self.aggregation_warning_codes):
+            raise ValueError("candidate aggregation warning is duplicated")
+        attempted_screens = tuple(
+            screen for screen in self.screens
+            if screen.aggregation_status != AggregationStatus.NOT_ATTEMPTED
+        )
+        if status == DocumentBuildStatus.NOT_ATTEMPTED:
+            if (
+                self.document_version != R05_DOCUMENT_VERSION
+                or self.document_text is not None
+                or self.document_segments
+                or self.versions.get("aggregation") is not None
+                or self.aggregation_config_version is not None
+                or self.aggregation_config_digest is not None
+                or self.aggregation_warning_codes
+                or self.aggregation_duplicate_risk is not None
+                or attempted_screens
+            ):
+                raise ValueError("not-attempted document has aggregation fields")
+            return
+        if (
+            self.document_version != R05_DOCUMENT_VERSION
+            or self.versions.get("aggregation") != "r05-v1"
+            or self.aggregation_config_version != "r05-config-v1"
+            or not isinstance(self.aggregation_config_digest, str)
+            or _SHA256_PATTERN.fullmatch(self.aggregation_config_digest) is None
+            or self.aggregation_duplicate_risk is None
+        ):
+            raise ValueError("attempted document requires aggregation identity")
+        if status == DocumentBuildStatus.FAILED:
+            if self.document_text is not None or self.document_segments:
+                raise ValueError("failed document cannot have text")
+            return
+        if not isinstance(self.document_text, str):
+            raise ValueError("built document requires text")
+        if tuple(segment.order for segment in self.document_segments) != tuple(range(len(self.document_segments))):
+            raise ValueError("document segment order is invalid")
+        if self.document_text != "\n".join(segment.normalized_text for segment in self.document_segments):
+            raise ValueError("document text projection is invalid")
+        screens_by_identity: Dict[Tuple[str, Optional[int]], Tuple[OcrScreenRecord, ...]] = {}
+        for screen in self.screens:
+            key = (screen.screen_id, screen.screen_index)
+            screens_by_identity[key] = screens_by_identity.get(key, ()) + (screen,)
+        all_evidence = tuple(
+            evidence for screen in self.screens for evidence in screen.match_evidence
+        )
+        evidence_by_id = {
+            evidence.match_id: evidence
+            for evidence in all_evidence
+        }
+        if len(evidence_by_id) != len(all_evidence):
+            raise ValueError("candidate aggregation evidence match ID is duplicated")
+        for segment in self.document_segments:
+            for occurrence in segment.source_occurrences:
+                source_screens = screens_by_identity.get((
+                    occurrence.source_screen_id,
+                    occurrence.source_screen_index,
+                ), ())
+                if not source_screens:
+                    raise ValueError("document occurrence screen is invalid")
+                if not any(
+                    all(
+                        identifier in {item.segment_id for item in screen.segments}
+                        for identifier in occurrence.source_segment_ids
+                    )
+                    and all(
+                        identifier in {box.box_id for box in screen.raw_boxes}
+                        for identifier in occurrence.source_ocr_box_ids
+                    )
+                    for screen in source_screens
+                ):
+                    raise ValueError("document occurrence segment is invalid")
+                if occurrence.match_id is not None and occurrence.match_id not in evidence_by_id:
+                    raise ValueError("document occurrence match is invalid")
+        document_ids = {segment.document_segment_id for segment in self.document_segments}
+        for evidence in evidence_by_id.values():
+            if any(identifier not in document_ids for identifier in evidence.matched_document_segment_ids):
+                raise ValueError("screen evidence document reference is invalid")
+        identities = {
+            (screen.aggregation_version, screen.aggregation_config_version, screen.aggregation_config_digest)
+            for screen in attempted_screens
+        }
+        expected_identity = ("r05-v1", self.aggregation_config_version, self.aggregation_config_digest)
+        if identities and identities != {expected_identity}:
+            raise ValueError("mixed aggregation identity is unsupported")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "CandidateOcrDocument":
-        storage_version = validate_record_version(
+        document_version = validate_record_version(
             data,
             "document_version",
             SUPPORTED_DOCUMENT_VERSIONS,
         )
-        validate_record_version(
+        storage_version = validate_record_version(
             data,
             "storage_schema_version",
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
@@ -945,13 +1605,44 @@ class CandidateOcrDocument(JsonRecordMixin):
         summary = values["capture_summary"]
         if not isinstance(summary, CaptureSummary):
             values["capture_summary"] = CaptureSummary.from_dict(summary)
-        values["document_segments"] = tuple(
-            item
-            if isinstance(item, OcrTextSegment)
-            else OcrTextSegment.from_dict(item)
-            for item in values.get("document_segments") or ()
-        )
-        if storage_version == STORAGE_SCHEMA_VERSION and "normalization_summary" not in data:
+        if storage_version == STORAGE_SCHEMA_VERSION:
+            required_aggregation_fields = (
+                "document_build_status", "aggregation_config_version",
+                "aggregation_config_digest", "aggregation_warning_codes",
+                "aggregation_duplicate_risk", "aggregation_summary",
+            )
+            if any(field_name not in data for field_name in required_aggregation_fields):
+                raise ValueError("R05 candidate schema fields are incomplete")
+            values["document_segments"] = tuple(
+                item if isinstance(item, OcrDocumentSegment)
+                else OcrDocumentSegment.from_dict(item)
+                for item in values.get("document_segments") or ()
+            )
+            values["document_build_status"] = _enum_value(
+                DocumentBuildStatus, values.get("document_build_status")
+            )
+            values["aggregation_warning_codes"] = tuple(
+                values.get("aggregation_warning_codes") or ()
+            )
+            if values.get("aggregation_duplicate_risk") is not None:
+                values["aggregation_duplicate_risk"] = _enum_value(
+                    AggregationDuplicateRisk, values["aggregation_duplicate_risk"]
+                )
+            aggregation_summary = values.get("aggregation_summary")
+            if aggregation_summary is not None and not isinstance(aggregation_summary, AggregationSummary):
+                values["aggregation_summary"] = AggregationSummary.from_dict(aggregation_summary)
+        else:
+            values.update({
+                "document_text": None,
+                "document_segments": (),
+                "document_build_status": DocumentBuildStatus.NOT_ATTEMPTED,
+                "aggregation_config_version": None,
+                "aggregation_config_digest": None,
+                "aggregation_warning_codes": (),
+                "aggregation_duplicate_risk": None,
+                "aggregation_summary": None,
+            })
+        if storage_version in (R04_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION) and "normalization_summary" not in data:
             raise ValueError("candidate normalization summary is required")
         normalization_summary = values.get("normalization_summary")
         if normalization_summary is not None and not isinstance(
@@ -986,7 +1677,11 @@ class RunManifest(JsonRecordMixin):
     normalization_config: Optional[Dict[str, Any]] = None
     rule_evaluation_mode: Optional[str] = None
     ocr_min_confidence: Optional[float] = None
+    aggregation_mode: str = "disabled"
     aggregation_version: Optional[str] = None
+    aggregation_config_version: Optional[str] = None
+    aggregation_config_digest: Optional[str] = None
+    aggregation_config: Optional[Dict[str, Any]] = None
     similarity_version: Optional[str] = None
     dynamic_end_version: Optional[str] = None
     error_count: int = 0
@@ -1002,7 +1697,10 @@ class RunManifest(JsonRecordMixin):
             "storage_schema_version",
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
-        if self.storage_schema_version == STORAGE_SCHEMA_VERSION:
+        if self.storage_schema_version in (
+            R04_STORAGE_SCHEMA_VERSION,
+            STORAGE_SCHEMA_VERSION,
+        ):
             from ocr_normalization import normalization_config_from_snapshot
 
             _validate_config_identity(
@@ -1038,6 +1736,38 @@ class RunManifest(JsonRecordMixin):
                 for key, value in expected_snapshot_values.items()
             ):
                 raise ValueError("run manifest normalization config identity mismatch")
+        if self.storage_schema_version == STORAGE_SCHEMA_VERSION:
+            if self.aggregation_mode not in ("disabled", "record"):
+                raise ValueError("run manifest aggregation mode is invalid")
+            aggregation_identity = (
+                self.aggregation_version,
+                self.aggregation_config_version,
+                self.aggregation_config_digest,
+                self.aggregation_config,
+            )
+            if self.aggregation_mode == "disabled":
+                if any(value is not None for value in aggregation_identity):
+                    raise ValueError("disabled run manifest cannot have aggregation identity")
+            else:
+                from ocr_aggregation import (
+                    AGGREGATION_CONFIG_VERSION,
+                    AGGREGATION_VERSION,
+                    aggregation_config_digest,
+                    restore_aggregation_config,
+                )
+                if not isinstance(self.aggregation_config, dict):
+                    raise ValueError("record run manifest requires aggregation config")
+                try:
+                    config = restore_aggregation_config(self.aggregation_config)
+                except ValueError as exc:
+                    raise ValueError("run manifest aggregation config is invalid") from exc
+                if (
+                    self.aggregation_version != AGGREGATION_VERSION
+                    or self.aggregation_config_version != AGGREGATION_CONFIG_VERSION
+                    or self.aggregation_config_digest != aggregation_config_digest(self.aggregation_config)
+                    or config.aggregation_config_version != self.aggregation_config_version
+                ):
+                    raise ValueError("run manifest aggregation config identity mismatch")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RunManifest":
@@ -1047,6 +1777,14 @@ class RunManifest(JsonRecordMixin):
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
         values = _known_values(cls, data)
+        if storage_version == STORAGE_SCHEMA_VERSION:
+            required_aggregation_fields = (
+                "aggregation_mode", "aggregation_version",
+                "aggregation_config_version", "aggregation_config_digest",
+                "aggregation_config",
+            )
+            if any(field_name not in data for field_name in required_aggregation_fields):
+                raise ValueError("R05 run manifest fields are incomplete")
         values["status"] = _enum_value(RunStatus, values["status"])
         values["data_files"] = {
             key: str(value)
@@ -1062,6 +1800,16 @@ class RunManifest(JsonRecordMixin):
                 "rule_evaluation_mode",
             ):
                 values[field_name] = None
+        if storage_version != STORAGE_SCHEMA_VERSION:
+            values.update({
+                "aggregation_mode": "disabled",
+                "aggregation_version": None,
+                "aggregation_config_version": None,
+                "aggregation_config_digest": None,
+                "aggregation_config": None,
+            })
         elif values.get("normalization_config") is not None:
             values["normalization_config"] = dict(values["normalization_config"])
+        if values.get("aggregation_config") is not None:
+            values["aggregation_config"] = dict(values["aggregation_config"])
         return cls(**values)

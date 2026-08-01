@@ -35,9 +35,11 @@ from ocr_normalization import (
 )
 from ocr_records import (
     CaptureType,
+    LEGACY_STORAGE_SCHEMA_VERSION,
     OcrBox,
     OcrScreenRecord,
     ProcessingStatus,
+    R04_STORAGE_SCHEMA_VERSION,
     STORAGE_SCHEMA_VERSION,
 )
 
@@ -1157,7 +1159,7 @@ class OcrComparisonTextTests(unittest.TestCase):
         self.assertNotIn(changed_hash, hashes)
         self.assertRegex(next(iter(hashes)), r"^[0-9a-f]{64}$")
 
-    def test_r04_schema_bump_leaves_r05_to_r07_fields_unimplemented(self):
+    def test_r04_contract_remains_stable_after_r05_schema_activation(self):
         record = OcrScreenRecord(
             run_id="run-fictional",
             candidate_record_id="candidate-fictional",
@@ -1171,8 +1173,8 @@ class OcrComparisonTextTests(unittest.TestCase):
             raw_text="",
         )
 
-        self.assertEqual(STORAGE_SCHEMA_VERSION, "1.1.0")
-        self.assertEqual(record.storage_schema_version, "1.1.0")
+        self.assertEqual(STORAGE_SCHEMA_VERSION, "1.2.0")
+        self.assertEqual(record.storage_schema_version, "1.2.0")
         self.assertIsNone(record.normalized_text)
         self.assertIsNone(record.comparison_text)
         self.assertEqual(record.segments, ())
@@ -1188,6 +1190,22 @@ class OcrComparisonTextTests(unittest.TestCase):
         self.assertIsNone(record.similarity_version)
         self.assertIsNone(record.dynamic_end_version)
         self.assertEqual(record.processing_status, ProcessingStatus.RAW_ONLY)
+
+        # R05 activates the current writer schema only.  The R03/R04 readers
+        # remain available and restoring an older payload does not infer R05.
+        payload = record.to_dict()
+        for version in (
+            LEGACY_STORAGE_SCHEMA_VERSION,
+            R04_STORAGE_SCHEMA_VERSION,
+        ):
+            with self.subTest(version=version):
+                restored_payload = dict(payload)
+                restored_payload["storage_schema_version"] = version
+                restored = OcrScreenRecord.from_dict(restored_payload)
+                self.assertEqual(restored.storage_schema_version, version)
+                self.assertIsNone(restored.aggregation_version)
+                self.assertIsNone(restored.similarity_version)
+                self.assertIsNone(restored.dynamic_end_version)
 
     def test_comparison_module_has_no_ai_or_network_dependency(self):
         forbidden_globals = {

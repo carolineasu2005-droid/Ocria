@@ -19,9 +19,18 @@ from ocr_normalization import (
     normalization_config_digest as calculate_normalization_config_digest,
     normalization_config_from_snapshot,
 )
+from ocr_aggregation import (
+    AGGREGATION_CONFIG_VERSION,
+    AGGREGATION_VERSION,
+    DEFAULT_OCR_AGGREGATION_CONFIG,
+    OcrAggregationConfig,
+    aggregation_config_digest,
+    aggregation_config_snapshot,
+)
 
 from ocr_records import (
     CandidateOcrDocument,
+    DocumentBuildStatus,
     OcrScreenRecord,
     RunManifest,
     RunStatus,
@@ -85,6 +94,8 @@ class JsonlOcrRecordStore:
         normalization_config_digest: Optional[str] = None,
         effective_min_confidence: Optional[float] = None,
         normalization_config: Optional[Mapping[str, Any]] = None,
+        aggregation_mode: str = "disabled",
+        aggregation_config: Optional[OcrAggregationConfig] = None,
         rule_evaluation_mode: str = RULE_EVALUATION_MODE_LEGACY_SHADOW,
         fsync: bool = False,
         run_id: Optional[str] = None,
@@ -93,6 +104,10 @@ class JsonlOcrRecordStore:
     ) -> None:
         if consecutive_failure_limit < 1:
             raise ValueError("consecutive_failure_limit must be at least 1")
+        if aggregation_mode not in ("disabled", "record"):
+            raise ValueError("aggregation_mode must be disabled or record")
+        if aggregation_config is not None and not isinstance(aggregation_config, OcrAggregationConfig):
+            raise TypeError("aggregation_config must be an OcrAggregationConfig")
 
         self._lock = threading.RLock()
         self._fsync = bool(fsync)
@@ -169,6 +184,17 @@ class JsonlOcrRecordStore:
             normalization_config=config_snapshot,
             rule_evaluation_mode=rule_evaluation_mode,
             ocr_min_confidence=ocr_min_confidence,
+            aggregation_mode=aggregation_mode,
+            aggregation_version=(AGGREGATION_VERSION if aggregation_mode == "record" else None),
+            aggregation_config_version=(AGGREGATION_CONFIG_VERSION if aggregation_mode == "record" else None),
+            aggregation_config_digest=(
+                aggregation_config_digest(aggregation_config or DEFAULT_OCR_AGGREGATION_CONFIG)
+                if aggregation_mode == "record" else None
+            ),
+            aggregation_config=(
+                aggregation_config_snapshot(aggregation_config or DEFAULT_OCR_AGGREGATION_CONFIG)
+                if aggregation_mode == "record" else None
+            ),
             data_files={
                 "manifest": RUN_MANIFEST_NAME,
                 "screens": SCREENS_NAME,
@@ -359,25 +385,49 @@ class JsonlOcrRecordStore:
     def _validate_screen_identity(self, record: OcrScreenRecord) -> None:
         if not isinstance(record, OcrScreenRecord):
             return
-        if record.normalization_status.value == "not_attempted":
+        if record.normalization_status.value != "not_attempted":
+            screen_identity = (
+                record.normalization_version,
+                record.normalization_config_version,
+                record.normalization_config_digest,
+                record.effective_min_confidence,
+                record.rule_evaluation_mode,
+            )
+            manifest_identity = (
+                self.manifest.normalization_version,
+                self.manifest.normalization_config_version,
+                self.manifest.normalization_config_digest,
+                self.manifest.effective_min_confidence,
+                self.manifest.rule_evaluation_mode,
+            )
+            if screen_identity != manifest_identity:
+                raise ScreenManifestIdentityMismatchError(
+                    "screen normalization identity does not match run manifest"
+                )
+        if record.aggregation_status.value == "not_attempted":
+            if self.manifest.aggregation_mode == "record" and (
+                record.capture_type.value == "formal_screen" and record.is_formal_screen
+            ):
+                raise ScreenManifestIdentityMismatchError(
+                    "formal screen aggregation was not attempted in record mode"
+                )
             return
-        screen_identity = (
-            record.normalization_version,
-            record.normalization_config_version,
-            record.normalization_config_digest,
-            record.effective_min_confidence,
-            record.rule_evaluation_mode,
+        aggregation_identity = (
+            record.aggregation_version,
+            record.aggregation_config_version,
+            record.aggregation_config_digest,
         )
-        manifest_identity = (
-            self.manifest.normalization_version,
-            self.manifest.normalization_config_version,
-            self.manifest.normalization_config_digest,
-            self.manifest.effective_min_confidence,
-            self.manifest.rule_evaluation_mode,
+        manifest_aggregation_identity = (
+            self.manifest.aggregation_version,
+            self.manifest.aggregation_config_version,
+            self.manifest.aggregation_config_digest,
         )
-        if screen_identity != manifest_identity:
+        if (
+            self.manifest.aggregation_mode != "record"
+            or aggregation_identity != manifest_aggregation_identity
+        ):
             raise ScreenManifestIdentityMismatchError(
-                "screen normalization identity does not match run manifest"
+                "screen aggregation identity does not match run manifest"
             )
 
     def save_candidate(self, document: CandidateOcrDocument) -> bool:
@@ -391,6 +441,24 @@ class JsonlOcrRecordStore:
             try:
                 for screen in document.screens:
                     self._validate_screen_identity(screen)
+                if document.run_id != self.run_id:
+                    raise ScreenManifestIdentityMismatchError("candidate run identity does not match store")
+                if document.document_build_status == DocumentBuildStatus.NOT_ATTEMPTED:
+                    if (
+                        self.manifest.aggregation_mode == "record"
+                        and any(screen.is_formal_screen for screen in document.screens)
+                    ):
+                        raise ScreenManifestIdentityMismatchError(
+                            "formal candidate has a not-attempted aggregation document"
+                        )
+                elif (
+                    document.versions.get("aggregation") != self.manifest.aggregation_version
+                    or document.aggregation_config_version != self.manifest.aggregation_config_version
+                    or document.aggregation_config_digest != self.manifest.aggregation_config_digest
+                ):
+                    raise ScreenManifestIdentityMismatchError(
+                        "candidate aggregation identity does not match run manifest"
+                    )
             except Exception as exc:
                 self._record_failure("save_candidate", exc, context)
                 return False

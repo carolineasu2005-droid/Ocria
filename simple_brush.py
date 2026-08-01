@@ -59,7 +59,7 @@ from ocr_detector import (
     evaluate_detail_page_load,
 )
 from ocr_text import parse_keyword_rules
-from ocr_candidate import CandidateOcrBuilder
+from ocr_candidate import CandidateOcrBuilder, R05_AGGREGATION_MODE
 from ocr_normalization import (
     DEFAULT_OCR_NORMALIZATION_CONFIG,
     NORMALIZATION_VERSION,
@@ -664,6 +664,7 @@ def create_ocr_record_store():
         effective_min_confidence=config.effective_min_confidence,
         normalization_config=snapshot,
         rule_evaluation_mode=R04_RULE_EVALUATION_MODE,
+        aggregation_mode=R05_AGGREGATION_MODE,
     )
 
 
@@ -709,6 +710,7 @@ def start_candidate_ocr_recording(
             "candidate_in_batch": candidate_in_batch,
             "total_viewed_before": total_viewed,
         },
+        aggregation_mode=R05_AGGREGATION_MODE,
     )
     recorded_observation_ids = {}
     return current_candidate_builder

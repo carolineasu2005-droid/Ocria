@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ocr_records import (
     DOCUMENT_VERSION,
-    NOT_IMPLEMENTED,
+    DocumentBuildStatus,
     STORAGE_SCHEMA_VERSION,
     SUPPORTED_STORAGE_SCHEMA_VERSIONS,
     CandidateOcrDocument,
@@ -186,8 +186,8 @@ class OcrRecordModelTests(unittest.TestCase):
         self.assertEqual(restored, document)
         self.assertIsNone(restored.document_text)
         self.assertEqual(restored.document_segments, ())
-        self.assertEqual(restored.document_build_status, NOT_IMPLEMENTED)
-        self.assertEqual(restored.document_version, DOCUMENT_VERSION)
+        self.assertEqual(restored.document_build_status, DocumentBuildStatus.NOT_ATTEMPTED)
+        self.assertEqual(restored.document_version, "r05-document-v1")
         self.assertEqual(
             restored.storage_schema_version, STORAGE_SCHEMA_VERSION
         )

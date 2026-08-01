@@ -1,15 +1,16 @@
 """Current-candidate-only assembly for stage-0 OCR documents."""
 
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 from uuid import uuid4
 
 from ocr_records import (
-    NOT_IMPLEMENTED,
     CandidateOcrDocument,
     CaptureStatus,
     CaptureSummary,
     CaptureType,
+    DocumentBuildStatus,
     NormalizationStatus,
     OcrBox,
     OcrDuplicateGroup,
@@ -19,9 +20,20 @@ from ocr_records import (
     OcrScreenRecord,
     OcrTextSegment,
     ProcessingStatus,
+    STORAGE_SCHEMA_VERSION,
     timezone_iso,
     validate_timezone_iso,
     recompute_normalization_summary,
+)
+from ocr_aggregation import (
+    AGGREGATION_CONFIG_VERSION,
+    AGGREGATION_VERSION,
+    DEFAULT_OCR_AGGREGATION_CONFIG,
+    R05_DOCUMENT_VERSION,
+    CandidateDocumentAggregator,
+    OcrAggregationConfig,
+    aggregation_config_digest,
+    aggregation_screen_record_fields,
 )
 from ocr_normalization import (
     NORMALIZATION_COMPLETED,
@@ -39,6 +51,7 @@ class CandidateBuilderFinalizedError(RuntimeError):
 
 
 Timestamp = Union[str, datetime]
+R05_AGGREGATION_MODE = "disabled"
 
 
 def _timestamp_text(value: Optional[Timestamp]) -> str:
@@ -253,6 +266,8 @@ class CandidateOcrBuilder:
         candidate_record_id: Optional[str] = None,
         created_at: Optional[Timestamp] = None,
         metadata: Optional[Mapping[str, Any]] = None,
+        aggregation_mode: str = R05_AGGREGATION_MODE,
+        aggregation_config: OcrAggregationConfig = DEFAULT_OCR_AGGREGATION_CONFIG,
     ) -> None:
         if sequence_number < 1:
             raise ValueError("sequence_number must be at least 1")
@@ -261,6 +276,18 @@ class CandidateOcrBuilder:
         self.candidate_record_id = str(candidate_record_id or uuid4())
         self.created_at = _timestamp_text(created_at)
         self.metadata: Dict[str, Any] = dict(metadata or {})
+        if aggregation_mode not in ("disabled", "record"):
+            raise ValueError("aggregation_mode must be disabled or record")
+        if not isinstance(aggregation_config, OcrAggregationConfig):
+            raise TypeError("aggregation_config must be an OcrAggregationConfig")
+        self.aggregation_mode = aggregation_mode
+        self.aggregation_config = aggregation_config
+        self._aggregator = (
+            CandidateDocumentAggregator(
+                self.run_id, self.candidate_record_id, aggregation_config, mode="record"
+            )
+            if aggregation_mode == "record" else None
+        )
         self._screens: List[OcrScreenRecord] = []
         self._attempts: Dict[Tuple[str, Optional[int]], int] = {}
         self._finalized = False
@@ -444,6 +471,15 @@ class CandidateOcrBuilder:
             ocr_min_confidence=ocr_min_confidence,
             **projected_fields,
         )
+        if self._aggregator is not None:
+            aggregation_result = self._aggregator.add_screen(record)
+            record = replace(
+                record,
+                storage_schema_version=STORAGE_SCHEMA_VERSION,
+                **aggregation_screen_record_fields(
+                    record, aggregation_result, self.aggregation_config
+                )
+            )
         self._screens.append(record)
         return record
 
@@ -453,6 +489,15 @@ class CandidateOcrBuilder:
             raise ValueError("screen run_id does not match builder")
         if record.candidate_record_id != self.candidate_record_id:
             raise ValueError("screen candidate_record_id does not match builder")
+        if self._aggregator is not None:
+            aggregation_result = self._aggregator.add_screen(record)
+            record = replace(
+                record,
+                storage_schema_version=STORAGE_SCHEMA_VERSION,
+                **aggregation_screen_record_fields(
+                    record, aggregation_result, self.aggregation_config
+                )
+            )
         self._screens.append(record)
 
     def finalize(
@@ -512,6 +557,50 @@ class CandidateOcrBuilder:
         }
         if len(normalization_versions) > 1:
             raise ValueError("mixed candidate normalization versions are unsupported")
+        if self._aggregator is None:
+            aggregation_fields = {
+                "document_version": R05_DOCUMENT_VERSION,
+                "document_text": None,
+                "document_segments": (),
+                "document_build_status": DocumentBuildStatus.NOT_ATTEMPTED,
+                "aggregation_config_version": None,
+                "aggregation_config_digest": None,
+                "aggregation_warning_codes": (),
+                "aggregation_duplicate_risk": None,
+                "aggregation_summary": None,
+                "aggregation_version": None,
+            }
+        else:
+            aggregation = self._aggregator.finalize(capture_status)
+            if aggregation.document_build_status == DocumentBuildStatus.NOT_ATTEMPTED:
+                # A record-mode candidate can legitimately contain only
+                # non-formal observations.  It did not perform aggregation,
+                # so it must retain the exact schema not-attempted projection.
+                aggregation_fields = {
+                    "document_version": R05_DOCUMENT_VERSION,
+                    "document_text": None,
+                    "document_segments": (),
+                    "document_build_status": DocumentBuildStatus.NOT_ATTEMPTED,
+                    "aggregation_config_version": None,
+                    "aggregation_config_digest": None,
+                    "aggregation_warning_codes": (),
+                    "aggregation_duplicate_risk": None,
+                    "aggregation_summary": None,
+                    "aggregation_version": None,
+                }
+            else:
+                aggregation_fields = {
+                    "document_version": R05_DOCUMENT_VERSION,
+                    "document_text": aggregation.document_text,
+                    "document_segments": aggregation.document_segments,
+                    "document_build_status": aggregation.document_build_status,
+                    "aggregation_config_version": AGGREGATION_CONFIG_VERSION,
+                    "aggregation_config_digest": aggregation_config_digest(self.aggregation_config),
+                    "aggregation_warning_codes": aggregation.aggregation_warning_codes,
+                    "aggregation_duplicate_risk": aggregation.aggregation_duplicate_risk,
+                    "aggregation_summary": None,
+                    "aggregation_version": AGGREGATION_VERSION,
+                }
         document = CandidateOcrDocument(
             run_id=self.run_id,
             candidate_record_id=self.candidate_record_id,
@@ -521,9 +610,6 @@ class CandidateOcrBuilder:
             capture_status=capture_status,
             screens=screens,
             capture_summary=summary,
-            document_text=None,
-            document_segments=(),
-            document_build_status=NOT_IMPLEMENTED,
             normalization_summary=recompute_normalization_summary(screens),
             versions={
                 "normalization": (
@@ -531,13 +617,15 @@ class CandidateOcrBuilder:
                     if normalization_versions
                     else None
                 ),
-                "aggregation": None,
+                "aggregation": aggregation_fields.pop("aggregation_version"),
                 "similarity": None,
                 "dynamic_end": None,
             },
             metadata=document_metadata,
+            **aggregation_fields,
         )
         self._screens.clear()
         self._attempts.clear()
+        self._aggregator = None
         self._finalized = True
         return document

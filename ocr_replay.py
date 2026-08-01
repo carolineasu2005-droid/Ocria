@@ -17,11 +17,19 @@ from ocr_normalization import (
     normalization_config_from_snapshot,
     normalize_ocr_text,
 )
-from ocr_candidate import normalization_record_fields
+from ocr_candidate import CandidateOcrBuilder, normalization_record_fields
+from ocr_aggregation import (
+    OcrAggregationConfig,
+    aggregation_config_digest,
+    aggregation_screen_record_fields,
+    restore_aggregation_config,
+)
 
 from ocr_records import (
     CandidateOcrDocument,
+    DocumentBuildStatus,
     LEGACY_STORAGE_SCHEMA_VERSION,
+    R04_STORAGE_SCHEMA_VERSION,
     NormalizationStatus,
     OcrScreenRecord,
     RecordVersionError,
@@ -287,6 +295,16 @@ class NormalizationReplayResult:
     issue: Optional[ReplayIssue] = None
 
 
+@dataclass(frozen=True)
+class CandidateAggregationReplay:
+    """In-memory R05 rebuild only; it never writes or modifies the source."""
+
+    source: CandidateOcrDocument
+    rebuilt: Optional[CandidateOcrDocument]
+    config_source: str
+    issues: Tuple[ReplayIssue, ...] = ()
+
+
 class _ReplayContractError(ValueError):
     def __init__(self, error_type: str) -> None:
         self.error_type = error_type
@@ -516,6 +534,201 @@ def replay_screen_normalization(
                 else ""
             ),
             issue=issue,
+        )
+
+
+def _candidate_replay_error(error_type: str) -> OcrReplayError:
+    return OcrReplayError(Path("<candidate-aggregation-replay>"), 0, error_type)
+
+
+def _candidate_replay_issue(error_type: str) -> ReplayIssue:
+    return ReplayIssue(Path("<candidate-aggregation-replay>"), 0, error_type)
+
+
+def _tolerant_candidate_rebuild(
+    candidate: CandidateOcrDocument,
+    config: OcrAggregationConfig,
+) -> Tuple[CandidateOcrDocument, Tuple[ReplayIssue, ...]]:
+    """Rebuild malformed candidate membership conservatively and in memory."""
+
+    screens = tuple(candidate.screens)
+    formal_positions = tuple(
+        (position, screen)
+        for position, screen in enumerate(screens)
+        if screen.capture_type.value == "formal_screen" and screen.is_formal_screen
+    )
+    ordered_formal = tuple(sorted(
+        formal_positions,
+        key=lambda item: (
+            item[1].screen_index
+            if isinstance(item[1].screen_index, int)
+            and not isinstance(item[1].screen_index, bool)
+            else -1,
+            item[0],
+        ),
+    ))
+    issue_codes = []
+    warning_by_position: Dict[int, str] = {}
+    first_index_position: Dict[int, int] = {}
+    first_screen_by_id: Dict[str, OcrScreenRecord] = {}
+    previous_index = 0
+    has_out_of_order = False
+    for position, screen in formal_positions:
+        if not isinstance(screen.screen_index, int) or isinstance(screen.screen_index, bool):
+            warning_by_position[position] = "formal_screen_out_of_order"
+            if "formal_screen_out_of_order" not in issue_codes:
+                issue_codes.append("formal_screen_out_of_order")
+            continue
+        if screen.screen_index <= previous_index:
+            has_out_of_order = True
+        previous_index = screen.screen_index
+        prior_index_position = first_index_position.get(screen.screen_index)
+        if prior_index_position is None:
+            first_index_position[screen.screen_index] = position
+        else:
+            warning_by_position[position] = "duplicate_formal_screen_index"
+            if "duplicate_formal_screen_index" not in issue_codes:
+                issue_codes.append("duplicate_formal_screen_index")
+        prior_screen = first_screen_by_id.get(screen.screen_id)
+        if prior_screen is None:
+            first_screen_by_id[screen.screen_id] = screen
+        elif prior_screen != screen:
+            warning_by_position[position] = "duplicate_screen_id_conflict"
+            if "duplicate_screen_id_conflict" not in issue_codes:
+                issue_codes.append("duplicate_screen_id_conflict")
+    if has_out_of_order:
+        if "formal_screen_out_of_order" not in issue_codes:
+            issue_codes.append("formal_screen_out_of_order")
+        # Stable sorting establishes a deterministic authority order, but no
+        # formerly out-of-order formal screen is treated as fully trusted.
+        for position, _screen in formal_positions:
+            warning_by_position.setdefault(position, "formal_screen_out_of_order")
+
+    builder = CandidateOcrBuilder(
+        candidate.run_id,
+        candidate.sequence_number,
+        candidate_record_id=candidate.candidate_record_id,
+        created_at=candidate.created_at,
+        metadata=candidate.metadata,
+        aggregation_mode="record",
+        aggregation_config=config,
+    )
+    projected_by_position: Dict[int, OcrScreenRecord] = {}
+    for position, screen in ordered_formal:
+        result = builder._aggregator.add_screen(  # candidate-local, no I/O
+            screen,
+            force_uncertain_warning=warning_by_position.get(position),
+        )
+        projected_by_position[position] = replace(
+            screen,
+            storage_schema_version=STORAGE_SCHEMA_VERSION,
+            **aggregation_screen_record_fields(screen, result, config),
+        )
+    for position, screen in enumerate(screens):
+        if position in projected_by_position:
+            continue
+        result = builder._aggregator.add_screen(screen)
+        projected_by_position[position] = replace(
+            screen,
+            storage_schema_version=STORAGE_SCHEMA_VERSION,
+            **aggregation_screen_record_fields(screen, result, config),
+        )
+    builder._screens.extend(projected_by_position[position] for position in range(len(screens)))
+    rebuilt = builder.finalize(
+        candidate.capture_status,
+        end_reason=candidate.capture_summary.end_reason,
+        abort_reason=candidate.capture_summary.abort_reason,
+        completed_at=candidate.completed_at,
+    )
+    return rebuilt, tuple(_candidate_replay_issue(code) for code in issue_codes)
+
+
+def replay_candidate_aggregation(
+    candidate: CandidateOcrDocument,
+    manifest: RunManifest,
+    *,
+    strict: bool = True,
+    aggregation_config: Optional[OcrAggregationConfig] = None,
+) -> CandidateAggregationReplay:
+    """Replay R05 with explicit historical config and no source side effects."""
+
+    try:
+        if not isinstance(candidate, CandidateOcrDocument) or not isinstance(manifest, RunManifest):
+            raise _ReplayContractError("InvalidCandidateAggregationInputError")
+        if candidate.run_id != manifest.run_id:
+            raise _ReplayContractError("ManifestRunMismatchError")
+        if candidate.storage_schema_version == STORAGE_SCHEMA_VERSION:
+            if manifest.storage_schema_version != STORAGE_SCHEMA_VERSION:
+                raise _ReplayContractError("ManifestSchemaMismatchError")
+            if manifest.aggregation_mode == "disabled":
+                if candidate.document_build_status != DocumentBuildStatus.NOT_ATTEMPTED:
+                    raise _ReplayContractError("DisabledAggregationMismatchError")
+                return CandidateAggregationReplay(candidate, candidate, "manifest_disabled", ())
+            if manifest.aggregation_mode != "record" or aggregation_config is not None:
+                raise _ReplayContractError("AggregationConfigOverrideError")
+            try:
+                config = restore_aggregation_config(manifest.aggregation_config)
+            except Exception as exc:
+                raise _ReplayContractError("ManifestAggregationConfigError") from exc
+            if (
+                manifest.aggregation_config_digest != aggregation_config_digest(manifest.aggregation_config)
+                or candidate.aggregation_config_version != manifest.aggregation_config_version
+                or candidate.aggregation_config_digest != manifest.aggregation_config_digest
+            ):
+                raise _ReplayContractError("ManifestAggregationConfigMismatchError")
+            config_source = "manifest"
+        elif candidate.storage_schema_version == R04_STORAGE_SCHEMA_VERSION:
+            if aggregation_config is None:
+                raise _ReplayContractError("HistoricalAggregationConfigRequiredError")
+            config = aggregation_config
+            config_source = "caller_override"
+        elif candidate.storage_schema_version == LEGACY_STORAGE_SCHEMA_VERSION:
+            raise _ReplayContractError("LegacyR04ReplayRequiredError")
+        else:
+            raise _ReplayContractError("UnsupportedStorageSchemaError")
+        formal = [
+            screen for screen in candidate.screens
+            if screen.capture_type.value == "formal_screen" and screen.is_formal_screen
+        ]
+        identities = set()
+        last_index = 0
+        malformed = False
+        for screen in formal:
+            if screen.screen_id in identities or not isinstance(screen.screen_index, int) or screen.screen_index <= last_index:
+                malformed = True
+            identities.add(screen.screen_id)
+            last_index = screen.screen_index
+        if malformed and strict:
+            raise _ReplayContractError("DuplicateOrOutOfOrderFormalScreenError")
+        if malformed:
+            rebuilt, issues = _tolerant_candidate_rebuild(candidate, config)
+            return CandidateAggregationReplay(candidate, rebuilt, config_source, issues)
+        builder = CandidateOcrBuilder(
+            candidate.run_id,
+            candidate.sequence_number,
+            candidate_record_id=candidate.candidate_record_id,
+            created_at=candidate.created_at,
+            metadata=candidate.metadata,
+            aggregation_mode="record",
+            aggregation_config=config,
+        )
+        for screen in candidate.screens:
+            builder.add_screen(screen)
+        rebuilt = builder.finalize(
+            candidate.capture_status,
+            end_reason=candidate.capture_summary.end_reason,
+            abort_reason=candidate.capture_summary.abort_reason,
+            completed_at=candidate.completed_at,
+        )
+        if candidate.storage_schema_version == STORAGE_SCHEMA_VERSION and rebuilt != candidate:
+            raise _ReplayContractError("AggregationReplayMismatchError")
+        return CandidateAggregationReplay(candidate, rebuilt, config_source, ())
+    except Exception as exc:
+        error_type = exc.error_type if isinstance(exc, _ReplayContractError) else type(exc).__name__
+        if strict:
+            raise _candidate_replay_error(error_type) from exc
+        return CandidateAggregationReplay(
+            candidate, None, "unavailable", (_candidate_replay_issue(error_type),)
         )
 
 

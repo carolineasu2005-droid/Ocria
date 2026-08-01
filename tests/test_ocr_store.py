@@ -149,6 +149,70 @@ class JsonlOcrRecordStoreTests(unittest.TestCase):
                 1,
             )
 
+    def test_record_mode_persists_manifest_and_final_r05_screen_before_candidate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = self.make_store(temporary, aggregation_mode="record")
+            screen_id = "screen-r05-store"
+            item = OCRItem(
+                "候选人 R05 Store 验证 Unity C++ .NET",
+                0.95,
+                ((0, 0), (100, 0), (100, 20), (0, 20)),
+            )
+            normalization = normalize_ocr_text((NormalizationBox(
+                "{0}:box:0".format(screen_id), item.text, item.box, 0,
+                item.confidence,
+            ),))
+            builder = CandidateOcrBuilder(
+                "run-test", 1, candidate_record_id="candidate-test",
+                created_at="2026-07-30T12:00:00+08:00",
+                aggregation_mode="record",
+            )
+            screen = builder.build_screen_record(
+                (item,), capture_type=CaptureType.FORMAL_SCREEN,
+                is_formal_screen=True, screen_index=1, screen_id=screen_id,
+                captured_at="2026-07-30T12:00:01+08:00",
+                normalization=normalization, ocr_min_confidence=0.85,
+            )
+            document = builder.finalize(
+                CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+            )
+
+            self.assertTrue(store.save_screen(screen))
+            self.assertTrue(store.save_candidate(document))
+            self.assertTrue(store.close())
+
+            manifest = json.loads(store.manifest_path.read_text(encoding="utf-8"))
+            saved_screen = json.loads(store.screens_path.read_text(encoding="utf-8"))
+            saved_candidate = json.loads(
+                store.candidates_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["aggregation_mode"], "record")
+            self.assertEqual(manifest["aggregation_version"], "r05-v1")
+            self.assertEqual(len(manifest["aggregation_config_digest"]), 64)
+            self.assertEqual(saved_screen["aggregation_status"], "completed")
+            self.assertEqual(saved_screen["new_segment_ids"], ["screen-r05-store:line:0"])
+            self.assertEqual(saved_candidate["document_build_status"], "completed")
+            self.assertEqual(saved_candidate["document_text"], item.text)
+
+    def test_record_mode_allows_not_attempted_candidate_without_formal_screen(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = self.make_store(temporary, aggregation_mode="record")
+            builder = CandidateOcrBuilder(
+                "run-test", 1, candidate_record_id="candidate-test",
+                created_at="2026-07-30T12:00:00+08:00", aggregation_mode="record",
+            )
+            screen = builder.build_screen_record(
+                (), capture_type=CaptureType.LOAD_CHECK, is_formal_screen=False,
+                screen_index=None, screen_id="screen-r05-load-check",
+                captured_at="2026-07-30T12:00:01+08:00",
+            )
+            document = builder.finalize(
+                CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+            )
+
+            self.assertTrue(store.save_screen(screen))
+            self.assertTrue(store.save_candidate(document))
+
     def test_serialization_failure_does_not_write_a_partial_line(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = self.make_store(temporary)

@@ -2,6 +2,7 @@ import gc
 import json
 import unittest
 import weakref
+from unittest.mock import patch
 
 from ocr_candidate import (
     CandidateBuilderFinalizedError,
@@ -11,7 +12,7 @@ from ocr_detector import RuleComparisonResult
 from ocr_records import (
     CaptureStatus,
     CaptureType,
-    NOT_IMPLEMENTED,
+    DocumentBuildStatus,
     OcrScreenRecord,
 )
 from ocr_normalization import NormalizationBox, normalize_ocr_text
@@ -64,7 +65,7 @@ class CandidateOcrBuilderTests(unittest.TestCase):
         self.assertEqual(document.capture_summary.ocr_attempt_count, 0)
         self.assertIsNone(document.document_text)
         self.assertEqual(document.document_segments, ())
-        self.assertEqual(document.document_build_status, NOT_IMPLEMENTED)
+        self.assertEqual(document.document_build_status, DocumentBuildStatus.NOT_ATTEMPTED)
 
     def test_one_screen_candidate_preserves_raw_evidence(self):
         builder = self.make_builder()
@@ -81,6 +82,62 @@ class CandidateOcrBuilderTests(unittest.TestCase):
         self.assertEqual(document.capture_summary.end_screen_index, 1)
         self.assertEqual(record.raw_boxes[0].original_index, 0)
         self.assertEqual(record.raw_boxes[0].raw_text, self.make_item().text)
+
+    def test_disabled_mode_never_constructs_aggregator(self):
+        with patch("ocr_candidate.CandidateDocumentAggregator") as aggregator:
+            builder = self.make_builder()
+            record = self.add_screen(builder, 1)
+            document = builder.finalize(
+                CaptureStatus.COMPLETED, end_reason="existing_flow_completed"
+            )
+        aggregator.assert_not_called()
+        self.assertEqual(record.aggregation_status.value, "not_attempted")
+        self.assertEqual(document.document_build_status, DocumentBuildStatus.NOT_ATTEMPTED)
+
+    def test_record_mode_with_only_nonformal_observations_stays_not_attempted(self):
+        builder = CandidateOcrBuilder(
+            "run-test", 1, candidate_record_id="candidate-r05-nonformal",
+            created_at="2026-07-30T12:00:00+08:00", aggregation_mode="record",
+        )
+        record = builder.build_screen_record(
+            (self.make_item("r05-nonformal"),),
+            capture_type=CaptureType.LOAD_CHECK, is_formal_screen=False,
+            screen_index=None, screen_id="screen-r05-nonformal",
+            captured_at="2026-07-30T12:00:01+08:00",
+        )
+        document = builder.finalize(
+            CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+        )
+
+        self.assertEqual(record.aggregation_status.value, "not_attempted")
+        self.assertEqual(document.document_build_status, DocumentBuildStatus.NOT_ATTEMPTED)
+        self.assertIsNone(document.versions["aggregation"])
+        self.assertIsNone(document.aggregation_config_digest)
+
+    def test_explicit_record_mode_projects_screen_before_document_finalize(self):
+        screen_id = "screen-r05"
+        item = self.make_item("r05")
+        normalization = normalize_ocr_text((NormalizationBox(
+            "{0}:box:0".format(screen_id), item.text, item.box, 0, item.confidence,
+        ),))
+        builder = CandidateOcrBuilder(
+            "run-test", 1, candidate_record_id="candidate-r05",
+            created_at="2026-07-30T12:00:00+08:00", aggregation_mode="record",
+        )
+        record = builder.build_screen_record(
+            (item,), capture_type=CaptureType.FORMAL_SCREEN, is_formal_screen=True,
+            screen_index=1, screen_id=screen_id,
+            captured_at="2026-07-30T12:00:01+08:00", normalization=normalization,
+            ocr_min_confidence=0.85,
+        )
+        document = builder.finalize(
+            CaptureStatus.COMPLETED, end_reason="existing_flow_completed"
+        )
+        self.assertEqual(record.aggregation_status.value, "completed")
+        self.assertEqual(record.new_segment_ids, ("screen-r05:line:0",))
+        self.assertEqual(document.document_build_status, DocumentBuildStatus.COMPLETED)
+        self.assertEqual(document.versions["aggregation"], "r05-v1")
+        self.assertEqual(document.document_text, item.text)
 
     def test_screen_record_flattens_legacy_shadow_result(self):
         builder = self.make_builder()
