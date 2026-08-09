@@ -1690,6 +1690,12 @@ def get_user_input(
 
 # ─── 窗口操作 ───────────────────────────────────────
 
+SUPPORTED_BOSS_BROWSERS = {
+    'chrome.exe': 'Chrome',
+    'msedge.exe': 'Edge',
+}
+
+
 def get_window_process_name(hwnd):
     """Return the executable name for a top-level Windows window."""
     handle = None
@@ -1712,32 +1718,42 @@ def get_window_process_name(hwnd):
             ctypes.windll.kernel32.CloseHandle(handle)
 
 
-def is_boss_edge_window(title, process_name):
+def is_boss_browser_window(title, process_name):
     """Reject unrelated apps whose title merely contains the word BOSS."""
-    return process_name == 'msedge.exe' and ('BOSS' in title or 'zhipin' in title.lower())
+    return (
+        process_name in SUPPORTED_BOSS_BROWSERS
+        and ('BOSS' in title or 'zhipin' in title.lower())
+    )
 
 
-def bring_edge_foreground():
-    """将 BOSS 直聘 Edge 窗口置顶"""
-    result = []
+def bring_boss_foreground():
+    """将 BOSS 直聘浏览器窗口置顶，优先 Chrome，其次 Edge。"""
+    chrome_windows = []
+    edge_windows = []
 
     def cb(hwnd, _):
         if not win32gui.IsWindowVisible(hwnd):
             return True
         title = win32gui.GetWindowText(hwnd)
         process_name = get_window_process_name(hwnd)
-        if is_boss_edge_window(title, process_name):
-            result.append((hwnd, title))
-            return False
+        if is_boss_browser_window(title, process_name):
+            candidate = (hwnd, title, SUPPORTED_BOSS_BROWSERS[process_name])
+            if process_name == 'chrome.exe':
+                chrome_windows.append(candidate)
+            else:
+                edge_windows.append(candidate)
         return True
 
-    win32gui.EnumWindows(cb, result)
+    win32gui.EnumWindows(cb, None)
 
-    if not result:
-        logger.error('❌ 找不到 BOSS 直聘窗口')
+    if chrome_windows:
+        hwnd, title, browser = chrome_windows[0]
+    elif edge_windows:
+        hwnd, title, browser = edge_windows[0]
+    else:
+        logger.error('❌ 找不到 BOSS 直聘 Chrome / Edge 窗口')
         return False
 
-    hwnd, title = result[0]
     if win32gui.IsIconic(hwnd):
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         time.sleep(0.3)
@@ -1745,11 +1761,18 @@ def bring_edge_foreground():
     try:
         win32gui.SetForegroundWindow(hwnd)
         time.sleep(0.5)
-        logger.info(f'✅ Edge 已置顶: {title}')
+        logger.info(f'✅ BOSS {browser} 已置顶: {title}')
         return True
     except Exception as e:
-        logger.error('❌ 置顶失败 error_type=%s', type(e).__name__)
+        logger.error(
+            '❌ 置顶失败 browser=%s error_type=%s', browser, type(e).__name__
+        )
         return False
+
+
+def bring_edge_foreground():
+    """兼容旧调用入口。"""
+    return bring_boss_foreground()
 
 
 # ─── 基础工具 ───────────────────────────────────────

@@ -6998,19 +6998,92 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 randint.assert_called_once_with(600, 1000)
                 scroll.assert_called_once_with(-steps)
 
-    def test_window_match_rejects_vscode_project_title(self):
-        self.assertFalse(
-            simple_brush.is_boss_edge_window(
-                "BossOCR.spec - BOSSOCR - Visual Studio Code", "code.exe"
-            )
-        )
+class BossBrowserWindowTests(unittest.TestCase):
+    def test_window_match_accepts_supported_boss_titles(self):
+        for process_name, title in (
+            ('chrome.exe', 'BOSS直聘 - Google Chrome'),
+            ('chrome.exe', '职位详情 - zhipin - Google Chrome'),
+            ('msedge.exe', 'BOSS直聘 - Microsoft Edge'),
+            ('msedge.exe', '职位详情 - zhipin - Microsoft Edge'),
+        ):
+            with self.subTest(process_name=process_name, title=title):
+                self.assertTrue(simple_brush.is_boss_browser_window(title, process_name))
 
-    def test_window_match_accepts_boss_in_edge(self):
-        self.assertTrue(
-            simple_brush.is_boss_edge_window(
-                "BOSS直聘 - 个人 - Microsoft Edge", "msedge.exe"
-            )
+    def test_window_match_rejects_unrelated_titles_or_processes(self):
+        for process_name, title in (
+            ('chrome.exe', 'New Tab - Google Chrome'),
+            ('msedge.exe', 'New Tab - Microsoft Edge'),
+            ('firefox.exe', 'BOSS直聘 - Mozilla Firefox'),
+            ('notepad.exe', 'BOSS notes'),
+            ('code.exe', 'BossOCR.spec - BOSSOCR - Visual Studio Code'),
+        ):
+            with self.subTest(process_name=process_name, title=title):
+                self.assertFalse(simple_brush.is_boss_browser_window(title, process_name))
+
+    def _bring_foreground(self, windows):
+        def enum_windows(callback, _):
+            for hwnd, _title, _process_name in windows:
+                callback(hwnd, None)
+
+        titles = {hwnd: title for hwnd, title, _process_name in windows}
+        processes = {hwnd: process_name for hwnd, _title, process_name in windows}
+        patches = ExitStack()
+        mocks = (
+            patches.enter_context(
+                patch.object(simple_brush.win32gui, 'EnumWindows', side_effect=enum_windows)
+            ),
+            patches.enter_context(
+                patch.object(simple_brush.win32gui, 'IsWindowVisible', return_value=True)
+            ),
+            patches.enter_context(
+                patch.object(simple_brush.win32gui, 'GetWindowText', side_effect=titles.__getitem__)
+            ),
+            patches.enter_context(
+                patch.object(simple_brush, 'get_window_process_name', side_effect=processes.__getitem__)
+            ),
+            patches.enter_context(
+                patch.object(simple_brush.win32gui, 'IsIconic', return_value=False)
+            ),
+            patches.enter_context(patch.object(simple_brush.win32gui, 'SetForegroundWindow')),
+            patches.enter_context(patch.object(simple_brush.time, 'sleep')),
         )
+        return patches, mocks
+
+    def test_bring_boss_foreground_prefers_chrome_over_edge_regardless_of_enum_order(self):
+        windows = [
+            (101, 'BOSS直聘 - Microsoft Edge', 'msedge.exe'),
+            (202, 'BOSS直聘 - Google Chrome', 'chrome.exe'),
+        ]
+        patches, mocks = self._bring_foreground(windows)
+        with patches:
+            self.assertTrue(simple_brush.bring_boss_foreground())
+        mocks[5].assert_called_once_with(202)
+
+    def test_bring_boss_foreground_uses_edge_when_chrome_is_absent(self):
+        windows = [(101, 'BOSS直聘 - Microsoft Edge', 'msedge.exe')]
+        patches, mocks = self._bring_foreground(windows)
+        with patches:
+            self.assertTrue(simple_brush.bring_boss_foreground())
+        mocks[5].assert_called_once_with(101)
+
+    def test_bring_boss_foreground_uses_chrome_when_edge_is_absent(self):
+        windows = [(202, 'BOSS直聘 - Google Chrome', 'chrome.exe')]
+        patches, mocks = self._bring_foreground(windows)
+        with patches:
+            self.assertTrue(simple_brush.bring_boss_foreground())
+        mocks[5].assert_called_once_with(202)
+
+    def test_bring_boss_foreground_returns_false_without_matching_window(self):
+        windows = [(101, 'New Tab - Microsoft Edge', 'msedge.exe')]
+        patches, mocks = self._bring_foreground(windows)
+        with patches:
+            self.assertFalse(simple_brush.bring_boss_foreground())
+        mocks[5].assert_not_called()
+
+    def test_bring_edge_foreground_delegates_to_new_compatibility_function(self):
+        with patch.object(simple_brush, 'bring_boss_foreground', return_value=True) as bring_boss:
+            self.assertTrue(simple_brush.bring_edge_foreground())
+        bring_boss.assert_called_once_with()
 
 
 class StartupMenuTests(unittest.TestCase):
