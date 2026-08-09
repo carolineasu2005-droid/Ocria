@@ -1,7 +1,8 @@
 """Current-candidate-only assembly for stage-0 OCR documents."""
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
+import logging
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 from uuid import uuid4
 
@@ -20,10 +21,15 @@ from ocr_records import (
     OcrScreenRecord,
     OcrTextSegment,
     ProcessingStatus,
+    ReferenceResolution,
+    ReferenceResolutionStatus,
+    ReferenceSource,
     STORAGE_SCHEMA_VERSION,
     timezone_iso,
     validate_timezone_iso,
     recompute_normalization_summary,
+    recompute_similarity_summary,
+    summarize_similarity_results,
 )
 from ocr_aggregation import (
     AGGREGATION_CONFIG_VERSION,
@@ -43,7 +49,18 @@ from ocr_normalization import (
     TextNormalizationResult,
     build_comparison_text,
 )
+from ocr_similarity import (
+    DEFAULT_OCR_SIMILARITY_CONFIG,
+    R06_SIMILARITY_MODE,
+    CandidateSimilarityEvaluator,
+    OcrSimilarityConfig,
+    empty_similarity_summary,
+    failed_similarity_result,
+)
 from ocr_text import OCRItem
+
+
+logger = logging.getLogger(__name__)
 
 
 class CandidateBuilderFinalizedError(RuntimeError):
@@ -51,7 +68,17 @@ class CandidateBuilderFinalizedError(RuntimeError):
 
 
 Timestamp = Union[str, datetime]
-R05_AGGREGATION_MODE = "disabled"
+R05_AGGREGATION_MODE = "record"
+
+
+@dataclass
+class _PendingScreenBuild:
+    """Validated one-pass result awaiting its sole Store outcome."""
+
+    record: OcrScreenRecord
+    aggregator: Optional[CandidateDocumentAggregator]
+    similarity_evaluator: Optional[CandidateSimilarityEvaluator]
+    attempts: Dict[Tuple[str, Optional[int]], int]
 
 
 def _timestamp_text(value: Optional[Timestamp]) -> str:
@@ -268,6 +295,8 @@ class CandidateOcrBuilder:
         metadata: Optional[Mapping[str, Any]] = None,
         aggregation_mode: str = R05_AGGREGATION_MODE,
         aggregation_config: OcrAggregationConfig = DEFAULT_OCR_AGGREGATION_CONFIG,
+        similarity_mode: str = R06_SIMILARITY_MODE,
+        similarity_config: OcrSimilarityConfig = DEFAULT_OCR_SIMILARITY_CONFIG,
     ) -> None:
         if sequence_number < 1:
             raise ValueError("sequence_number must be at least 1")
@@ -280,8 +309,14 @@ class CandidateOcrBuilder:
             raise ValueError("aggregation_mode must be disabled or record")
         if not isinstance(aggregation_config, OcrAggregationConfig):
             raise TypeError("aggregation_config must be an OcrAggregationConfig")
+        if similarity_mode not in ("disabled", "record"):
+            raise ValueError("similarity_mode must be disabled or record")
+        if not isinstance(similarity_config, OcrSimilarityConfig):
+            raise TypeError("similarity_config must be an OcrSimilarityConfig")
         self.aggregation_mode = aggregation_mode
         self.aggregation_config = aggregation_config
+        self.similarity_mode = similarity_mode
+        self.similarity_config = similarity_config
         self._aggregator = (
             CandidateDocumentAggregator(
                 self.run_id, self.candidate_record_id, aggregation_config, mode="record"
@@ -289,7 +324,19 @@ class CandidateOcrBuilder:
             if aggregation_mode == "record" else None
         )
         self._screens: List[OcrScreenRecord] = []
+        # Disabled mode must return before the context/evaluator exists.  This
+        # is intentionally separate from the R05 aggregator construction.
+        self._similarity_evaluator = (
+            CandidateSimilarityEvaluator(
+                self.run_id,
+                self.candidate_record_id,
+                similarity_config,
+            )
+            if similarity_mode == "record"
+            else None
+        )
         self._attempts: Dict[Tuple[str, Optional[int]], int] = {}
+        self._pending_screen_build: Optional[_PendingScreenBuild] = None
         self._finalized = False
 
     @property
@@ -304,6 +351,49 @@ class CandidateOcrBuilder:
         if self._finalized:
             raise CandidateBuilderFinalizedError(
                 "candidate OCR builder is already finalized"
+            )
+
+    def _release_candidate_context(self) -> None:
+        """Release bounded R05/R06 state on every finalize exit path."""
+
+        self._screens.clear()
+        self._attempts.clear()
+        self._pending_screen_build = None
+        self._aggregator = None
+        if self._similarity_evaluator is not None:
+            self._similarity_evaluator.clear()
+        self._similarity_evaluator = None
+        self._finalized = True
+
+    def _finalize_similarity_summary(
+        self,
+        screens: Tuple[OcrScreenRecord, ...],
+    ):
+        """Summarize saved R06 results without letting summary failure stop I/O.
+
+        The normal schema-level summary remains the primary path.  Its narrow
+        count-only fallback consumes the same completed screen results, so it
+        cannot re-run R05 or R06, change a screen, or alter screen order.
+        """
+
+        if self._similarity_evaluator is None:
+            return (
+                recompute_similarity_summary(screens)
+                if screens and all(screen.similarity_result is not None for screen in screens)
+                else None
+            )
+        if not screens:
+            return empty_similarity_summary(self.similarity_config)
+        try:
+            return recompute_similarity_summary(screens)
+        except Exception:
+            # Keep this message fixed and content-free: exception text and OCR
+            # evidence must not escape through the page-flow logging path.
+            logger.warning(
+                "event=r06_candidate_summary_failed warning_code=evaluation_failed"
+            )
+            return summarize_similarity_results(
+                tuple(screen.similarity_result for screen in screens)
             )
 
     @staticmethod
@@ -339,6 +429,71 @@ class CandidateOcrBuilder:
         self._attempts[key] = next_value
         return next_value
 
+    def _working_screen_state(self):
+        """Fork bounded R05/R06 state without changing committed evidence."""
+
+        if self._pending_screen_build is not None:
+            raise ValueError("pending screen build must be resolved")
+        return (
+            self._aggregator.fork() if self._aggregator is not None else None,
+            (
+                self._similarity_evaluator.fork()
+                if self._similarity_evaluator is not None else None
+            ),
+            dict(self._attempts),
+        )
+
+    def _working_attempt_index(
+        self,
+        attempts: Dict[Tuple[str, Optional[int]], int],
+        capture_type: CaptureType,
+        screen_index: Optional[int],
+    ) -> int:
+        key = self._attempt_key(capture_type, screen_index)
+        value = attempts.get(key, 0) + 1
+        attempts[key] = value
+        return value
+
+    def _commit_screen_state(
+        self,
+        record: OcrScreenRecord,
+        aggregator: Optional[CandidateDocumentAggregator],
+        similarity_evaluator: Optional[CandidateSimilarityEvaluator],
+        attempts: Dict[Tuple[str, Optional[int]], int],
+    ) -> OcrScreenRecord:
+        self._aggregator = aggregator
+        self._similarity_evaluator = similarity_evaluator
+        self._attempts = attempts
+        self._screens.append(record)
+        return record
+
+    def commit_screen_record(self, record: OcrScreenRecord) -> OcrScreenRecord:
+        """Commit one validated record only after its sole Store save succeeds."""
+
+        self._require_active()
+        pending = self._pending_screen_build
+        if pending is None or pending.record is not record:
+            raise ValueError("screen record is not the pending build")
+        self._pending_screen_build = None
+        return self._commit_screen_state(
+            pending.record,
+            pending.aggregator,
+            pending.similarity_evaluator,
+            pending.attempts,
+        )
+
+    def discard_screen_record(self, record: Optional[OcrScreenRecord] = None) -> bool:
+        """Discard an unsaved build without rerunning or compensating R05/R06."""
+
+        self._require_active()
+        pending = self._pending_screen_build
+        if pending is None:
+            return False
+        if record is not None and pending.record is not record:
+            raise ValueError("screen record is not the pending build")
+        self._pending_screen_build = None
+        return True
+
     def build_screen_record(
         self,
         raw_items: Iterable[OCRItem],
@@ -354,10 +509,14 @@ class CandidateOcrBuilder:
         ocr_min_confidence: Optional[float] = None,
         confidence_threshold_source: str = "run_manifest",
         rule_comparison: Optional[Any] = None,
+        explicit_reference_screen_id: Optional[str] = None,
+        defer_commit: bool = False,
     ) -> OcrScreenRecord:
-        """Build and retain one evidence record in engine-return order."""
+        """Build one record; optionally await its sole Store outcome."""
 
         self._require_active()
+        if not isinstance(defer_commit, bool):
+            raise TypeError("defer_commit must be a boolean")
         capture_type = (
             capture_type
             if isinstance(capture_type, CaptureType)
@@ -453,12 +612,19 @@ class CandidateOcrBuilder:
         projected_fields = dict(normalization_fields)
         projected_fields.update(rule_comparison_fields)
 
+        (
+            working_aggregator,
+            working_similarity_evaluator,
+            working_attempts,
+        ) = self._working_screen_state()
+
         record = OcrScreenRecord(
             run_id=self.run_id,
             candidate_record_id=self.candidate_record_id,
             screen_id=screen_id,
             screen_index=screen_index,
-            attempt_index=self.next_attempt_index(
+            attempt_index=self._working_attempt_index(
+                working_attempts,
                 capture_type, screen_index
             ),
             capture_type=capture_type,
@@ -471,8 +637,8 @@ class CandidateOcrBuilder:
             ocr_min_confidence=ocr_min_confidence,
             **projected_fields,
         )
-        if self._aggregator is not None:
-            aggregation_result = self._aggregator.add_screen(record)
+        if working_aggregator is not None:
+            aggregation_result = working_aggregator.add_screen(record)
             record = replace(
                 record,
                 storage_schema_version=STORAGE_SCHEMA_VERSION,
@@ -480,17 +646,148 @@ class CandidateOcrBuilder:
                     record, aggregation_result, self.aggregation_config
                 )
             )
-        self._screens.append(record)
-        return record
+        record = self._apply_similarity(
+            record,
+            evaluator=working_similarity_evaluator,
+            explicit_reference_screen_id=explicit_reference_screen_id,
+        )
+        if defer_commit:
+            self._pending_screen_build = _PendingScreenBuild(
+                record,
+                working_aggregator,
+                working_similarity_evaluator,
+                working_attempts,
+            )
+            return record
+        return self._commit_screen_state(
+            record,
+            working_aggregator,
+            working_similarity_evaluator,
+            working_attempts,
+        )
 
-    def add_screen(self, record: OcrScreenRecord) -> None:
+    def replace_latest_screen_record(
+        self,
+        original: OcrScreenRecord,
+        replacement: OcrScreenRecord,
+    ) -> OcrScreenRecord:
+        """Attach additive metadata to the just-built canonical record once."""
+
+        self._require_active()
+        pending = self._pending_screen_build
+        if pending is not None:
+            if pending.record is not original:
+                raise ValueError(
+                    "only the pending canonical screen record may be replaced"
+                )
+            pending.record = replacement
+            return replacement
+        if not self._screens or self._screens[-1] is not original:
+            raise ValueError("only the latest canonical screen record may be replaced")
+        self._screens[-1] = replacement
+        return replacement
+
+    def _reference_maps(
+        self,
+    ) -> Tuple[Dict[str, OcrScreenRecord], Dict[int, str]]:
+        """Build identity maps without trusting list/JSONL ordering."""
+
+        by_id: Dict[str, OcrScreenRecord] = {}
+        formal_by_index: Dict[int, str] = {}
+        for position, screen in enumerate(self._screens):
+            key = screen.screen_id
+            if key in by_id:
+                # A non-identity key deliberately makes the pure resolver
+                # reject the candidate rather than silently selecting one.
+                key = "{0}#duplicate-{1}".format(key, position)
+            by_id[key] = screen
+            if (
+                screen.capture_type == CaptureType.FORMAL_SCREEN
+                and screen.is_formal_screen is True
+                and isinstance(screen.screen_index, int)
+                and screen.screen_index not in formal_by_index
+            ):
+                formal_by_index[screen.screen_index] = screen.screen_id
+        return by_id, formal_by_index
+
+    def _failed_similarity_projection(self, record: OcrScreenRecord) -> OcrScreenRecord:
+        source = (
+            ReferenceSource.FORMAL_PREVIOUS_INDEX
+            if record.capture_type == CaptureType.FORMAL_SCREEN and record.is_formal_screen
+            else ReferenceSource.EXPLICIT_RECORD
+        )
+        resolution = ReferenceResolution(
+            ReferenceResolutionStatus.UNAVAILABLE,
+            None,
+            None,
+            None,
+            source,
+            ("evaluation_failed",),
+        )
+        result = failed_similarity_result(resolution, self.similarity_config)
+        return replace(
+            record,
+            similarity_hash=result.current_simhash,
+            similarity_score=result.similarity_score,
+            overlap_ratio=result.overlap_ratio,
+            new_text_ratio=result.new_text_ratio,
+            has_effective_new_text=result.has_effective_new_text,
+            similarity_version=result.similarity_version,
+            similarity_result=result,
+        )
+
+    def _apply_similarity(
+        self,
+        record: OcrScreenRecord,
+        *,
+        evaluator: Optional[CandidateSimilarityEvaluator],
+        explicit_reference_screen_id: Optional[str] = None,
+    ) -> OcrScreenRecord:
+        """Run the sole online R06 call after the final R05 projection."""
+
+        if evaluator is None:
+            return record
+        try:
+            by_id, formal_by_index = self._reference_maps()
+            result = evaluator.evaluate(
+                record,
+                by_id,
+                formal_by_index,
+                explicit_reference_screen_id=explicit_reference_screen_id,
+                source_schema_version=STORAGE_SCHEMA_VERSION,
+            )
+        except Exception:
+            # No retry is permitted: R06 remains a single best-effort pass.
+            return self._failed_similarity_projection(record)
+        return replace(
+            record,
+            similarity_hash=result.current_simhash,
+            similarity_score=result.similarity_score,
+            overlap_ratio=result.overlap_ratio,
+            new_text_ratio=result.new_text_ratio,
+            has_effective_new_text=result.has_effective_new_text,
+            similarity_version=result.similarity_version,
+            similarity_result=result,
+        )
+
+    def add_screen(
+        self,
+        record: OcrScreenRecord,
+        *,
+        explicit_reference_screen_id: Optional[str] = None,
+    ) -> None:
         self._require_active()
         if record.run_id != self.run_id:
             raise ValueError("screen run_id does not match builder")
         if record.candidate_record_id != self.candidate_record_id:
             raise ValueError("screen candidate_record_id does not match builder")
-        if self._aggregator is not None:
-            aggregation_result = self._aggregator.add_screen(record)
+        (
+            working_aggregator,
+            working_similarity_evaluator,
+            working_attempts,
+        ) = self._working_screen_state()
+        if working_aggregator is not None:
+            aggregation_result = working_aggregator.add_screen(record)
             record = replace(
                 record,
                 storage_schema_version=STORAGE_SCHEMA_VERSION,
@@ -498,7 +795,17 @@ class CandidateOcrBuilder:
                     record, aggregation_result, self.aggregation_config
                 )
             )
-        self._screens.append(record)
+        record = self._apply_similarity(
+            record,
+            evaluator=working_similarity_evaluator,
+            explicit_reference_screen_id=explicit_reference_screen_id,
+        )
+        self._commit_screen_state(
+            record,
+            working_aggregator,
+            working_similarity_evaluator,
+            working_attempts,
+        )
 
     def finalize(
         self,
@@ -512,70 +819,56 @@ class CandidateOcrBuilder:
         """Create one document, then drop builder references to screen details."""
 
         self._require_active()
-        capture_status = (
-            capture_status
-            if isinstance(capture_status, CaptureStatus)
-            else CaptureStatus(capture_status)
-        )
-        screens = tuple(self._screens)
-        formal_indexes = {
-            screen.screen_index
-            for screen in screens
-            if screen.is_formal_screen and screen.screen_index is not None
-        }
-        scroll_attempt_count = sum(
-            1
-            for screen in screens
-            if (
-                screen.is_formal_screen
-                and screen.screen_index is not None
-                and screen.screen_index > 1
+        # A failed/false Store outcome must never make an unsaved screen part
+        # of the terminal candidate.  The committed R05/R06 state is unchanged.
+        self._pending_screen_build = None
+        try:
+            capture_status = (
+                capture_status
+                if isinstance(capture_status, CaptureStatus)
+                else CaptureStatus(capture_status)
             )
-            or screen.capture_type == CaptureType.SCROLL_RETRY
-        )
-        summary = CaptureSummary(
-            actual_screen_count=len(formal_indexes),
-            ocr_attempt_count=len(screens),
-            scroll_attempt_count=scroll_attempt_count,
-            scroll_retry_count=sum(
-                screen.capture_type == CaptureType.SCROLL_RETRY
+            screens = tuple(self._screens)
+            formal_indexes = {
+                screen.screen_index
                 for screen in screens
-            ),
-            end_screen_index=max(formal_indexes) if formal_indexes else None,
-            capture_status=capture_status,
-            end_reason=end_reason,
-            abort_reason=abort_reason,
-        )
-        document_metadata = dict(self.metadata)
-        if metadata:
-            document_metadata.update(metadata)
-        normalization_versions = {
-            screen.normalization_version
-            for screen in screens
-            if screen.normalization_status
-            in (NormalizationStatus.COMPLETED, NormalizationStatus.FAILED)
-        }
-        if len(normalization_versions) > 1:
-            raise ValueError("mixed candidate normalization versions are unsupported")
-        if self._aggregator is None:
-            aggregation_fields = {
-                "document_version": R05_DOCUMENT_VERSION,
-                "document_text": None,
-                "document_segments": (),
-                "document_build_status": DocumentBuildStatus.NOT_ATTEMPTED,
-                "aggregation_config_version": None,
-                "aggregation_config_digest": None,
-                "aggregation_warning_codes": (),
-                "aggregation_duplicate_risk": None,
-                "aggregation_summary": None,
-                "aggregation_version": None,
+                if screen.is_formal_screen and screen.screen_index is not None
             }
-        else:
-            aggregation = self._aggregator.finalize(capture_status)
-            if aggregation.document_build_status == DocumentBuildStatus.NOT_ATTEMPTED:
-                # A record-mode candidate can legitimately contain only
-                # non-formal observations.  It did not perform aggregation,
-                # so it must retain the exact schema not-attempted projection.
+            scroll_attempt_count = sum(
+                1
+                for screen in screens
+                if (
+                    screen.is_formal_screen
+                    and screen.screen_index is not None
+                    and screen.screen_index > 1
+                )
+                or screen.capture_type == CaptureType.SCROLL_RETRY
+            )
+            summary = CaptureSummary(
+                actual_screen_count=len(formal_indexes),
+                ocr_attempt_count=len(screens),
+                scroll_attempt_count=scroll_attempt_count,
+                scroll_retry_count=sum(
+                    screen.capture_type == CaptureType.SCROLL_RETRY
+                    for screen in screens
+                ),
+                end_screen_index=max(formal_indexes) if formal_indexes else None,
+                capture_status=capture_status,
+                end_reason=end_reason,
+                abort_reason=abort_reason,
+            )
+            document_metadata = dict(self.metadata)
+            if metadata:
+                document_metadata.update(metadata)
+            normalization_versions = {
+                screen.normalization_version
+                for screen in screens
+                if screen.normalization_status
+                in (NormalizationStatus.COMPLETED, NormalizationStatus.FAILED)
+            }
+            if len(normalization_versions) > 1:
+                raise ValueError("mixed candidate normalization versions are unsupported")
+            if self._aggregator is None:
                 aggregation_fields = {
                     "document_version": R05_DOCUMENT_VERSION,
                     "document_text": None,
@@ -589,43 +882,65 @@ class CandidateOcrBuilder:
                     "aggregation_version": None,
                 }
             else:
-                aggregation_fields = {
-                    "document_version": R05_DOCUMENT_VERSION,
-                    "document_text": aggregation.document_text,
-                    "document_segments": aggregation.document_segments,
-                    "document_build_status": aggregation.document_build_status,
-                    "aggregation_config_version": AGGREGATION_CONFIG_VERSION,
-                    "aggregation_config_digest": aggregation_config_digest(self.aggregation_config),
-                    "aggregation_warning_codes": aggregation.aggregation_warning_codes,
-                    "aggregation_duplicate_risk": aggregation.aggregation_duplicate_risk,
-                    "aggregation_summary": None,
-                    "aggregation_version": AGGREGATION_VERSION,
-                }
-        document = CandidateOcrDocument(
-            run_id=self.run_id,
-            candidate_record_id=self.candidate_record_id,
-            sequence_number=self.sequence_number,
-            created_at=self.created_at,
-            completed_at=_timestamp_text(completed_at),
-            capture_status=capture_status,
-            screens=screens,
-            capture_summary=summary,
-            normalization_summary=recompute_normalization_summary(screens),
-            versions={
-                "normalization": (
-                    next(iter(normalization_versions))
-                    if normalization_versions
-                    else None
-                ),
-                "aggregation": aggregation_fields.pop("aggregation_version"),
-                "similarity": None,
-                "dynamic_end": None,
-            },
-            metadata=document_metadata,
-            **aggregation_fields,
-        )
-        self._screens.clear()
-        self._attempts.clear()
-        self._aggregator = None
-        self._finalized = True
-        return document
+                aggregation = self._aggregator.finalize(capture_status)
+                if aggregation.document_build_status == DocumentBuildStatus.NOT_ATTEMPTED:
+                    # A record-mode candidate can legitimately contain only
+                    # non-formal observations.  It did not perform aggregation,
+                    # so it must retain the exact schema not-attempted projection.
+                    aggregation_fields = {
+                        "document_version": R05_DOCUMENT_VERSION,
+                        "document_text": None,
+                        "document_segments": (),
+                        "document_build_status": DocumentBuildStatus.NOT_ATTEMPTED,
+                        "aggregation_config_version": None,
+                        "aggregation_config_digest": None,
+                        "aggregation_warning_codes": (),
+                        "aggregation_duplicate_risk": None,
+                        "aggregation_summary": None,
+                        "aggregation_version": None,
+                    }
+                else:
+                    aggregation_fields = {
+                        "document_version": R05_DOCUMENT_VERSION,
+                        "document_text": aggregation.document_text,
+                        "document_segments": aggregation.document_segments,
+                        "document_build_status": aggregation.document_build_status,
+                        "aggregation_config_version": AGGREGATION_CONFIG_VERSION,
+                        "aggregation_config_digest": aggregation_config_digest(self.aggregation_config),
+                        "aggregation_warning_codes": aggregation.aggregation_warning_codes,
+                        "aggregation_duplicate_risk": aggregation.aggregation_duplicate_risk,
+                        "aggregation_summary": None,
+                        "aggregation_version": AGGREGATION_VERSION,
+                    }
+            similarity_summary = self._finalize_similarity_summary(screens)
+            document = CandidateOcrDocument(
+                run_id=self.run_id,
+                candidate_record_id=self.candidate_record_id,
+                sequence_number=self.sequence_number,
+                created_at=self.created_at,
+                completed_at=_timestamp_text(completed_at),
+                capture_status=capture_status,
+                screens=screens,
+                capture_summary=summary,
+                normalization_summary=recompute_normalization_summary(screens),
+                versions={
+                    "normalization": (
+                        next(iter(normalization_versions))
+                        if normalization_versions
+                        else None
+                    ),
+                    "aggregation": aggregation_fields.pop("aggregation_version"),
+                    "similarity": (
+                        self.similarity_config.similarity_version
+                        if self._similarity_evaluator is not None
+                        else None
+                    ),
+                    "dynamic_end": None,
+                },
+                metadata=document_metadata,
+                similarity_summary=similarity_summary,
+                **aggregation_fields,
+            )
+            return document
+        finally:
+            self._release_candidate_context()

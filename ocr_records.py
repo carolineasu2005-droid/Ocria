@@ -1,8 +1,8 @@
 """OCR evidence records and JSON-compatible serialization helpers.
 
-The stage-0 evidence model remains authoritative.  R04 extends that same
-record with replayable derived text; later aggregation, similarity, and
-dynamic-end fields remain explicitly unimplemented.
+The stage-0 evidence model remains authoritative. R04--R06 project their
+existing derived evidence onto that same record; R07 adds only additive scan
+metadata and does not change their algorithms or control flow.
 """
 
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -13,17 +13,37 @@ import json
 from pathlib import Path
 import math
 import re
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Type, TypeVar
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Type, TypeVar
 
 
 LEGACY_STORAGE_SCHEMA_VERSION = "1.0.0"
 R04_STORAGE_SCHEMA_VERSION = "1.1.0"
-STORAGE_SCHEMA_VERSION = "1.2.0"
+R05_STORAGE_SCHEMA_VERSION = "1.2.0"
+R06_STORAGE_SCHEMA_VERSION = "1.3.0"
+R07_STORAGE_SCHEMA_VERSION = "1.4.0"
+STORAGE_SCHEMA_VERSION = R07_STORAGE_SCHEMA_VERSION
 DOCUMENT_VERSION = "stage0-v1"
 R05_DOCUMENT_VERSION = "r05-document-v1"
 SUPPORTED_STORAGE_SCHEMA_VERSIONS = (
     LEGACY_STORAGE_SCHEMA_VERSION,
     R04_STORAGE_SCHEMA_VERSION,
+    R05_STORAGE_SCHEMA_VERSION,
+    R06_STORAGE_SCHEMA_VERSION,
+    STORAGE_SCHEMA_VERSION,
+)
+R04_AND_LATER_STORAGE_SCHEMA_VERSIONS = (
+    R04_STORAGE_SCHEMA_VERSION,
+    R05_STORAGE_SCHEMA_VERSION,
+    R06_STORAGE_SCHEMA_VERSION,
+    STORAGE_SCHEMA_VERSION,
+)
+R05_AND_LATER_STORAGE_SCHEMA_VERSIONS = (
+    R05_STORAGE_SCHEMA_VERSION,
+    R06_STORAGE_SCHEMA_VERSION,
+    STORAGE_SCHEMA_VERSION,
+)
+R06_AND_LATER_STORAGE_SCHEMA_VERSIONS = (
+    R06_STORAGE_SCHEMA_VERSION,
     STORAGE_SCHEMA_VERSION,
 )
 SUPPORTED_DOCUMENT_VERSIONS = (DOCUMENT_VERSION, R05_DOCUMENT_VERSION)
@@ -44,6 +64,8 @@ class CaptureType(str, Enum):
     SWITCH_CHECK = "switch_check"
     SCROLL_CONFIRMATION = "scroll_confirmation"
     SCROLL_RETRY = "scroll_retry"
+    RULE_CONFIRMATION = "rule_confirmation"
+    POSITION_CONFIRMATION = "position_confirmation"
     OTHER = "other"
 
 
@@ -110,6 +132,65 @@ class AggregationOccurrenceRole(str, Enum):
     ORIGIN = "origin"
     MATCHED = "matched"
     UNCERTAIN_ORIGIN = "uncertain_origin"
+
+
+class SimilarityStatus(str, Enum):
+    NOT_ATTEMPTED = "not_attempted"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"
+    NO_REFERENCE = "no_reference"
+
+
+class ComparisonClass(str, Enum):
+    EXACT_SAME = "exact_same"
+    HIGH_SIMILARITY_WITH_EFFECTIVE_NEW = "high_similarity_with_effective_new"
+    HIGH_SIMILARITY_WITHOUT_EFFECTIVE_NEW = "high_similarity_without_effective_new"
+    CHANGED_WITH_EFFECTIVE_NEW = "changed_with_effective_new"
+    CHANGED_WITHOUT_EFFECTIVE_NEW = "changed_without_effective_new"
+    EMPTY_OR_UNAVAILABLE = "empty_or_unavailable"
+    UNCERTAIN = "uncertain"
+
+
+class EffectiveNewStatus(str, Enum):
+    PRESENT = "present"
+    POSSIBLE = "possible"
+    NONE = "none"
+    UNAVAILABLE = "unavailable"
+
+
+class EffectiveDecision(str, Enum):
+    EFFECTIVE = "effective"
+    INEFFECTIVE = "ineffective"
+    UNCERTAIN = "uncertain"
+
+
+class ReferenceResolutionStatus(str, Enum):
+    RESOLVED = "resolved"
+    NO_REFERENCE = "no_reference"
+    UNAVAILABLE = "unavailable"
+
+
+class ReferenceSource(str, Enum):
+    NONE = "none"
+    FORMAL_PREVIOUS_INDEX = "formal_previous_index"
+    EXPLICIT_RECORD = "explicit_record"
+    RECONSTRUCTED_FORMAL_INDEX = "reconstructed_formal_index"
+
+
+SIMILARITY_WARNING_CODES = (
+    "reference_missing", "reference_conflict", "reference_run_mismatch",
+    "reference_candidate_mismatch", "reference_capture_invalid",
+    "reference_index_invalid", "duplicate_screen_id_conflict",
+    "exact_hash_unavailable", "fingerprint_version_mismatch", "r04_not_completed",
+    "r05_not_attempted", "r05_partial", "r05_failed", "r05_projection_mismatch",
+    "segment_partition_invalid", "accounting_mismatch", "zero_effective_char_denominator",
+    "comparison_text_too_long", "simhash_unavailable", "effective_evidence_insufficient",
+    "ui_evidence_insufficient", "config_identity_mismatch", "legacy_reference_unavailable",
+    "sidecar_source_mismatch", "cross_layer_similarity_conflict", "evaluation_failed",
+)
+SIMILARITY_WARNING_CODE_SET = frozenset(SIMILARITY_WARNING_CODES)
 
 
 AGGREGATION_WARNING_CODES = frozenset({
@@ -262,10 +343,11 @@ def validate_capture_outcome(
             raise ValueError("aborted or interrupted captures require abort_reason")
     if (
         status == CaptureStatus.COMPLETED_WITH_LIMIT
-        and end_reason != "max_screen_limit"
+        and end_reason not in ("max_screen_limit", "scroll_bottom", "no_new_text")
     ):
         raise ValueError(
-            "completed_with_limit requires end_reason=max_screen_limit"
+            "completed_with_limit requires end_reason in"
+            " (max_screen_limit, scroll_bottom, no_new_text)"
         )
 
 
@@ -432,6 +514,345 @@ class OcrTextSegment(JsonRecordMixin):
         values["processing_status"] = _enum_value(
             ProcessingStatus,
             values.get("processing_status", ProcessingStatus.NOT_IMPLEMENTED),
+        )
+        return cls(**values)
+
+
+def _validate_similarity_warnings(warning_codes: Tuple[str, ...]) -> None:
+    if not isinstance(warning_codes, tuple):
+        raise ValueError("similarity warnings must be a tuple")
+    if any(code not in SIMILARITY_WARNING_CODE_SET for code in warning_codes):
+        raise ValueError("similarity warning code is invalid")
+    if len(set(warning_codes)) != len(warning_codes):
+        raise ValueError("similarity warning code is duplicated")
+    if tuple(sorted(warning_codes, key=SIMILARITY_WARNING_CODES.index)) != warning_codes:
+        raise ValueError("similarity warning codes are not canonical")
+
+
+@dataclass(frozen=True)
+class NgramScore(JsonRecordMixin):
+    n: int
+    weight: float
+    left_feature_count: int
+    right_feature_count: int
+    dice_score: float
+
+
+@dataclass(frozen=True)
+class EffectiveNewDecision(JsonRecordMixin):
+    segment_id: str
+    source_classification: str
+    decision: EffectiveDecision
+    reason_code: str
+    evidence_codes: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.source_classification not in ("new", "uncertain"):
+            raise ValueError("effective-new source classification is invalid")
+        if not isinstance(self.decision, EffectiveDecision):
+            raise ValueError("effective-new decision is invalid")
+        if not isinstance(self.evidence_codes, tuple):
+            raise ValueError("effective-new evidence codes must be a tuple")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EffectiveNewDecision":
+        values = _known_values(cls, data)
+        values["decision"] = _enum_value(EffectiveDecision, values["decision"])
+        values["evidence_codes"] = tuple(values.get("evidence_codes") or ())
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class ReferenceResolution(JsonRecordMixin):
+    status: ReferenceResolutionStatus
+    reference_screen_id: Optional[str]
+    reference_screen_index: Optional[int]
+    reference_capture_type: Optional[CaptureType]
+    reference_source: ReferenceSource
+    warning_codes: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, ReferenceResolutionStatus) or not isinstance(self.reference_source, ReferenceSource):
+            raise ValueError("reference resolution enum is invalid")
+        if self.reference_capture_type is not None and not isinstance(self.reference_capture_type, CaptureType):
+            raise ValueError("reference capture type is invalid")
+        _validate_similarity_warnings(self.warning_codes)
+        targets = (
+            self.reference_screen_id, self.reference_screen_index,
+            self.reference_capture_type,
+        )
+        if self.status == ReferenceResolutionStatus.RESOLVED:
+            if (
+                self.reference_screen_id is None
+                or self.reference_capture_type is None
+                or self.reference_source == ReferenceSource.NONE
+            ):
+                raise ValueError("resolved reference is incomplete")
+        elif self.status == ReferenceResolutionStatus.NO_REFERENCE:
+            if any(value is not None for value in targets) or self.reference_source != ReferenceSource.NONE or self.warning_codes:
+                raise ValueError("no-reference resolution is invalid")
+        elif self.status == ReferenceResolutionStatus.UNAVAILABLE:
+            if any(value is not None for value in targets) or self.reference_source == ReferenceSource.NONE or not self.warning_codes:
+                raise ValueError("unavailable reference is invalid")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ReferenceResolution":
+        values = _known_values(cls, data)
+        values["status"] = _enum_value(ReferenceResolutionStatus, values["status"])
+        values["reference_source"] = _enum_value(ReferenceSource, values["reference_source"])
+        if values.get("reference_capture_type") is not None:
+            values["reference_capture_type"] = _enum_value(CaptureType, values["reference_capture_type"])
+        values["warning_codes"] = tuple(values.get("warning_codes") or ())
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class OcrSimilarityResult(JsonRecordMixin):
+    similarity_status: SimilarityStatus = SimilarityStatus.NOT_ATTEMPTED
+    reference_screen_id: Optional[str] = None
+    reference_screen_index: Optional[int] = None
+    reference_capture_type: Optional[CaptureType] = None
+    reference_source: ReferenceSource = ReferenceSource.NONE
+    exact_same: Optional[bool] = None
+    reference_fingerprint_version: Optional[str] = None
+    reference_exact_hash: Optional[str] = None
+    similarity_score: Optional[float] = None
+    ngram_scores: Tuple[NgramScore, ...] = ()
+    current_simhash: Optional[str] = None
+    reference_simhash: Optional[str] = None
+    simhash_hamming_distance: Optional[int] = None
+    simhash_similarity_score: Optional[float] = None
+    overlap_char_count: Optional[int] = None
+    new_char_count: Optional[int] = None
+    uncertain_char_count: Optional[int] = None
+    current_effective_char_count: Optional[int] = None
+    overlap_segment_count: Optional[int] = None
+    new_segment_count: Optional[int] = None
+    uncertain_segment_count: Optional[int] = None
+    current_effective_segment_count: Optional[int] = None
+    overlap_ratio_numerator: Optional[int] = None
+    overlap_ratio_denominator: Optional[int] = None
+    overlap_ratio: Optional[float] = None
+    new_text_ratio_numerator: Optional[int] = None
+    new_text_ratio_denominator: Optional[int] = None
+    new_text_ratio: Optional[float] = None
+    uncertain_ratio_numerator: Optional[int] = None
+    uncertain_ratio_denominator: Optional[int] = None
+    uncertain_ratio: Optional[float] = None
+    effective_new_status: EffectiveNewStatus = EffectiveNewStatus.UNAVAILABLE
+    effective_new_decisions: Tuple[EffectiveNewDecision, ...] = ()
+    effective_new_segment_count: Optional[int] = None
+    ineffective_new_segment_count: Optional[int] = None
+    possible_new_segment_count: Optional[int] = None
+    effective_new_char_count: Optional[int] = None
+    possible_new_char_count: Optional[int] = None
+    has_effective_new_text: Optional[bool] = None
+    comparison_class: ComparisonClass = ComparisonClass.EMPTY_OR_UNAVAILABLE
+    similarity_version: Optional[str] = None
+    similarity_config_version: Optional[str] = None
+    similarity_config_digest: Optional[str] = None
+    warning_codes: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.similarity_status, SimilarityStatus)
+            or not isinstance(self.reference_source, ReferenceSource)
+            or not isinstance(self.effective_new_status, EffectiveNewStatus)
+            or not isinstance(self.comparison_class, ComparisonClass)
+        ):
+            raise ValueError("similarity enum is invalid")
+        if self.reference_capture_type is not None and not isinstance(self.reference_capture_type, CaptureType):
+            raise ValueError("similarity reference capture type is invalid")
+        _validate_similarity_warnings(self.warning_codes)
+        if not isinstance(self.ngram_scores, tuple) or not isinstance(self.effective_new_decisions, tuple):
+            raise ValueError("similarity collections must be tuples")
+        if self.similarity_config_digest is not None and (
+            not isinstance(self.similarity_config_digest, str)
+            or _SHA256_PATTERN.fullmatch(self.similarity_config_digest) is None
+        ):
+            raise ValueError("similarity config digest is invalid")
+        accounting_counts = (
+            self.overlap_char_count, self.new_char_count, self.uncertain_char_count,
+            self.current_effective_char_count, self.overlap_segment_count,
+            self.new_segment_count, self.uncertain_segment_count,
+            self.current_effective_segment_count,
+        )
+        accounting_ratios = (
+            (self.overlap_ratio_numerator, self.overlap_ratio_denominator, self.overlap_ratio),
+            (self.new_text_ratio_numerator, self.new_text_ratio_denominator, self.new_text_ratio),
+            (self.uncertain_ratio_numerator, self.uncertain_ratio_denominator, self.uncertain_ratio),
+        )
+        if any(value is not None for value in accounting_counts + tuple(value for ratio in accounting_ratios for value in ratio)):
+            if any(not _is_non_negative_int(value) for value in accounting_counts):
+                raise ValueError("similarity accounting count is invalid")
+            if self.overlap_char_count + self.new_char_count + self.uncertain_char_count != self.current_effective_char_count:
+                raise ValueError("similarity accounting character total is invalid")
+            if self.overlap_segment_count + self.new_segment_count + self.uncertain_segment_count != self.current_effective_segment_count:
+                raise ValueError("similarity accounting segment total is invalid")
+            numerators = (self.overlap_char_count, self.new_char_count, self.uncertain_char_count)
+            for numerator, (stored_numerator, denominator, ratio) in zip(numerators, accounting_ratios):
+                if not _is_non_negative_int(stored_numerator) or not _is_non_negative_int(denominator):
+                    raise ValueError("similarity accounting ratio fields are invalid")
+                if stored_numerator != numerator or denominator != self.current_effective_char_count:
+                    raise ValueError("similarity accounting ratio projection is invalid")
+                if denominator == 0:
+                    if ratio is not None or stored_numerator != 0:
+                        raise ValueError("zero similarity accounting denominator is invalid")
+                elif (
+                    not isinstance(ratio, float) or not math.isfinite(ratio)
+                    or not 0.0 <= ratio <= 1.0 or stored_numerator > denominator
+                    or abs(ratio - stored_numerator / denominator) > 1e-12
+                ):
+                    raise ValueError("similarity accounting ratio is invalid")
+            if self.current_effective_char_count > 0 and abs(sum(item[2] for item in accounting_ratios) - 1.0) > 1e-12:
+                raise ValueError("similarity accounting ratios do not reconcile")
+        effective_counts = (
+            self.effective_new_segment_count,
+            self.ineffective_new_segment_count,
+            self.possible_new_segment_count,
+            self.effective_new_char_count,
+            self.possible_new_char_count,
+        )
+        if self.effective_new_status == EffectiveNewStatus.UNAVAILABLE:
+            if (
+                self.effective_new_decisions
+                or any(value is not None for value in effective_counts)
+                or self.has_effective_new_text is not None
+            ):
+                raise ValueError(
+                    "unavailable effective-new status has derived fields"
+                )
+        else:
+            if (
+                any(not _is_non_negative_int(value) for value in effective_counts)
+                or not isinstance(self.has_effective_new_text, bool)
+            ):
+                raise ValueError("effective-new counts or boolean are invalid")
+            decision_counts = {
+                decision: sum(
+                    item.decision == decision
+                    for item in self.effective_new_decisions
+                )
+                for decision in EffectiveDecision
+            }
+            if (
+                decision_counts[EffectiveDecision.EFFECTIVE]
+                != self.effective_new_segment_count
+                or decision_counts[EffectiveDecision.INEFFECTIVE]
+                != self.ineffective_new_segment_count
+                or decision_counts[EffectiveDecision.UNCERTAIN]
+                != self.possible_new_segment_count
+            ):
+                raise ValueError(
+                    "effective-new decision counts do not reconcile"
+                )
+            expected_status = (
+                EffectiveNewStatus.PRESENT
+                if self.effective_new_segment_count > 0
+                else EffectiveNewStatus.POSSIBLE
+                if self.possible_new_segment_count > 0
+                else EffectiveNewStatus.NONE
+            )
+            if self.effective_new_status != expected_status:
+                raise ValueError("effective-new status does not match counts")
+            if self.has_effective_new_text != (
+                self.effective_new_segment_count > 0
+            ):
+                raise ValueError(
+                    "effective-new boolean does not match confirmed segments"
+                )
+        if self.similarity_status == SimilarityStatus.NOT_ATTEMPTED:
+            payload = tuple(getattr(self, item.name) for item in fields(self)[1:])
+            allowed = (ReferenceSource.NONE, EffectiveNewStatus.UNAVAILABLE, ComparisonClass.EMPTY_OR_UNAVAILABLE, (), (), None, None, None, ())
+            if any(value not in allowed for value in payload):
+                raise ValueError("not-attempted similarity has derived fields")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OcrSimilarityResult":
+        values = _known_values(cls, data)
+        for field_name, enum_type in (
+            ("similarity_status", SimilarityStatus),
+            ("reference_source", ReferenceSource),
+            ("effective_new_status", EffectiveNewStatus),
+            ("comparison_class", ComparisonClass),
+        ):
+            values[field_name] = _enum_value(enum_type, values[field_name])
+        if values.get("reference_capture_type") is not None:
+            values["reference_capture_type"] = _enum_value(CaptureType, values["reference_capture_type"])
+        values["ngram_scores"] = tuple(
+            item if isinstance(item, NgramScore) else NgramScore(**_known_values(NgramScore, item))
+            for item in values.get("ngram_scores") or ()
+        )
+        values["effective_new_decisions"] = tuple(
+            item if isinstance(item, EffectiveNewDecision) else EffectiveNewDecision.from_dict(item)
+            for item in values.get("effective_new_decisions") or ()
+        )
+        values["warning_codes"] = tuple(values.get("warning_codes") or ())
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class R06WarningCodeCount(JsonRecordMixin):
+    warning_code: str
+    count: int
+
+    def __post_init__(self) -> None:
+        if self.warning_code not in SIMILARITY_WARNING_CODE_SET or not _is_non_negative_int(self.count) or self.count == 0:
+            raise ValueError("similarity warning count is invalid")
+
+
+@dataclass(frozen=True)
+class R06CandidateSummary(JsonRecordMixin):
+    similarity_version: str
+    similarity_config_version: str
+    similarity_config_digest: str
+    screen_count: int
+    not_attempted_screen_count: int
+    completed_screen_count: int
+    partial_screen_count: int
+    failed_screen_count: int
+    unavailable_screen_count: int
+    no_reference_screen_count: int
+    exact_same_screen_count: int
+    high_similarity_with_effective_new_screen_count: int
+    high_similarity_without_effective_new_screen_count: int
+    changed_with_effective_new_screen_count: int
+    changed_without_effective_new_screen_count: int
+    empty_or_unavailable_screen_count: int
+    uncertain_screen_count: int
+    effective_present_screen_count: int
+    effective_possible_screen_count: int
+    effective_none_screen_count: int
+    effective_unavailable_screen_count: int
+    warning_count: int
+    warning_code_counts: Tuple[R06WarningCodeCount, ...] = ()
+
+    def __post_init__(self) -> None:
+        if _SHA256_PATTERN.fullmatch(self.similarity_config_digest) is None:
+            raise ValueError("similarity summary digest is invalid")
+        for item in fields(self)[3:-1]:
+            if not _is_non_negative_int(getattr(self, item.name)):
+                raise ValueError("similarity summary count is invalid")
+        if not isinstance(self.warning_code_counts, tuple):
+            raise ValueError("similarity warning counts must be a tuple")
+        codes = tuple(item.warning_code for item in self.warning_code_counts)
+        if len(set(codes)) != len(codes) or tuple(sorted(codes, key=SIMILARITY_WARNING_CODES.index)) != codes:
+            raise ValueError("similarity warning counts are not canonical")
+        if sum(item.count for item in self.warning_code_counts) != self.warning_count:
+            raise ValueError("similarity warning count does not reconcile")
+        if self.not_attempted_screen_count + self.completed_screen_count + self.partial_screen_count + self.failed_screen_count + self.unavailable_screen_count + self.no_reference_screen_count != self.screen_count:
+            raise ValueError("similarity status counts do not reconcile")
+        if self.exact_same_screen_count + self.high_similarity_with_effective_new_screen_count + self.high_similarity_without_effective_new_screen_count + self.changed_with_effective_new_screen_count + self.changed_without_effective_new_screen_count + self.empty_or_unavailable_screen_count + self.uncertain_screen_count != self.screen_count:
+            raise ValueError("similarity class counts do not reconcile")
+        if self.effective_present_screen_count + self.effective_possible_screen_count + self.effective_none_screen_count + self.effective_unavailable_screen_count != self.screen_count:
+            raise ValueError("similarity effective-new counts do not reconcile")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "R06CandidateSummary":
+        values = _known_values(cls, data)
+        values["warning_code_counts"] = tuple(
+            item if isinstance(item, R06WarningCodeCount) else R06WarningCodeCount(**_known_values(R06WarningCodeCount, item))
+            for item in values.get("warning_code_counts") or ()
         )
         return cls(**values)
 
@@ -832,7 +1253,13 @@ class OcrScreenRecord(JsonRecordMixin):
     uncertain_segment_count: Optional[int] = None
     uncertain_char_count: Optional[int] = None
     similarity_version: Optional[str] = None
+    similarity_result: Optional[OcrSimilarityResult] = None
     dynamic_end_version: Optional[str] = None
+    position_status: Optional[str] = None
+    page_change_status: Optional[str] = None
+    reference_screen_id: Optional[str] = None
+    is_position_confirmation: Optional[bool] = None
+    prediction_reason: Optional[str] = None
 
     def __post_init__(self) -> None:
         validate_timezone_iso(self.captured_at)
@@ -841,13 +1268,38 @@ class OcrScreenRecord(JsonRecordMixin):
             "storage_schema_version",
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
-        if self.storage_schema_version in (
-            R04_STORAGE_SCHEMA_VERSION,
-            STORAGE_SCHEMA_VERSION,
-        ):
+        if self.storage_schema_version in R04_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             self._validate_r04_contract()
-        if self.storage_schema_version == STORAGE_SCHEMA_VERSION:
+        if self.storage_schema_version in R05_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             self._validate_r05_contract()
+        if self.storage_schema_version in R06_AND_LATER_STORAGE_SCHEMA_VERSIONS:
+            self._validate_r06_contract()
+        if self.is_position_confirmation is not None and not isinstance(
+            self.is_position_confirmation, bool
+        ):
+            raise ValueError("is_position_confirmation must be a boolean or null")
+
+    def _validate_r06_contract(self) -> None:
+        projections = (
+            self.similarity_hash, self.similarity_score, self.overlap_ratio,
+            self.new_text_ratio, self.has_effective_new_text, self.similarity_version,
+        )
+        if self.similarity_result is None:
+            if any(value is not None for value in projections):
+                raise ValueError("missing similarity result requires null projections")
+            return
+        if not isinstance(self.similarity_result, OcrSimilarityResult):
+            raise ValueError("similarity result is invalid")
+        expected = (
+            self.similarity_result.current_simhash,
+            self.similarity_result.similarity_score,
+            self.similarity_result.overlap_ratio,
+            self.similarity_result.new_text_ratio,
+            self.similarity_result.has_effective_new_text,
+            self.similarity_result.similarity_version,
+        )
+        if projections != expected:
+            raise ValueError("similarity projection does not match nested result")
 
     def _validate_r04_contract(self) -> None:
         status = _enum_value(NormalizationStatus, self.normalization_status)
@@ -1076,15 +1528,28 @@ class OcrScreenRecord(JsonRecordMixin):
         if self.normalization_status != NormalizationStatus.COMPLETED:
             raise ValueError("successful aggregation requires completed normalization")
         segment_by_id = {segment.segment_id: segment for segment in self.segments}
-        classified = self.matched_segment_ids + self.new_segment_ids + self.uncertain_segment_ids
+        classification_groups = (
+            self.matched_segment_ids,
+            self.new_segment_ids,
+            self.uncertain_segment_ids,
+        )
+        classified = tuple(
+            identifier
+            for group in classification_groups
+            for identifier in group
+        )
         if (
             len(classified) != len(set(classified))
             or any(identifier not in segment_by_id for identifier in classified)
-            or classified != tuple(
-                segment.segment_id for segment in self.segments
-                if segment.segment_id in classified
-            )
             or set(classified) != set(segment_by_id)
+            or any(
+                group != tuple(
+                    segment.segment_id
+                    for segment in self.segments
+                    if segment.segment_id in set(group)
+                )
+                for group in classification_groups
+            )
         ):
             raise ValueError("aggregation segment classifications are invalid")
         evidence_ids = set()
@@ -1145,7 +1610,7 @@ class OcrScreenRecord(JsonRecordMixin):
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
         values = _known_values(cls, data)
-        if storage_version in (R04_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION):
+        if storage_version in R04_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             required_fields = (
                 "processing_status",
                 "normalization_status",
@@ -1160,7 +1625,7 @@ class OcrScreenRecord(JsonRecordMixin):
             )
             if any(field_name not in data for field_name in required_fields):
                 raise ValueError("R04 screen schema fields are incomplete")
-        if storage_version == STORAGE_SCHEMA_VERSION:
+        if storage_version in R05_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             required_aggregation_fields = (
                 "aggregation_status", "aggregation_version",
                 "aggregation_config_version", "aggregation_config_digest",
@@ -1209,7 +1674,7 @@ class OcrScreenRecord(JsonRecordMixin):
             values["line_mapping"] = ()
             values["duplicate_groups"] = ()
             values["normalization_warnings"] = ()
-        if storage_version != STORAGE_SCHEMA_VERSION:
+        if storage_version not in R05_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             values.update({
                 "aggregation_status": AggregationStatus.NOT_ATTEMPTED,
                 "aggregation_version": None,
@@ -1298,6 +1763,29 @@ class OcrScreenRecord(JsonRecordMixin):
             values["aggregation_duplicate_risk"] = _enum_value(
                 AggregationDuplicateRisk, values["aggregation_duplicate_risk"]
             )
+        if storage_version in R06_AND_LATER_STORAGE_SCHEMA_VERSIONS:
+            if "similarity_result" not in data:
+                raise ValueError("R06 screen schema fields are incomplete")
+            result = values.get("similarity_result")
+            if result is not None and not isinstance(result, OcrSimilarityResult):
+                values["similarity_result"] = OcrSimilarityResult.from_dict(result)
+        else:
+            values["similarity_result"] = None
+            for field_name in (
+                "similarity_hash", "similarity_score", "overlap_ratio",
+                "new_text_ratio", "has_effective_new_text", "similarity_version",
+            ):
+                values[field_name] = None
+        if storage_version != STORAGE_SCHEMA_VERSION:
+            for field_name in (
+                "dynamic_end_version",
+                "position_status",
+                "page_change_status",
+                "reference_screen_id",
+                "is_position_confirmation",
+                "prediction_reason",
+            ):
+                values[field_name] = None
         return cls(**values)
 
 
@@ -1410,6 +1898,81 @@ def recompute_aggregation_summary(
     return AggregationSummary(**counts)
 
 
+def recompute_similarity_summary(
+    screens: Tuple[OcrScreenRecord, ...],
+) -> R06CandidateSummary:
+    results = tuple(screen.similarity_result for screen in screens)
+    if any(result is None for result in results):
+        raise ValueError("cannot summarize missing similarity results")
+    return summarize_similarity_results(
+        tuple(result for result in results if result is not None)
+    )
+
+
+def summarize_similarity_results(
+    results: Sequence[OcrSimilarityResult],
+) -> R06CandidateSummary:
+    """Count already-validated R06 results into their candidate summary.
+
+    This is intentionally a narrow, screen-result-only primitive.  It keeps
+    the candidate schema validation and the Builder's summary fail-open path
+    on one accounting contract without revisiting OCR, R03/R04/R05, or R06
+    screen evaluation.
+    """
+
+    typed_results = tuple(results)
+    if any(not isinstance(result, OcrSimilarityResult) for result in typed_results):
+        raise TypeError("similarity summary result is invalid")
+    identities = {
+        (item.similarity_version, item.similarity_config_version, item.similarity_config_digest)
+        for item in typed_results
+    }
+    if len(identities) != 1:
+        raise ValueError("similarity summary identity is mixed or unavailable")
+    similarity_version, config_version, config_digest = next(iter(identities))
+    if not all(isinstance(value, str) and value for value in (similarity_version, config_version, config_digest)):
+        raise ValueError("similarity summary identity is invalid")
+    status_counts = {item: 0 for item in SimilarityStatus}
+    class_counts = {item: 0 for item in ComparisonClass}
+    effective_counts = {item: 0 for item in EffectiveNewStatus}
+    warning_counts = {item: 0 for item in SIMILARITY_WARNING_CODES}
+    for result in typed_results:
+        status_counts[result.similarity_status] += 1
+        class_counts[result.comparison_class] += 1
+        effective_counts[result.effective_new_status] += 1
+        for code in result.warning_codes:
+            warning_counts[code] += 1
+    warning_code_counts = tuple(
+        R06WarningCodeCount(code, warning_counts[code])
+        for code in SIMILARITY_WARNING_CODES if warning_counts[code]
+    )
+    return R06CandidateSummary(
+        similarity_version=similarity_version,
+        similarity_config_version=config_version,
+        similarity_config_digest=config_digest,
+        screen_count=len(typed_results),
+        not_attempted_screen_count=status_counts[SimilarityStatus.NOT_ATTEMPTED],
+        completed_screen_count=status_counts[SimilarityStatus.COMPLETED],
+        partial_screen_count=status_counts[SimilarityStatus.PARTIAL],
+        failed_screen_count=status_counts[SimilarityStatus.FAILED],
+        unavailable_screen_count=status_counts[SimilarityStatus.UNAVAILABLE],
+        no_reference_screen_count=status_counts[SimilarityStatus.NO_REFERENCE],
+        exact_same_screen_count=class_counts[ComparisonClass.EXACT_SAME],
+        high_similarity_with_effective_new_screen_count=class_counts[ComparisonClass.HIGH_SIMILARITY_WITH_EFFECTIVE_NEW],
+        high_similarity_without_effective_new_screen_count=class_counts[ComparisonClass.HIGH_SIMILARITY_WITHOUT_EFFECTIVE_NEW],
+        changed_with_effective_new_screen_count=class_counts[ComparisonClass.CHANGED_WITH_EFFECTIVE_NEW],
+        changed_without_effective_new_screen_count=class_counts[ComparisonClass.CHANGED_WITHOUT_EFFECTIVE_NEW],
+        empty_or_unavailable_screen_count=class_counts[ComparisonClass.EMPTY_OR_UNAVAILABLE],
+        uncertain_screen_count=class_counts[ComparisonClass.UNCERTAIN],
+        effective_present_screen_count=effective_counts[EffectiveNewStatus.PRESENT],
+        effective_possible_screen_count=effective_counts[EffectiveNewStatus.POSSIBLE],
+        effective_none_screen_count=effective_counts[EffectiveNewStatus.NONE],
+        effective_unavailable_screen_count=effective_counts[EffectiveNewStatus.UNAVAILABLE],
+        warning_count=sum(warning_counts.values()),
+        warning_code_counts=warning_code_counts,
+    )
+
+
 @dataclass(frozen=True)
 class CandidateOcrDocument(JsonRecordMixin):
     run_id: str
@@ -1432,8 +1995,24 @@ class CandidateOcrDocument(JsonRecordMixin):
     aggregation_warning_codes: Tuple[str, ...] = ()
     aggregation_duplicate_risk: Optional[AggregationDuplicateRisk] = None
     aggregation_summary: Optional[AggregationSummary] = None
+    similarity_summary: Optional[R06CandidateSummary] = None
     versions: Dict[str, Optional[str]] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    dynamic_end_mode: Optional[str] = None
+    dynamic_end_reason: Optional[str] = None
+    abort_reason: Optional[str] = None
+    scan_slot_count: Optional[int] = None
+    normal_scroll_count: Optional[int] = None
+    unique_position_count: Optional[int] = None
+    ocr_attempt_count: Optional[int] = None
+    scroll_retry_count: Optional[int] = None
+    focus_restore_count: Optional[int] = None
+    first_predicted_end_screen: Optional[int] = None
+    first_predicted_end_reason: Optional[str] = None
+    prediction_would_miss_content: Optional[bool] = None
+    prediction_would_miss_rule_match: Optional[bool] = None
+    prediction_observation_complete: Optional[bool] = None
+    prediction_evidence_complete: Optional[bool] = None
 
     def __post_init__(self) -> None:
         validate_timezone_iso(self.created_at)
@@ -1463,10 +2042,7 @@ class CandidateOcrDocument(JsonRecordMixin):
             object.__setattr__(self, "normalization_summary", expected_summary)
         elif self.normalization_summary != expected_summary:
             raise ValueError("candidate normalization summary does not match screens")
-        if self.storage_schema_version in (
-            R04_STORAGE_SCHEMA_VERSION,
-            STORAGE_SCHEMA_VERSION,
-        ):
+        if self.storage_schema_version in R04_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             attempted_versions = {
                 screen.normalization_version
                 for screen in self.screens
@@ -1482,8 +2058,46 @@ class CandidateOcrDocument(JsonRecordMixin):
             )
             if self.versions.get("normalization") != expected_version:
                 raise ValueError("candidate normalization version index is invalid")
-        if self.storage_schema_version == STORAGE_SCHEMA_VERSION:
+        if self.storage_schema_version in R05_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             self._validate_r05_contract()
+        if self.storage_schema_version in R06_AND_LATER_STORAGE_SCHEMA_VERSIONS:
+            self._validate_r06_contract()
+        if self.dynamic_end_mode is not None and self.dynamic_end_mode not in (
+            "off", "shadow", "safe", "full",
+        ):
+            raise ValueError("dynamic_end_mode is invalid")
+        for field_name in (
+            "scan_slot_count",
+            "normal_scroll_count",
+            "unique_position_count",
+            "ocr_attempt_count",
+            "scroll_retry_count",
+            "focus_restore_count",
+            "first_predicted_end_screen",
+        ):
+            _validate_non_negative_optional_count(field_name, getattr(self, field_name))
+        for field_name in (
+            "prediction_would_miss_content",
+            "prediction_would_miss_rule_match",
+            "prediction_observation_complete",
+            "prediction_evidence_complete",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, bool):
+                raise ValueError("{0} must be a boolean or null".format(field_name))
+
+    def _validate_r06_contract(self) -> None:
+        if self.similarity_summary is None:
+            if any(screen.similarity_result is not None for screen in self.screens):
+                raise ValueError("candidate similarity result requires a summary")
+            return
+        if not self.screens:
+            return
+        if any(screen.similarity_result is None for screen in self.screens):
+            raise ValueError("candidate similarity summary has a missing screen result")
+        expected = recompute_similarity_summary(self.screens)
+        if self.similarity_summary != expected:
+            raise ValueError("candidate similarity summary does not match screens")
 
     def _validate_r05_contract(self) -> None:
         status = _enum_value(DocumentBuildStatus, self.document_build_status)
@@ -1605,7 +2219,7 @@ class CandidateOcrDocument(JsonRecordMixin):
         summary = values["capture_summary"]
         if not isinstance(summary, CaptureSummary):
             values["capture_summary"] = CaptureSummary.from_dict(summary)
-        if storage_version == STORAGE_SCHEMA_VERSION:
+        if storage_version in R05_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             required_aggregation_fields = (
                 "document_build_status", "aggregation_config_version",
                 "aggregation_config_digest", "aggregation_warning_codes",
@@ -1642,7 +2256,15 @@ class CandidateOcrDocument(JsonRecordMixin):
                 "aggregation_duplicate_risk": None,
                 "aggregation_summary": None,
             })
-        if storage_version in (R04_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION) and "normalization_summary" not in data:
+        if storage_version in R06_AND_LATER_STORAGE_SCHEMA_VERSIONS:
+            if "similarity_summary" not in data:
+                raise ValueError("R06 candidate schema fields are incomplete")
+            summary = values.get("similarity_summary")
+            if summary is not None and not isinstance(summary, R06CandidateSummary):
+                values["similarity_summary"] = R06CandidateSummary.from_dict(summary)
+        else:
+            values["similarity_summary"] = None
+        if storage_version in R04_AND_LATER_STORAGE_SCHEMA_VERSIONS and "normalization_summary" not in data:
             raise ValueError("candidate normalization summary is required")
         normalization_summary = values.get("normalization_summary")
         if normalization_summary is not None and not isinstance(
@@ -1653,6 +2275,25 @@ class CandidateOcrDocument(JsonRecordMixin):
             )
         values["versions"] = dict(values.get("versions") or {})
         values["metadata"] = dict(values.get("metadata") or {})
+        if storage_version != STORAGE_SCHEMA_VERSION:
+            for field_name in (
+                "dynamic_end_mode",
+                "dynamic_end_reason",
+                "abort_reason",
+                "scan_slot_count",
+                "normal_scroll_count",
+                "unique_position_count",
+                "ocr_attempt_count",
+                "scroll_retry_count",
+                "focus_restore_count",
+                "first_predicted_end_screen",
+                "first_predicted_end_reason",
+                "prediction_would_miss_content",
+                "prediction_would_miss_rule_match",
+                "prediction_observation_complete",
+                "prediction_evidence_complete",
+            ):
+                values[field_name] = None
         return cls(**values)
 
 
@@ -1682,8 +2323,16 @@ class RunManifest(JsonRecordMixin):
     aggregation_config_version: Optional[str] = None
     aggregation_config_digest: Optional[str] = None
     aggregation_config: Optional[Dict[str, Any]] = None
+    similarity_mode: str = "disabled"
     similarity_version: Optional[str] = None
+    similarity_config_version: Optional[str] = None
+    similarity_config_digest: Optional[str] = None
+    similarity_config: Optional[Dict[str, Any]] = None
+    business_short_terms_version: Optional[str] = None
+    business_short_terms_digest: Optional[str] = None
     dynamic_end_version: Optional[str] = None
+    dynamic_end_mode: Optional[str] = None
+    dynamic_end_config: Optional[Dict[str, Any]] = None
     error_count: int = 0
     candidate_record_count: int = 0
     screen_record_count: int = 0
@@ -1697,10 +2346,7 @@ class RunManifest(JsonRecordMixin):
             "storage_schema_version",
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
-        if self.storage_schema_version in (
-            R04_STORAGE_SCHEMA_VERSION,
-            STORAGE_SCHEMA_VERSION,
-        ):
+        if self.storage_schema_version in R04_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             from ocr_normalization import normalization_config_from_snapshot
 
             _validate_config_identity(
@@ -1736,7 +2382,7 @@ class RunManifest(JsonRecordMixin):
                 for key, value in expected_snapshot_values.items()
             ):
                 raise ValueError("run manifest normalization config identity mismatch")
-        if self.storage_schema_version == STORAGE_SCHEMA_VERSION:
+        if self.storage_schema_version in R05_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             if self.aggregation_mode not in ("disabled", "record"):
                 raise ValueError("run manifest aggregation mode is invalid")
             aggregation_identity = (
@@ -1768,6 +2414,44 @@ class RunManifest(JsonRecordMixin):
                     or config.aggregation_config_version != self.aggregation_config_version
                 ):
                     raise ValueError("run manifest aggregation config identity mismatch")
+        if self.storage_schema_version in R06_AND_LATER_STORAGE_SCHEMA_VERSIONS:
+            similarity_identity = (
+                self.similarity_version, self.similarity_config_version,
+                self.similarity_config_digest, self.similarity_config,
+                self.business_short_terms_version, self.business_short_terms_digest,
+            )
+            if self.similarity_mode == "disabled":
+                if any(value is not None for value in similarity_identity):
+                    raise ValueError("disabled run manifest cannot have similarity identity")
+            elif self.similarity_mode == "record":
+                from ocr_similarity import (
+                    SIMILARITY_CONFIG_VERSION, SIMILARITY_VERSION,
+                    similarity_config_digest, similarity_config_from_snapshot,
+                )
+                if not isinstance(self.similarity_config, dict):
+                    raise ValueError("record run manifest requires similarity config")
+                try:
+                    config = similarity_config_from_snapshot(self.similarity_config)
+                except ValueError as exc:
+                    raise ValueError("run manifest similarity config is invalid") from exc
+                if (
+                    self.similarity_version != SIMILARITY_VERSION
+                    or self.similarity_config_version != SIMILARITY_CONFIG_VERSION
+                    or self.similarity_config_digest != similarity_config_digest(self.similarity_config)
+                    or self.business_short_terms_version != config.business_short_terms_version
+                    or self.business_short_terms_digest != config.business_short_terms_digest()
+                ):
+                    raise ValueError("run manifest similarity config identity mismatch")
+            else:
+                raise ValueError("run manifest similarity mode is invalid")
+        if self.dynamic_end_mode is not None and self.dynamic_end_mode not in (
+            "off", "shadow", "safe", "full",
+        ):
+            raise ValueError("run manifest dynamic end mode is invalid")
+        if self.dynamic_end_config is not None and not isinstance(
+            self.dynamic_end_config, dict
+        ):
+            raise ValueError("run manifest dynamic end config must be a mapping or null")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RunManifest":
@@ -1777,7 +2461,7 @@ class RunManifest(JsonRecordMixin):
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
         values = _known_values(cls, data)
-        if storage_version == STORAGE_SCHEMA_VERSION:
+        if storage_version in R05_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             required_aggregation_fields = (
                 "aggregation_mode", "aggregation_version",
                 "aggregation_config_version", "aggregation_config_digest",
@@ -1800,7 +2484,7 @@ class RunManifest(JsonRecordMixin):
                 "rule_evaluation_mode",
             ):
                 values[field_name] = None
-        if storage_version != STORAGE_SCHEMA_VERSION:
+        if storage_version not in R05_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             values.update({
                 "aggregation_mode": "disabled",
                 "aggregation_version": None,
@@ -1812,4 +2496,27 @@ class RunManifest(JsonRecordMixin):
             values["normalization_config"] = dict(values["normalization_config"])
         if values.get("aggregation_config") is not None:
             values["aggregation_config"] = dict(values["aggregation_config"])
+        if storage_version in R06_AND_LATER_STORAGE_SCHEMA_VERSIONS:
+            required_similarity_fields = (
+                "similarity_mode", "similarity_version", "similarity_config_version",
+                "similarity_config_digest", "similarity_config", "business_short_terms_version",
+                "business_short_terms_digest",
+            )
+            if any(field_name not in data for field_name in required_similarity_fields):
+                raise ValueError("R06 run manifest fields are incomplete")
+            if values.get("similarity_config") is not None:
+                values["similarity_config"] = dict(values["similarity_config"])
+        else:
+            values.update({
+                "similarity_mode": "disabled", "similarity_version": None,
+                "similarity_config_version": None, "similarity_config_digest": None,
+                "similarity_config": None, "business_short_terms_version": None,
+                "business_short_terms_digest": None,
+            })
+        if storage_version != STORAGE_SCHEMA_VERSION:
+            values["dynamic_end_version"] = None
+            values["dynamic_end_mode"] = None
+            values["dynamic_end_config"] = None
+        elif values.get("dynamic_end_config") is not None:
+            values["dynamic_end_config"] = dict(values["dynamic_end_config"])
         return cls(**values)

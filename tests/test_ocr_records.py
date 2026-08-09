@@ -1,12 +1,18 @@
 import json
 import unittest
-from dataclasses import replace
+from dataclasses import fields as dataclass_fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ocr_records import (
     DOCUMENT_VERSION,
     DocumentBuildStatus,
+    ComparisonClass,
+    EffectiveDecision,
+    EffectiveNewDecision,
+    EffectiveNewStatus,
+    OcrSimilarityResult,
+    ReferenceSource,
     STORAGE_SCHEMA_VERSION,
     SUPPORTED_STORAGE_SCHEMA_VERSIONS,
     CandidateOcrDocument,
@@ -21,8 +27,11 @@ from ocr_records import (
     OcrTextSegment,
     ProcessingStatus,
     RecordVersionError,
+    R06_STORAGE_SCHEMA_VERSION,
     RunManifest,
     RunStatus,
+    SimilarityStatus,
+    recompute_similarity_summary,
     json_dumps,
     timezone_iso,
     to_json_compatible,
@@ -32,6 +41,13 @@ from ocr_normalization import (
     NORMALIZATION_VERSION,
     canonical_normalization_config,
     normalization_config_digest,
+)
+from ocr_similarity import (
+    DEFAULT_OCR_SIMILARITY_CONFIG,
+    SIMILARITY_CONFIG_VERSION,
+    SIMILARITY_VERSION,
+    canonical_similarity_config,
+    similarity_config_digest,
 )
 
 
@@ -130,6 +146,36 @@ class OcrRecordModelTests(unittest.TestCase):
         self.assertEqual(restored.legacy_rule_index, 0)
         self.assertIsNone(restored.r04_rule_index)
 
+    def test_r07_screen_fields_round_trip_and_r06_reader_defaults_unknown(self):
+        screen = replace(
+            self.make_screen(),
+            dynamic_end_version="r07-v1",
+            position_status="same",
+            page_change_status="same",
+            reference_screen_id="screen-previous",
+            is_position_confirmation=True,
+            prediction_reason="possible_scroll_bottom",
+        )
+
+        restored = OcrScreenRecord.from_dict(json.loads(screen.to_json()))
+        self.assertEqual(restored, screen)
+
+        legacy_r06 = screen.to_dict()
+        legacy_r06["storage_schema_version"] = R06_STORAGE_SCHEMA_VERSION
+        for field_name in (
+            "dynamic_end_version",
+            "position_status",
+            "page_change_status",
+            "reference_screen_id",
+            "is_position_confirmation",
+            "prediction_reason",
+        ):
+            legacy_r06.pop(field_name, None)
+        restored_r06 = OcrScreenRecord.from_dict(legacy_r06)
+        self.assertIsNone(restored_r06.dynamic_end_version)
+        self.assertIsNone(restored_r06.position_status)
+        self.assertIsNone(restored_r06.is_position_confirmation)
+
     def test_raw_text_is_not_normalized_or_modified(self):
         raw_text = "  C++\tC#\n.NET  SLG+X 0-1 2D/3D  "
         box = OcrBox("box", raw_text, 0.9, None, 0, None)
@@ -177,6 +223,20 @@ class OcrRecordModelTests(unittest.TestCase):
                 "dynamic_end": None,
             },
             metadata={"source": "虚构测试"},
+            dynamic_end_mode="shadow",
+            dynamic_end_reason=None,
+            scan_slot_count=1,
+            normal_scroll_count=0,
+            unique_position_count=1,
+            ocr_attempt_count=2,
+            scroll_retry_count=0,
+            focus_restore_count=0,
+            first_predicted_end_screen=None,
+            first_predicted_end_reason=None,
+            prediction_would_miss_content=None,
+            prediction_would_miss_rule_match=None,
+            prediction_observation_complete=None,
+            prediction_evidence_complete=None,
         )
 
         restored = CandidateOcrDocument.from_dict(
@@ -191,6 +251,9 @@ class OcrRecordModelTests(unittest.TestCase):
         self.assertEqual(
             restored.storage_schema_version, STORAGE_SCHEMA_VERSION
         )
+        self.assertEqual(restored.dynamic_end_mode, "shadow")
+        self.assertIsNone(restored.dynamic_end_reason)
+        self.assertIsNone(restored.prediction_would_miss_content)
 
     def test_unknown_additive_fields_are_ignored_during_restore(self):
         data = self.make_screen().to_dict()
@@ -285,6 +348,9 @@ class OcrRecordModelTests(unittest.TestCase):
             effective_min_confidence=config.effective_min_confidence,
             normalization_config=snapshot,
             rule_evaluation_mode="legacy_shadow",
+            dynamic_end_version="r07-v1",
+            dynamic_end_mode="shadow",
+            dynamic_end_config={"no_new_text_threshold": 2},
             data_files={"screens": Path("screens.jsonl")},
         )
 
@@ -295,7 +361,11 @@ class OcrRecordModelTests(unittest.TestCase):
         self.assertEqual(restored.normalization_version, NORMALIZATION_VERSION)
         self.assertIsNone(restored.aggregation_version)
         self.assertIsNone(restored.similarity_version)
-        self.assertIsNone(restored.dynamic_end_version)
+        self.assertEqual(restored.dynamic_end_version, "r07-v1")
+        self.assertEqual(restored.dynamic_end_mode, "shadow")
+        self.assertEqual(
+            restored.dynamic_end_config, {"no_new_text_threshold": 2}
+        )
 
     def test_recursive_conversion_supports_datetime_path_tuple_and_optional(self):
         value = {
@@ -405,6 +475,140 @@ class OcrRecordModelTests(unittest.TestCase):
                 ),
                 rule_evaluation_mode="legacy_shadow",
             )
+
+    def test_r06_disabled_round_trip_and_nested_projection_contract(self):
+        screen = self.make_screen()
+        self.assertEqual(screen.storage_schema_version, "1.4.0")
+        self.assertIsNone(screen.similarity_result)
+        restored = OcrScreenRecord.from_dict(screen.to_dict())
+        self.assertEqual(restored, screen)
+        with self.assertRaisesRegex(ValueError, "projection"):
+            replace(screen, similarity_score=0.0)
+
+        result = OcrSimilarityResult()
+        nested = replace(screen, similarity_result=result)
+        self.assertEqual(nested.similarity_result, result)
+        self.assertEqual(
+            tuple(item.name for item in dataclass_fields(OcrSimilarityResult))[:6],
+            ("similarity_status", "reference_screen_id", "reference_screen_index", "reference_capture_type", "reference_source", "exact_same"),
+        )
+
+    def test_r06_old_schemas_restore_without_similarity(self):
+        for version in ("1.0.0", "1.1.0", "1.2.0"):
+            data = self.make_screen().to_dict()
+            data["storage_schema_version"] = version
+            if version == "1.0.0":
+                for name in ("normalized_text", "comparison_text", "segments"):
+                    data.pop(name, None)
+            restored = OcrScreenRecord.from_dict(data)
+            self.assertIsNone(restored.similarity_result)
+
+    def test_r06_result_rejects_false_zero_and_invalid_warning(self):
+        with self.assertRaises(ValueError):
+            OcrSimilarityResult(similarity_score=0.0)
+        with self.assertRaises(ValueError):
+            OcrSimilarityResult(has_effective_new_text=False)
+        with self.assertRaises(ValueError):
+            OcrSimilarityResult(warning_codes=("private OCR text",))
+
+    def test_r06_result_validates_frozen_accounting_projection(self):
+        result = OcrSimilarityResult(
+            similarity_status=SimilarityStatus.PARTIAL,
+            comparison_class=ComparisonClass.UNCERTAIN,
+            overlap_char_count=3, new_char_count=1, uncertain_char_count=0,
+            current_effective_char_count=4, overlap_segment_count=1,
+            new_segment_count=1, uncertain_segment_count=0,
+            current_effective_segment_count=2, overlap_ratio_numerator=3,
+            overlap_ratio_denominator=4, overlap_ratio=0.75,
+            new_text_ratio_numerator=1, new_text_ratio_denominator=4,
+            new_text_ratio=0.25, uncertain_ratio_numerator=0,
+            uncertain_ratio_denominator=4, uncertain_ratio=0.0,
+        )
+        self.assertEqual(result.current_effective_char_count, 4)
+        with self.assertRaises(ValueError):
+            OcrSimilarityResult(
+                similarity_status=SimilarityStatus.PARTIAL,
+                overlap_char_count=1, new_char_count=0, uncertain_char_count=0,
+                current_effective_char_count=1, overlap_segment_count=1,
+                new_segment_count=0, uncertain_segment_count=0,
+                current_effective_segment_count=1, overlap_ratio_numerator=1,
+                overlap_ratio_denominator=1, overlap_ratio=1.0,
+                new_text_ratio_numerator=0, new_text_ratio_denominator=1,
+                new_text_ratio=0.0, uncertain_ratio_numerator=0,
+                uncertain_ratio_denominator=1, uncertain_ratio=0.1,
+            )
+
+    def test_possible_effective_new_requires_zero_confirmed_and_false_boolean(self):
+        decision = EffectiveNewDecision(
+            "screen:line:0",
+            "uncertain",
+            EffectiveDecision.UNCERTAIN,
+            "source_uncertain",
+            ("r05_uncertain",),
+        )
+        possible = OcrSimilarityResult(
+            similarity_status=SimilarityStatus.PARTIAL,
+            effective_new_status=EffectiveNewStatus.POSSIBLE,
+            effective_new_decisions=(decision,),
+            effective_new_segment_count=0,
+            ineffective_new_segment_count=0,
+            possible_new_segment_count=1,
+            effective_new_char_count=0,
+            possible_new_char_count=8,
+            has_effective_new_text=False,
+            comparison_class=ComparisonClass.UNCERTAIN,
+        )
+
+        self.assertFalse(possible.has_effective_new_text)
+        self.assertEqual(possible.effective_new_segment_count, 0)
+        with self.assertRaisesRegex(ValueError, "confirmed segments"):
+            replace(possible, has_effective_new_text=True)
+
+    def test_r06_manifest_record_identity_and_required_keys(self):
+        normalization_snapshot = canonical_normalization_config(DEFAULT_OCR_NORMALIZATION_CONFIG)
+        config = DEFAULT_OCR_SIMILARITY_CONFIG
+        similarity_snapshot = canonical_similarity_config(config)
+        manifest = RunManifest(
+            run_id="run-r06", started_at="2026-07-30T12:00:00+08:00",
+            status=RunStatus.RUNNING, platform="Windows", python_version="3.13",
+            data_files={}, normalization_version=NORMALIZATION_VERSION,
+            normalization_config_version=DEFAULT_OCR_NORMALIZATION_CONFIG.normalization_config_version,
+            normalization_config_digest=normalization_config_digest(normalization_snapshot),
+            effective_min_confidence=DEFAULT_OCR_NORMALIZATION_CONFIG.effective_min_confidence,
+            normalization_config=normalization_snapshot, rule_evaluation_mode="legacy_shadow",
+            similarity_mode="record", similarity_version=SIMILARITY_VERSION,
+            similarity_config_version=SIMILARITY_CONFIG_VERSION,
+            similarity_config_digest=similarity_config_digest(similarity_snapshot),
+            similarity_config=similarity_snapshot,
+            business_short_terms_version=config.business_short_terms_version,
+            business_short_terms_digest=config.business_short_terms_digest(),
+        )
+        self.assertEqual(RunManifest.from_dict(manifest.to_dict()), manifest)
+        missing = manifest.to_dict()
+        missing.pop("similarity_mode")
+        with self.assertRaisesRegex(ValueError, "R06 run manifest"):
+            RunManifest.from_dict(missing)
+
+    def test_r06_summary_recomputes_frozen_count_partitions(self):
+        result = OcrSimilarityResult(
+            similarity_status=SimilarityStatus.UNAVAILABLE,
+            reference_source=ReferenceSource.EXPLICIT_RECORD,
+            effective_new_status=EffectiveNewStatus.UNAVAILABLE,
+            comparison_class=ComparisonClass.EMPTY_OR_UNAVAILABLE,
+            similarity_version="r06-v1", similarity_config_version="r06-config-v1",
+            similarity_config_digest="a" * 64,
+            warning_codes=("reference_missing",),
+        )
+        screen = replace(
+            self.make_screen(), similarity_result=result,
+            similarity_version="r06-v1",
+        )
+        summary = recompute_similarity_summary((screen,))
+        self.assertEqual(summary.screen_count, 1)
+        self.assertEqual(summary.unavailable_screen_count, 1)
+        self.assertEqual(summary.empty_or_unavailable_screen_count, 1)
+        self.assertEqual(summary.effective_unavailable_screen_count, 1)
+        self.assertEqual(summary.warning_count, 1)
 
 
 if __name__ == "__main__":

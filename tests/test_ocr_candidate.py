@@ -4,6 +4,8 @@ import unittest
 import weakref
 from unittest.mock import patch
 
+import ocr_candidate
+
 from ocr_candidate import (
     CandidateBuilderFinalizedError,
     CandidateOcrBuilder,
@@ -33,6 +35,8 @@ class CandidateOcrBuilderTests(unittest.TestCase):
             sequence,
             created_at="2026-07-30T12:00:00+08:00",
             metadata={"candidate_in_batch": sequence},
+            aggregation_mode="disabled",
+            similarity_mode="disabled",
         )
 
     def add_screen(
@@ -138,6 +142,158 @@ class CandidateOcrBuilderTests(unittest.TestCase):
         self.assertEqual(document.document_build_status, DocumentBuildStatus.COMPLETED)
         self.assertEqual(document.versions["aggregation"], "r05-v1")
         self.assertEqual(document.document_text, item.text)
+
+    def test_r05_validation_failure_does_not_half_commit_builder_state(self):
+        builder = CandidateOcrBuilder(
+            "run-test", 1, candidate_record_id="candidate-r05-atomic",
+            aggregation_mode="record", similarity_mode="disabled",
+        )
+
+        def build(screen_id, screen_index, text):
+            item = OCRItem(
+                text, 0.96, ((0, 0), (180, 0), (180, 20), (0, 20)),
+            )
+            normalization = normalize_ocr_text((NormalizationBox(
+                "{0}:box:0".format(screen_id), item.text, item.box, 0,
+                item.confidence,
+            ),))
+            return builder.build_screen_record(
+                (item,), capture_type=CaptureType.FORMAL_SCREEN,
+                is_formal_screen=True, screen_index=screen_index,
+                screen_id=screen_id, normalization=normalization,
+                ocr_min_confidence=0.85,
+            )
+
+        real_projection = ocr_candidate.aggregation_screen_record_fields
+
+        def invalid_projection(record, result, config):
+            fields = real_projection(record, result, config)
+            if record.screen_id == "r05-failed":
+                fields["new_segment_ids"] = ()
+            return fields
+
+        seed = build("r05-seed", 1, "第一屏已提交的合成内容")
+
+        with patch(
+            "ocr_candidate.aggregation_screen_record_fields",
+            side_effect=invalid_projection,
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "aggregation segment classifications",
+            ):
+                build("r05-failed", 2, "仅用于触发合法的测试校验失败")
+
+        self.assertEqual(builder.retained_screen_count, 1)
+        valid = build("r05-valid", 2, "随后成功保存的第二屏合成内容")
+        self.assertEqual(valid.attempt_index, 1)
+        self.assertEqual(valid.aggregation_status.value, "completed")
+
+        document = builder.finalize(
+            CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+        )
+        self.assertEqual(document.screens, (seed, valid))
+        self.assertEqual(document.capture_summary.actual_screen_count, 2)
+        self.assertNotIn(
+            "r05-failed",
+            tuple(
+                occurrence.source_screen_id
+                for segment in document.document_segments
+                for occurrence in segment.source_occurrences
+            ),
+        )
+
+    def test_r06_projection_failure_does_not_half_commit_context(self):
+        builder = CandidateOcrBuilder(
+            "run-test", 1, candidate_record_id="candidate-r06-atomic",
+            aggregation_mode="record", similarity_mode="record",
+        )
+
+        def build(screen_id, screen_index):
+            item = OCRItem(
+                "合成 R06 原子性内容", 0.96,
+                ((0, 0), (180, 0), (180, 20), (0, 20)),
+            )
+            normalization = normalize_ocr_text((NormalizationBox(
+                "{0}:box:0".format(screen_id), item.text, item.box, 0,
+                item.confidence,
+            ),))
+            return builder.build_screen_record(
+                (item,), capture_type=CaptureType.FORMAL_SCREEN,
+                is_formal_screen=True, screen_index=screen_index,
+                screen_id=screen_id, normalization=normalization,
+                ocr_min_confidence=0.85,
+            )
+
+        real_apply = CandidateOcrBuilder._apply_similarity
+
+        def fail_after_evaluation(self, record, **kwargs):
+            projected = real_apply(self, record, **kwargs)
+            if record.screen_id == "r06-failed":
+                raise ValueError("synthetic post-R06 validation failure")
+            return projected
+
+        seed = build("r06-seed", 1)
+
+        with patch.object(
+            CandidateOcrBuilder, "_apply_similarity",
+            new=fail_after_evaluation,
+        ):
+            with self.assertRaisesRegex(ValueError, "post-R06"):
+                build("r06-failed", 2)
+
+        self.assertEqual(builder.retained_screen_count, 1)
+        valid = build("r06-valid", 2)
+        self.assertEqual(valid.attempt_index, 1)
+        self.assertEqual(valid.similarity_result.similarity_status.value, "partial")
+        self.assertEqual(valid.similarity_result.reference_screen_id, seed.screen_id)
+        self.assertEqual(len(builder._similarity_evaluator._formal), 2)
+        self.assertNotIn(
+            "r06-failed",
+            tuple(screen.screen_id for screen in builder._similarity_evaluator._formal),
+        )
+
+        document = builder.finalize(
+            CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+        )
+        self.assertEqual(document.screens, (seed, valid))
+        self.assertEqual(document.similarity_summary.screen_count, 2)
+
+    def test_deferred_screen_state_commits_only_after_store_success(self):
+        builder = CandidateOcrBuilder(
+            "run-test", 1, candidate_record_id="candidate-store-atomic",
+            aggregation_mode="record", similarity_mode="record",
+        )
+        item = self.make_item("pending")
+        screen_id = "screen-pending"
+        normalization = normalize_ocr_text((NormalizationBox(
+            "{0}:box:0".format(screen_id), item.text, item.box, 0,
+            item.confidence,
+        ),))
+        pending = builder.build_screen_record(
+            (item,), capture_type=CaptureType.FORMAL_SCREEN,
+            is_formal_screen=True, screen_index=1, screen_id=screen_id,
+            normalization=normalization, ocr_min_confidence=0.85,
+            defer_commit=True,
+        )
+
+        self.assertEqual(builder.retained_screen_count, 0)
+        self.assertTrue(builder.discard_screen_record(pending))
+        self.assertEqual(builder.retained_screen_count, 0)
+
+        committed = builder.build_screen_record(
+            (item,), capture_type=CaptureType.FORMAL_SCREEN,
+            is_formal_screen=True, screen_index=1,
+            screen_id="screen-committed", normalization=normalize_ocr_text((
+                NormalizationBox(
+                    "screen-committed:box:0", item.text, item.box, 0,
+                    item.confidence,
+                ),
+            )), ocr_min_confidence=0.85, defer_commit=True,
+        )
+        builder.commit_screen_record(committed)
+
+        self.assertEqual(committed.attempt_index, 1)
+        self.assertEqual(builder.retained_screen_count, 1)
 
     def test_screen_record_flattens_legacy_shadow_result(self):
         builder = self.make_builder()
@@ -462,6 +618,26 @@ class CandidateOcrBuilderTests(unittest.TestCase):
         gc.collect()
 
         self.assertIsNone(reference())
+
+    def test_finalize_releases_candidate_context_when_document_construction_fails(self):
+        builder = CandidateOcrBuilder(
+            "run-test", 1, candidate_record_id="finalize-construction-failure",
+            aggregation_mode="record", similarity_mode="record",
+        )
+        self.add_screen(builder, 1)
+
+        with (
+            patch("ocr_candidate.CandidateOcrDocument", side_effect=RuntimeError("synthetic")),
+            self.assertRaisesRegex(RuntimeError, "synthetic"),
+        ):
+            builder.finalize(
+                CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+            )
+
+        self.assertTrue(builder.finalized)
+        self.assertEqual(builder.retained_screen_count, 0)
+        self.assertIsNone(builder._aggregator)
+        self.assertIsNone(builder._similarity_evaluator)
 
     def test_invalid_naive_timestamps_and_post_finalize_add_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "timezone"):

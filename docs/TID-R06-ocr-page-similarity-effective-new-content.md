@@ -5,9 +5,9 @@
 | 项目 | 值 |
 |---|---|
 | 需求 | R06 OCR 页面相似度、文本重叠率与有效新增量 |
-| 文档版本 | 1.0 |
+| 文档版本 | 1.1 |
 | 日期 | 2026-08-01 |
-| 状态 | Change 1 设计冻结；尚未实施 |
+| 状态 | Change 2 前置合同 Corrective 已冻结；尚未实施 |
 | 当前 HEAD | `cd5d96c731caed07f7b841c437b2ee9f5086ffd0` |
 | 当前 writer Schema | 工作区 R05 `1.2.0`；HEAD `1.1.0` |
 | R06 目标 Schema | `1.3.0` |
@@ -223,9 +223,55 @@ EffectiveNewStatus:
 
 EffectiveDecision:
   effective | ineffective | uncertain
+
+ReferenceResolutionStatus:
+  resolved | no_reference | unavailable
+
+ReferenceSource:
+  none | formal_previous_index | explicit_record | reconstructed_formal_index
 ```
 
-### 4.3 `OcrSimilarityResult` 字段顺序、类型与 null
+### 4.3 `ReferenceResolution` 字段与状态合同
+
+**[设计冻结]** `ReferenceResolution` 是 resolver 的唯一返回 value type。字段声明顺序即 dataclass/JSON 序列化顺序：
+
+```text
+1. status: ReferenceResolutionStatus
+2. reference_screen_id: Optional[str]
+3. reference_screen_index: Optional[int]
+4. reference_capture_type: Optional[CaptureType]
+5. reference_source: ReferenceSource
+6. warning_codes: tuple[str, ...]
+```
+
+状态合同：
+
+| status | 字段合同 |
+|---|---|
+| `resolved` | `reference_screen_id` 和 `reference_capture_type` 非 null；`reference_source != none`；正式屏 reference 的 `reference_screen_index` 非 null；`warning_codes` 通常为空，若存在只能是不会否定 resolution 的白名单 warning |
+| `no_reference` | 仅用于首个正式屏；三个 reference 目标字段均为 null；`reference_source=none`；`warning_codes=()` |
+| `unavailable` | 三个 reference 目标字段均为 null；`warning_codes` 至少一个；`reference_source` 保存本次尝试的策略且不得为 `none`，不得用一个未验证目标冒充 resolved reference |
+
+投影合同：
+
+```text
+resolved
+  -> OcrSimilarityResult 复制 reference_screen_id、reference_screen_index、
+     reference_capture_type、reference_source
+  -> evaluator 再根据 R03/R04/R05 和算法结果决定 completed/partial/failed
+
+no_reference
+  -> similarity_status = no_reference
+  -> comparison_class = empty_or_unavailable
+
+unavailable
+  -> similarity_status = unavailable
+  -> comparison_class = empty_or_unavailable
+```
+
+resolution 的 `warning_codes` 必须合并到 result `warning_codes`。合并只允许第 4.6 节白名单成员，按白名单声明顺序稳定去重；同一 code 无论 resolver/evaluator 出现多少次，在同一 result 中只保存一次。
+
+### 4.4 `OcrSimilarityResult` 字段顺序、类型与 null
 
 以下顺序即 dataclass/JSON 序列化顺序：
 
@@ -235,7 +281,7 @@ EffectiveDecision:
 | `reference_screen_id` | `str?` | no_reference/unavailable 时 null |
 | `reference_screen_index` | `int?` | 非正式或无 ref 可 null |
 | `reference_capture_type` | enum? | 无可靠 ref 时 null |
-| `reference_source` | `str` | `none/formal_previous_index/explicit_record/reconstructed_formal_index` |
+| `reference_source` | `ReferenceSource` | `none/formal_previous_index/explicit_record/reconstructed_formal_index` |
 | `exact_same` | `bool?` | hash/version 不可比时 null |
 | `reference_fingerprint_version` | `str?` | 无可靠 ref/hash 时 null |
 | `reference_exact_hash` | `str?` | 无可靠 ref/hash 时 null |
@@ -280,7 +326,87 @@ EffectiveDecision:
 
 `EffectiveNewDecision` 固定字段顺序为 `segment_id`、`source_classification` (`new/uncertain`)、`decision`、`reason_code`、`evidence_codes`。
 
-### 4.4 Warning codes
+### 4.5 `R06CandidateSummary` 字段、存在语义与会计
+
+**[设计冻结]** `R06CandidateSummary` 字段声明顺序即 dataclass/JSON 序列化顺序：
+
+```text
+1. similarity_version: str
+2. similarity_config_version: str
+3. similarity_config_digest: str
+4. screen_count: int
+5. not_attempted_screen_count: int
+6. completed_screen_count: int
+7. partial_screen_count: int
+8. failed_screen_count: int
+9. unavailable_screen_count: int
+10. no_reference_screen_count: int
+11. exact_same_screen_count: int
+12. high_similarity_with_effective_new_screen_count: int
+13. high_similarity_without_effective_new_screen_count: int
+14. changed_with_effective_new_screen_count: int
+15. changed_without_effective_new_screen_count: int
+16. empty_or_unavailable_screen_count: int
+17. uncertain_screen_count: int
+18. effective_present_screen_count: int
+19. effective_possible_screen_count: int
+20. effective_none_screen_count: int
+21. effective_unavailable_screen_count: int
+22. warning_count: int
+23. warning_code_counts: tuple[R06WarningCodeCount, ...]
+```
+
+`R06WarningCodeCount` 字段声明/JSON 顺序为：
+
+```text
+1. warning_code: str
+2. count: int
+```
+
+`warning_code_counts` 只保存 `count > 0` 的 warning，按第 4.6 节 warning 白名单声明顺序排列。同一 screen 的同一 warning 最多计数一次；这与 screen result 内 warning 已稳定去重的合同一致。
+
+存在语义：
+
+| Schema/mode | `similarity_summary` |
+|---|---|
+| Schema 1.0—1.2 | null |
+| Schema 1.3 disabled | null |
+| Schema 1.3 record | 必须存在 |
+
+Schema 1.3 record 即使没有 screen 也必须保存合法空 summary：identity 三字段与 RunManifest 完全一致，`screen_count=0`，所有 count 为 0，`warning_code_counts=()`。
+
+Summary 会计合同：
+
+```text
+not_attempted_screen_count
+  + completed_screen_count
+  + partial_screen_count
+  + failed_screen_count
+  + unavailable_screen_count
+  + no_reference_screen_count
+= screen_count
+
+exact_same_screen_count
+  + high_similarity_with_effective_new_screen_count
+  + high_similarity_without_effective_new_screen_count
+  + changed_with_effective_new_screen_count
+  + changed_without_effective_new_screen_count
+  + empty_or_unavailable_screen_count
+  + uncertain_screen_count
+= screen_count
+
+effective_present_screen_count
+  + effective_possible_screen_count
+  + effective_none_screen_count
+  + effective_unavailable_screen_count
+= screen_count
+
+sum(item.count for item in warning_code_counts) = warning_count
+```
+
+Summary 只能从 `CandidateOcrDocument.screens[*].similarity_result` 纯重算。不得读取页面状态、日志、OCR/候选人正文、module global、Store manifest counters 或其他全局计数。Schema 1.3 record 中任一 screen 缺失合法 `similarity_result`，candidate 合同即无效；不得跳过该 screen 以凑出 summary。
+
+### 4.6 Warning codes
 
 首版白名单冻结为：
 
@@ -309,12 +435,13 @@ ui_evidence_insufficient
 config_identity_mismatch
 legacy_reference_unavailable
 sidecar_source_mismatch
+cross_layer_similarity_conflict
 evaluation_failed
 ```
 
 warning 不得包含 OCR 文本、异常消息或候选人标识以外的私密内容。
 
-### 4.5 旧 JSONL 兼容
+### 4.7 旧 JSONL 兼容
 
 - 1.0/1.1/1.2 `from_dict()`：`similarity_result=None`、candidate summary null、manifest mode `disabled`。
 - 1.3 要求所有新增 R06 manifest 字段和 screen `similarity_result` key 存在；disabled 时值为 null/not_attempted 合同。
@@ -338,6 +465,8 @@ def resolve_reference(
 ```
 
 函数无 I/O、无时钟、无全局状态，不读取列表相邻项。
+
+resolver 必须只返回第 4.3 节冻结的 `ReferenceResolution`。resolver 不得直接构造 `OcrSimilarityResult`，evaluator 也不得重新选择 reference；两者通过该 value type 形成唯一边界。
 
 ### 5.2 正式屏规则
 
@@ -434,7 +563,29 @@ overlap_segments + new_segments + uncertain_segments == len(record.segments)
 
 并验证 R05 stored projections。任一差异：所有 R06 count/ratio null，status 至少 partial，warning `r05_projection_mismatch/accounting_mismatch`，class `uncertain`；不得修补 R05 原对象。
 
-### 8.3 比例、零分母与容限
+### 8.3 跨层一致性冲突
+
+`cross_layer_similarity_conflict` 与 `accounting_mismatch` 分工如下：
+
+- `accounting_mismatch` 只表示 R05 segment partition、stored projection、字符数或 segment 数的内部会计不成立；
+- `cross_layer_similarity_conflict` 表示各层内部合同分别可验证，但 R03 exact 结论与 R04/R05 派生信号互相矛盾。
+
+首版正式触发条件：reference 已 `resolved`、`exact_same is True`，且满足任一项：
+
+1. 已计算的 `similarity_score` 与 1.0 的差大于 `float_tolerance`；
+2. R05 `new_segment_ids` 或 `uncertain_segment_ids` 非空；
+3. 等价的合法 R06 `new_char_count/new_segment_count/uncertain_char_count/uncertain_segment_count` 任一大于 0。
+
+投影语义：
+
+- result 加入 `cross_layer_similarity_conflict`；
+- `similarity_status=partial`；若已有更严重的 `failed/unavailable/no_reference`，不得用 partial 覆盖，但 resolved exact 场景正常不会产生后两者；
+- `comparison_class=uncertain`，不允许投影为 `exact_same` 或 with/without effective-new 类；
+- `exact_same=True` 原样保留；R04 similarity、R05 counts/ratios 和 effective 结果只要各自内部合同成立也原样保留，不因跨层冲突伪造 null 或改写 R03/R05；
+- warning 进入 candidate summary，按同一 screen 最多一次计数；
+- 该 warning 只影响记录解释，不进入扫描、动作或停止控制流。
+
+### 8.4 比例、零分母与容限
 
 分母统一为 `current_effective_char_count`。分母大于 0 时：
 
@@ -450,7 +601,7 @@ uncertain_ratio = uncertain_chars / denominator
 
 ### 9.1 输入和输出范围
 
-评估 R05 `new_segment_ids`；同时为 `uncertain_segment_ids` 生成 source=`uncertain`、decision=`uncertain` 的保守条目。不得改变 R05 分类。
+评估 R05 `new_segment_ids`；同时为 `uncertain_segment_ids` 生成 source=`uncertain`、decision=`uncertain` 的保守条目。不得改变 R05 分类。R05 是 1→1、1→2、2→1 与 split/merge match evidence 的唯一权威；合法 split/merge evidence 的 current IDs 属于 `matched_segment_ids`，R06 v1 不对 matched 生成 `EffectiveNewDecision`。
 
 ### 9.2 逐 segment 决策顺序
 
@@ -458,12 +609,11 @@ uncertain_ratio = uncertain_chars / denominator
 
 1. `format_only`
 2. `duplicate_artifact`
-3. `split_merge_artifact`
-4. `low_confidence_noise`
-5. `likely_repeated_ui_noise`
-6. `short_text_protected`
-7. `effective`
-8. `uncertain`
+3. `low_confidence_noise`
+4. `likely_repeated_ui_noise`
+5. `short_text_protected`
+6. `effective`
+7. `uncertain`
 
 ### 9.3 各类证据
 
@@ -471,7 +621,6 @@ uncertain_ratio = uncertain_chars / denominator
 |---|---|---|
 | `format_only` | comparison 内容全为 Unicode separator/punctuation/format，且无字母数字、无受保护 token | 仅“很短” |
 | `duplicate_artifact` | 相同 comparison + R04 duplicate pair/group 的文本与几何确认，source box 可追溯 | 仅另一处有相同文字 |
-| `split_merge_artifact` | 邻接 segment 组合与 reference/document segment 等价，且 R05 1→2/2→1 evidence 或同等完整映射支持 | 仅 fuzzy 高分 |
 | `low_confidence_noise` | 单 segment、孤立 box、全部 confidence 位于 `[effective_min_confidence, +0.03]`、有效字符不超过 2、无结构/保护、邻接无支持 | 仅 confidence 低或字符少 |
 | `likely_repeated_ui_noise` | 同 exact comparison 跨至少 3 个正式屏；box 中心差不超过 `max(8px,0.5*median_height)`；尺寸相似度至少 0.90；来源均可追溯；无业务反证 | 具体 UI 文案、仅出现两次 |
 | `short_text_protected` | 命中第 10 节任一保护器 | 保护命中不得因长度降级 |
@@ -479,6 +628,28 @@ uncertain_ratio = uncertain_chars / denominator
 | `uncertain` | 前置证据缺失、冲突、阈值灰区、异常或 R05 source uncertain | 不得强制转无效 |
 
 UI 跨屏索引按 exact comparison 建有界 map，最多 8 个正式屏，不做页面两两比较。
+
+`split_merge_artifact` 是普通字符串 reason code 中的 **r06-v1 reserved / never emitted** 值，不是本版本的决策分支或测试正例。R05 matched 的 1→2/2→1 evidence 继续由 `match_evidence`、`document_segments` 和 source occurrence 保存。R05 new 不得仅凭 fuzzy score、文本相似、相邻拼接或 document segment ID 被 R06 推断为 split/merge；其他无效证据不足时只能得到 effective 或 uncertain。
+
+若 new 或 uncertain ID 同时出现于 `match_evidence.current_segment_ids`，这是前序 R05 partition/evidence 合同冲突，而不是 split/merge 正例。R06 必须停止全部有效新增 decision，warning 使用 `segment_partition_invalid` 或 `r05_projection_mismatch`，status 至少 partial，effective status unavailable、boolean null、class uncertain；不得修改 R05 源对象。
+
+### 9.4 低置信度配置与缺失证据语义
+
+**[设计冻结]** 下列三项属于 `OcrSimilarityConfig`：
+
+```text
+effective_min_confidence = 0.85
+low_confidence_delta = 0.03
+low_confidence_max_chars = 2
+```
+
+- `effective_min_confidence=0.85` 的记录来源是当前 R04 `DEFAULT_OCR_NORMALIZATION_CONFIG` 的有效 OCR 最低置信度；
+- `low_confidence_delta=0.03` 与 `low_confidence_max_chars=2` 的记录来源是 R06 有效新增合同；
+- 低置信度区间固定为 `[effective_min_confidence, effective_min_confidence + low_confidence_delta]`，有效字符上限固定使用 `low_confidence_max_chars`，不得在算法中另写字面量。
+
+三项必须进入 canonical config snapshot 和 config digest，并通过 `RunManifest.similarity_config` 随 run 持久化。Replay 必须从 manifest snapshot 恢复三项；online、Replay 和 sidecar 禁止动态读取当前 module global/default 来替代历史值。
+
+旧记录缺少完整 R06 config，或 segment/source box 缺少可验证 confidence 证据时：在依次排除此前已由充分证据成立的 `format_only`、`duplicate_artifact` 后，不得判 `low_confidence_noise`，该 segment 必须直接输出 `decision=uncertain`，不得继续降为 UI noise、short-text protected 或 effective；候选人侧按 `possible` 保守汇总。
 
 ## 10. 短文本保护
 
@@ -543,7 +714,7 @@ SLG, UE5, 3D, C++, C#, .NET, Unity, 主美, UI, TA, 3A, 0-1, 2D/3D
      -> uncertain
 ```
 
-若 `exact_same=True` 却 R05 报告 new/uncertain 非零，先记录 `accounting_mismatch` 并走 uncertain，避免掩盖前置冲突。
+若 `exact_same=True` 却 R04 similarity 非 1 或 R05 报告 new/uncertain 非零，按第 8.3 节记录 `cross_layer_similarity_conflict` 并走 uncertain。不得把跨层矛盾误报为 R05 内部 `accounting_mismatch`。
 
 ## 13. 配置和版本
 
@@ -560,7 +731,7 @@ R06_SIMILARITY_MODE = "disabled" | "record"
 
 ### 13.2 config snapshot
 
-snapshot 至少含：n sizes/weights、SimHash bits/n/hash/domain、high threshold、业务短词 version/list/digest、format 类别、low-confidence delta/length、UI 组合证据参数、float tolerance、max comparison length、max formal screens、算法版本。canonical JSON 使用 UTF-8、sort keys、紧凑 separators、`allow_nan=False`，digest 为小写 SHA-256。
+snapshot 至少含：n sizes/weights、SimHash bits/n/hash/domain、high threshold、业务短词 version/list/digest、format 类别、`effective_min_confidence=0.85`、`low_confidence_delta=0.03`、`low_confidence_max_chars=2`、UI 组合证据参数、float tolerance、max comparison length、max formal screens、算法版本。canonical JSON 使用 UTF-8、sort keys、紧凑 separators、`allow_nan=False`，digest 为小写 SHA-256。
 
 `RunManifest` 新增顺序：
 
@@ -575,6 +746,8 @@ business_short_terms_digest
 ```
 
 disabled 时除 mode 外均 null。record 时必须完整匹配。未经校准的阈值仍完整保存，但不进入任何 control flow。
+
+record manifest 的 `similarity_config` 必须包含第 9.4 节三项，digest 覆盖其名称、类型和值；缺失、额外替代字段、类型不符或 digest 不匹配均为 config identity error。Replay 只从该 manifest snapshot 恢复，不以当前 R04/R06 默认值补洞。旧 Schema 或 sidecar source 没有完整历史 config 时，只能由 caller 显式提供一份完整、独立标识的 sidecar config；不得把 override 冒充原 run 在线 identity。
 
 ## 14. 在线、离线和 sidecar
 
@@ -591,7 +764,7 @@ def evaluate_screen_similarity(
     ...
 ```
 
-输入/输出 immutable；无 I/O、日志、时钟、环境、页面状态或动作权限。`CandidateSimilarityEvaluator.add_screen()` 只维护当前 candidate 最多 8 屏的 reference map 和 UI evidence index；finalize 后 clear。
+输入/输出 immutable；无 I/O、日志、时钟、环境、页面状态或动作权限。`CandidateSimilarityEvaluator.add_screen()` 只维护当前 candidate 最多 8 屏的 reference map 和 UI evidence index；finalize 后 clear。它不接收 candidate document/document segments，也不为 R05 new 重建 split/merge；R05 evidence 仅用于验证非法 new/uncertain evidence 关系。
 
 ### 14.2 在线
 
@@ -599,7 +772,7 @@ def evaluate_screen_similarity(
 - record 模式的正式屏若 R05 未 attempted，R06 状态 unavailable/partial，不伪造比例。
 - 每 screen 只调用一次 evaluator，发生异常由 builder 捕获并投影 failed result。
 - `save_screen()` 接收最终对象；candidate 内嵌逐字段相同 screen。
-- candidate summary 从 screens 纯重算，保存 status/class/effective 状态计数和 warning count。
+- candidate summary 严格按第 4.5 节从 screens 纯重算，保存冻结 identity、status/class/effective 全分区计数和按白名单顺序的 warning counts；record 空 candidate 也保存空 summary。
 - Store 校验 result 与 manifest config identity。
 
 ### 14.3 离线 Replay
@@ -661,17 +834,17 @@ warning 只记录脱敏 code。禁止为 R06 失败触发 OCR、截图、滚动�
 
 ### Change 2：Schema、Reference、配置
 
-**进入条件**：Change 1 三文档批准；工作区 R05 变更归属明确；R05 Schema/reader 测试通过。
+**进入条件**：Change 1 三文档批准；本次 Change 2 前置合同 Corrective 获批准；工作区 R05 变更归属明确；R05 Schema/reader 测试通过。
 
 **修改文件**：`ocr_records.py`、新增 `ocr_similarity.py`、`tests/test_ocr_records.py`、`tests/test_ocr_similarity.py`；如只做 constructor 合同，可更新 `tests/test_ocr_candidate.py`。
 
-**实施内容**：1.3 types/fields/from_dict/validation；config snapshot/digest；warning enums；纯 reference resolver；R03 hash 只读 adapter；旧版正式屏重建规则。
+**实施内容**：1.3 types/fields/from_dict/validation；完整 `ReferenceResolution`、`R06CandidateSummary`、`R06WarningCodeCount` 合同；config snapshot/digest；warning enums（含 `cross_layer_similarity_conflict`）；纯 reference resolver；R03 hash 只读 adapter；旧版正式屏重建规则；第 9.4 节 confidence 参数 identity。
 
 **禁止事项**：不实现 n-gram/SimHash/比例/有效新增；不接 builder/Store/Replay/main；不改 R03/R04/R05。
 
-**测试**：Schema round-trip/field order/null；1.0—1.2 compat；missing/unknown version；reference 首屏/上一正式屏/缺失/冲突/跨 candidate/非正式显式 ref；config digest；hash adapter。
+**测试**：Schema round-trip/field order/null；1.0—1.2 compat；missing/unknown version；ReferenceResolution 三状态与 result 投影；reference 首屏/上一正式屏/缺失/冲突/跨 candidate/非正式显式 ref；空/非空 summary、三组会计、warning 白名单顺序/去重；cross-layer warning；confidence 三参数 snapshot/digest/manifest/replay/旧证据缺失；hash adapter。
 
-**退出条件**：writer 可构造合法 disabled/not_attempted 1.3 value types；旧记录全部可读；resolver 不使用顺序。
+**退出条件**：writer 可构造合法 disabled/not_attempted/record 1.3 value types 和空 summary；旧记录全部可读；resolver 不使用顺序；summary 与 warning 会计严格成立；历史 confidence 不被当前默认值替换。
 
 **报告**：`docs/R06-change2-schema-reference-config-report.md`。
 
@@ -713,11 +886,11 @@ warning 只记录脱敏 code。禁止为 R06 失败触发 OCR、截图、滚动�
 
 **修改文件**：`ocr_similarity.py`、`ocr_records.py`（只补已冻结 value validation）、`tests/test_ocr_similarity.py`、`tests/benchmark_r06_similarity.py`。
 
-**实施内容**：逐 segment 决策序列、evidence codes、短文本保护、UI 组合证据、有界 candidate context、effective status、comparison class priority。
+**实施内容**：逐 segment 决策序列、evidence codes、短文本保护、UI 组合证据、有界 candidate context、effective status、comparison class priority；R05 matched split/merge evidence只保留在 R05，r06-v1 不输出 `split_merge_artifact`。
 
 **禁止事项**：不建 UI 黑名单；不调用 AI；不控制扫描；证据不足不判无效。
 
-**测试**：每个 reason 正/反例；全部保护词、年份/日期/版本/范围；公司/项目/岗位未知短词 uncertain；UI 2 屏不足/3 屏几何满足/冲突；class 全矩阵和优先级。
+**测试**：每个可发射 reason 正/反例；全部保护词、年份/日期/版本/范围；公司/项目/岗位未知短词 uncertain；UI 2 屏不足/3 屏几何满足/冲突；class 全矩阵和优先级；R05 matched 的 1→2/2→1 evidence 不生成 `EffectiveNewDecision`；合法 R05 new 没有 split/merge evidence且永不输出 `split_merge_artifact`；new/uncertain 非法出现在 match evidence 时触发前序合同冲突并停止有效新增分类。
 
 **退出条件**：每个结论可追溯，保护清单全过，unknown 保守，中性类不含动作语义。
 
@@ -749,7 +922,7 @@ warning 只记录脱敏 code。禁止为 R06 失败触发 OCR、截图、滚动�
 
 **禁止事项**：不改生产算法/阈值/Schema/配置/依赖/build/workflow；不启用 record；不实现 R07/AI/SQLite；不 commit/push/tag/release。
 
-**测试**：全量 unittest；阶段0、R03、R04+benchmark、R05+benchmark、Store、Replay、load、switch、main loop、rule、favorite/forward、ESC/timer、Windows/macOS、Unicode、compileall、pip check、diff check；R06 benchmark 全矩阵。
+**测试**：全量 unittest；阶段0、R03、R04+benchmark、R05+benchmark、Store、Replay、load、switch、main loop、rule、favorite/forward、ESC/timer、Windows/macOS、Unicode、compileall、pip check、diff check；R06 benchmark 全矩阵；r06-v1 split/merge boundary contract（matched evidence 无 decision、合法 new never emitted、非法 evidence relation fail-open）。
 
 **退出条件**：所有门槛通过或明确阻塞；日志/data 前后完全一致；最终 Git 仅允许获批文件。
 
@@ -766,6 +939,7 @@ warning 只记录脱敏 code。禁止为 R06 失败触发 OCR、截图、滚动�
 - reference 只能靠顺序猜；
 - 旧 Schema 无法稳定读；
 - online/offline 不能共用 evaluator；
+- R06 对 R05 new/uncertain 重建、猜测或伪造 split/merge，或将合法 matched split/merge evidence 当作 new-side decision；
 - 必须修改 R03/R04/R05 生产语义才能实现；
 - 测试污染真实日志/data；
 - 工作区 tracked 修改无法归属。

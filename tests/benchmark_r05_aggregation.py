@@ -112,6 +112,8 @@ def _make_records(
         1,
         candidate_record_id=candidate_id,
         created_at=_TIMESTAMP,
+        aggregation_mode="disabled",
+        similarity_mode="disabled",
     )
     records = []
     for screen_index, texts in enumerate(screens, 1):
@@ -181,6 +183,7 @@ def _record_run(
         created_at=_TIMESTAMP,
         aggregation_mode="record",
         aggregation_config=config,
+        similarity_mode="disabled",
     )
     for record in records:
         builder.add_screen(record)
@@ -398,6 +401,7 @@ def _diagnose(scenario: Scenario) -> dict[str, Any]:
                 created_at=_TIMESTAMP,
                 aggregation_mode="record",
                 aggregation_config=scenario.config,
+                similarity_mode="disabled",
             )
             for record in scenario.records:
                 builder.add_screen(record)
@@ -578,6 +582,8 @@ def _disabled_does_not_construct_aggregator(
             1,
             candidate_record_id="benchmark-candidate",
             created_at=_TIMESTAMP,
+            aggregation_mode="disabled",
+            similarity_mode="disabled",
         )
         for record in records:
             builder.add_screen(record)

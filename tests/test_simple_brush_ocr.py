@@ -11,6 +11,9 @@ from unittest.mock import Mock, call, patch
 import simple_brush
 from calibration_profiles import CalibrationProfileError, REQUIRED_AREA_FIELDS
 from ocr_detector import DetectionResult, ScanObservation, ScreenFingerprint
+from ocr_candidate import CandidateOcrBuilder
+from ocr_records import CaptureStatus, CaptureType
+from ocr_text import OCRItem
 
 
 def sample_profile_areas():
@@ -973,6 +976,73 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.ocr_store_factory_patcher.stop()
         for name, value in self.saved.items():
             setattr(simple_brush, name, value)
+
+    def test_summary_fail_open_still_saves_candidate_without_page_actions(self):
+        store = Mock(enabled=True, run_id="summary-fail-open-run")
+        builder = CandidateOcrBuilder(
+            store.run_id, 1, candidate_record_id="summary-fail-open-candidate",
+            similarity_mode="record",
+        )
+        builder.build_screen_record(
+            (OCRItem("synthetic", 0.95, None),),
+            capture_type=CaptureType.FORMAL_SCREEN,
+            is_formal_screen=True,
+            screen_index=1,
+            screen_id="summary-fail-open-screen",
+        )
+        simple_brush.ocr_record_store = store
+        simple_brush.current_candidate_builder = builder
+        page_actions = ("ocr_scroll_down", "human_scroll_once", "next_candidate", "refresh_page")
+
+        with ExitStack() as stack:
+            summary = stack.enter_context(patch(
+                "ocr_candidate.recompute_similarity_summary",
+                side_effect=RuntimeError("synthetic"),
+            ))
+            patched = [
+                stack.enter_context(patch.object(simple_brush, name))
+                for name in page_actions
+            ]
+            document = simple_brush.finalize_current_candidate_recording(
+                CaptureStatus.COMPLETED, "existing_flow_completed",
+            )
+
+        self.assertEqual(summary.call_count, 1)
+        self.assertIsNotNone(document)
+        store.save_candidate.assert_called_once_with(
+            document,
+            owner_candidate_record_id="summary-fail-open-candidate",
+        )
+        self.assertTrue(builder.finalized)
+        self.assertEqual(builder.retained_screen_count, 0)
+        self.assertIsNone(simple_brush.current_candidate_builder)
+        for action in patched:
+            action.assert_not_called()
+
+    def test_finalize_passes_owner_matching_normal_document_identity(self):
+        store = Mock(enabled=True, run_id="normal-owner-run")
+        builder = CandidateOcrBuilder(
+            store.run_id, 1, candidate_record_id="normal-owner-candidate",
+        )
+        builder.build_screen_record(
+            (OCRItem("synthetic", 0.95, None),),
+            capture_type=CaptureType.FORMAL_SCREEN,
+            is_formal_screen=True,
+            screen_index=1,
+            screen_id="normal-owner-screen",
+        )
+        simple_brush.ocr_record_store = store
+        simple_brush.current_candidate_builder = builder
+
+        document = simple_brush.finalize_current_candidate_recording(
+            CaptureStatus.COMPLETED, "existing_flow_completed",
+        )
+
+        self.assertIsNotNone(document)
+        store.save_candidate.assert_called_once_with(
+            document,
+            owner_candidate_record_id=document.candidate_record_id,
+        )
 
     def run_load_gate_candidate(
         self,
@@ -6916,8 +6986,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             with self.assertRaises(simple_brush.OCRInterrupted):
                 simple_brush.ocr_wait(0.6)
 
-    def test_ocr_scroll_uses_twenty_times_the_previous_range(self):
-        for steps in (100, 140):
+    def test_ocr_scroll_uses_configured_production_range(self):
+        for steps in (600, 1000):
             with self.subTest(steps=steps):
                 with (
                     patch.object(simple_brush.random, "randint", return_value=steps) as randint,
@@ -6925,7 +6995,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 ):
                     simple_brush.ocr_scroll_down()
 
-                randint.assert_called_once_with(100, 140)
+                randint.assert_called_once_with(600, 1000)
                 scroll.assert_called_once_with(-steps)
 
     def test_window_match_rejects_vscode_project_title(self):

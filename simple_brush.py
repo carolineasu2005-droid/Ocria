@@ -22,7 +22,7 @@ import random
 import math
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import win32gui
@@ -49,17 +49,25 @@ from calibration_profiles import (
 )
 from calibration_template import main as calibration_template_main
 from ocr_detector import (
+    DYNAMIC_END_DEFAULT_MODE,
+    DYNAMIC_END_VERSION,
     DetectionResult,
+    DynamicEndConfig,
     MSSScreenCapture,
     OCRKeywordDetector,
     RapidOCRBackend,
     ScanObservation,
     ScreenFingerprint,
+    classify_position,
     compare_screen_fingerprints,
     evaluate_detail_page_load,
 )
 from ocr_text import parse_keyword_rules
 from ocr_candidate import CandidateOcrBuilder, R05_AGGREGATION_MODE
+from ocr_similarity import (
+    DEFAULT_OCR_SIMILARITY_CONFIG,
+    R06_SIMILARITY_MODE,
+)
 from ocr_normalization import (
     DEFAULT_OCR_NORMALIZATION_CONFIG,
     NORMALIZATION_VERSION,
@@ -179,12 +187,13 @@ OCR_TEXT_LENGTH_THRESHOLD = 30
 LOAD_RETRY_WAIT_SECONDS = 1.5
 MAX_LOAD_RETRIES = 3
 MAX_CONSECUTIVE_LOAD_RECOVERIES = 1
-OCR_SCROLL_MIN_STEPS = 100
-OCR_SCROLL_MAX_STEPS = 140
+OCR_SCROLL_MIN_STEPS = 600
+OCR_SCROLL_MAX_STEPS = 1000
 OCR_SETTLE_SECONDS = 0.6
 OCR_CONFIRMATION_SECONDS = 0.7
 OCR_PREVIEW_PATH = Path('logs/ocr_calibration_preview.png')
 R04_RULE_EVALUATION_MODE = "legacy_shadow"
+DYNAMIC_END_CONFIG = DynamicEndConfig(mode="full")
 
 # R01 candidate-switch verification
 CANDIDATE_SWITCH_MAX_ACTIONS = 2
@@ -202,8 +211,8 @@ CANDIDATE_SWITCH_FAILED = "switch_failed"
 
 # 滚动
 SCROLL_PROBABILITY = 0.8
-SCROLL_MIN_STEPS = 30
-SCROLL_MAX_STEPS = 120
+SCROLL_MIN_STEPS = 600
+SCROLL_MAX_STEPS = 1000
 SCROLL_MAX_TIMES = 3
 
 # ─── 转发功能配置 ────────────────────────────────────
@@ -646,6 +655,58 @@ candidate_record_sequence = 0
 recorded_observation_ids: Dict[int, ScanObservation] = {}
 
 
+@dataclass(frozen=True)
+class RecordedObservationResult:
+    """One canonical record/save/classification result for a detector callback."""
+
+    record: Optional[object]
+    saved: bool
+    position_decision: Optional[object] = None
+    load_health: Optional[bool] = None
+    ocr_health: Optional[bool] = None
+    identity_health: Optional[bool] = None
+    failure_stage: Optional[str] = None
+    validation_code: Optional[str] = None
+    sanitized_error_message: Optional[str] = None
+
+
+_SAFE_RECORDING_VALIDATION_ERRORS = {
+    "aggregation segment classifications are invalid": (
+        "r05_segment_partition_invalid",
+        "aggregation segment classifications are invalid",
+    ),
+    "document occurrence screen is invalid": (
+        "candidate_occurrence_screen_invalid",
+        "document occurrence screen is invalid",
+    ),
+    "similarity projection does not match nested result": (
+        "r06_projection_mismatch",
+        "similarity projection does not match nested result",
+    ),
+    "effective-new boolean does not match confirmed segments": (
+        "r06_effective_new_boolean_mismatch",
+        "effective-new boolean does not match confirmed segments",
+    ),
+}
+
+
+def _safe_recording_error_fields(exc: Exception, failure_stage: str):
+    """Return fixed, OCR-free diagnostics for persistence error context."""
+
+    known = _SAFE_RECORDING_VALIDATION_ERRORS.get(str(exc))
+    if known is not None:
+        validation_code, message = known
+    elif isinstance(exc, ValueError):
+        validation_code, message = "validation_failed", "validation failed"
+    else:
+        validation_code, message = "operation_failed", "operation failed"
+    return {
+        "failure_stage": failure_stage,
+        "validation_code": validation_code,
+        "sanitized_error_message": message,
+    }
+
+
 def create_ocr_record_store():
     """Create the best-effort stage-0 store for one application run."""
 
@@ -665,6 +726,11 @@ def create_ocr_record_store():
         normalization_config=snapshot,
         rule_evaluation_mode=R04_RULE_EVALUATION_MODE,
         aggregation_mode=R05_AGGREGATION_MODE,
+        similarity_mode=R06_SIMILARITY_MODE,
+        similarity_config=DEFAULT_OCR_SIMILARITY_CONFIG,
+        dynamic_end_version=DYNAMIC_END_VERSION,
+        dynamic_end_mode=DYNAMIC_END_CONFIG.mode,
+        dynamic_end_config=DYNAMIC_END_CONFIG.manifest_config(),
     )
 
 
@@ -711,12 +777,14 @@ def start_candidate_ocr_recording(
             "total_viewed_before": total_viewed,
         },
         aggregation_mode=R05_AGGREGATION_MODE,
+        similarity_mode=R06_SIMILARITY_MODE,
+        similarity_config=DEFAULT_OCR_SIMILARITY_CONFIG,
     )
     recorded_observation_ids = {}
     return current_candidate_builder
 
 
-def record_ocr_observation(
+def _record_ocr_observation_result(
     observation: ScanObservation,
     capture_type,
     is_formal_screen: bool,
@@ -725,10 +793,14 @@ def record_ocr_observation(
     """Append one already-completed OCR result without triggering OCR again."""
 
     if current_candidate_builder is None or ocr_record_store is None:
-        return None
+        return RecordedObservationResult(None, False)
     observation_identity = id(observation)
     if observation_identity in recorded_observation_ids:
-        return None
+        return RecordedObservationResult(None, False)
+    # One observation is consumed once even when its one build/save fails.
+    recorded_observation_ids[observation_identity] = observation
+    failure_stage = "screen_record_validation"
+    record = None
     try:
         capture_type = (
             capture_type
@@ -772,11 +844,119 @@ def record_ocr_observation(
                 None,
             ),
             confidence_threshold_source="run_manifest",
+            defer_commit=True,
         )
-        recorded_observation_ids[observation_identity] = observation
-        ocr_record_store.save_screen(record)
-        return record
+        failure_stage = "position_classification"
+        position_decision = None
+        if capture_type in (
+            CaptureType.FORMAL_SCREEN,
+            CaptureType.POSITION_CONFIRMATION,
+        ):
+            canonical_record = record
+            try:
+                load_health, _load_reason = evaluate_detail_page_load(
+                    observation.ocr_box_count,
+                    observation.ocr_text_length,
+                    OCR_BOX_COUNT_THRESHOLD,
+                    OCR_TEXT_LENGTH_THRESHOLD,
+                )
+            except (AttributeError, TypeError, ValueError):
+                load_health = None
+            ocr_health = (
+                getattr(observation, "raw_items", None) is not None
+                and isinstance(getattr(observation, "ocr_box_count", None), int)
+                and isinstance(getattr(observation, "ocr_text_length", None), int)
+            )
+            dynamic_state = getattr(ocr_detector, "dynamic_end_state", None)
+            previous_record = getattr(
+                dynamic_state, "last_comparable_record", None,
+            )
+            position_decision = classify_position(
+                previous_record,
+                record,
+                load_health=load_health,
+                ocr_health=ocr_health,
+                identity_health=(current_candidate_builder is not None),
+            )
+            # G3: canonical PositionDecision is the sole authority for final
+            # capture type.  When the pre-classification says position_confirmation
+            # but the decision says changed (effective new content / short_text_protected
+            # with same exact hash), the capture must be promoted to a formal screen.
+            # The same capture must only be saved once — no second build/save.
+            if (
+                capture_type == CaptureType.POSITION_CONFIRMATION
+                and position_decision.position_status == "changed"
+            ):
+                capture_type = CaptureType.FORMAL_SCREEN
+                promoted_screen_index = min(
+                    8,
+                    getattr(dynamic_state, "scan_slot_count", 0) + 1,
+                )
+                record = replace(
+                    record,
+                    capture_type=capture_type,
+                    is_formal_screen=True,
+                    screen_index=promoted_screen_index,
+                )
+                is_formal_screen = True
+                screen_index = promoted_screen_index
+            if capture_type == CaptureType.POSITION_CONFIRMATION:
+                prediction_reason = (
+                    "scroll_bottom_candidate"
+                    if (
+                        position_decision.position_status == "same"
+                        and not position_decision.insufficient_evidence
+                    ) else "position_confirmation_unresolved"
+                )
+            elif (
+                position_decision.position_status == "same"
+                and getattr(dynamic_state, "recovery_used", False)
+            ):
+                prediction_reason = "insufficient_evidence_after_recovery"
+            else:
+                prediction_reason = position_decision.prediction_reason
+            record = replace(
+                record,
+                dynamic_end_version=DYNAMIC_END_VERSION,
+                position_status=position_decision.position_status,
+                page_change_status=position_decision.page_change_status,
+                reference_screen_id=position_decision.reference_screen_id,
+                is_position_confirmation=(
+                    capture_type == CaptureType.POSITION_CONFIRMATION
+                ),
+                prediction_reason=prediction_reason,
+            )
+            record = current_candidate_builder.replace_latest_screen_record(
+                canonical_record, record,
+            )
+        failure_stage = "store_screen"
+        saved = bool(ocr_record_store.save_screen(record))
+        if saved:
+            current_candidate_builder.commit_screen_record(record)
+        else:
+            current_candidate_builder.discard_screen_record(record)
+        return RecordedObservationResult(
+            record,
+            saved,
+            position_decision,
+            load_health=(load_health if position_decision is not None else None),
+            ocr_health=(ocr_health if position_decision is not None else None),
+            identity_health=(
+                (current_candidate_builder is not None)
+                if position_decision is not None else None
+            ),
+            failure_stage=(None if saved else failure_stage),
+            validation_code=(None if saved else "store_save_failed"),
+            sanitized_error_message=(
+                None if saved else "screen save failed"
+            ),
+        )
     except Exception as exc:
+        try:
+            current_candidate_builder.discard_screen_record()
+        except Exception:
+            pass
+        error_fields = _safe_recording_error_fields(exc, failure_stage)
         ocr_record_store.save_error(
             type(exc).__name__,
             "record_ocr_observation",
@@ -785,9 +965,35 @@ def record_ocr_observation(
                     current_candidate_builder.candidate_record_id
                 ),
                 "capture_type": str(capture_type),
+                "screen_id": getattr(record, "screen_id", None),
+                **error_fields,
             },
         )
-        return None
+        return RecordedObservationResult(
+            None,
+            False,
+            failure_stage=error_fields["failure_stage"],
+            validation_code=error_fields["validation_code"],
+            sanitized_error_message=error_fields[
+                "sanitized_error_message"
+            ],
+        )
+
+
+def record_ocr_observation(
+    observation: ScanObservation,
+    capture_type,
+    is_formal_screen: bool,
+    screen_index: Optional[int],
+):
+    """Preserve the legacy record return for non-callback callers."""
+
+    return _record_ocr_observation_result(
+        observation,
+        capture_type,
+        is_formal_screen,
+        screen_index,
+    ).record
 
 
 def record_detection_observation(
@@ -795,10 +1001,10 @@ def record_detection_observation(
     capture_type: str,
     is_formal_screen: bool,
     screen_index: Optional[int],
-) -> None:
+) -> RecordedObservationResult:
     """Detector callback for formal scans and their existing confirmations."""
 
-    record_ocr_observation(
+    return _record_ocr_observation_result(
         observation,
         capture_type,
         is_formal_screen,
@@ -809,6 +1015,23 @@ def record_detection_observation(
 def candidate_capture_status(detection_result):
     """Classify only the current fixed maximum-screen outcome."""
 
+    if detection_result is not None:
+        interrupt_reason = getattr(detection_result, "interrupt_reason", None)
+        abort_reason = getattr(detection_result, "abort_reason", None)
+        dynamic_end_reason = getattr(
+            detection_result, "dynamic_end_reason", None,
+        )
+        if interrupt_reason in ("user_interrupted", "runtime_expired"):
+            return CaptureStatus.INTERRUPTED, None
+        if isinstance(abort_reason, str) and abort_reason:
+            return CaptureStatus.ABORTED, None
+        if dynamic_end_reason in (
+            "scroll_bottom", "no_new_text", "max_screen_limit",
+        ):
+            return (
+                CaptureStatus.COMPLETED_WITH_LIMIT,
+                dynamic_end_reason,
+            )
     if (
         detection_result is not None
         and not detection_result.confirmed_match
@@ -818,10 +1041,65 @@ def candidate_capture_status(detection_result):
     return CaptureStatus.COMPLETED, "existing_flow_completed"
 
 
+def _attach_dynamic_end_summary(document, detection_result):
+    """Project the detector's bounded R07 facts into one candidate document."""
+
+    if document is None or detection_result is None:
+        return document
+    mode = getattr(detection_result, "dynamic_end_mode", None)
+    if mode is None:
+        return document
+    versions = dict(document.versions)
+    versions["dynamic_end"] = DYNAMIC_END_VERSION
+    fields = {
+        "dynamic_end_mode": mode,
+        "dynamic_end_reason": getattr(
+            detection_result, "dynamic_end_reason", None,
+        ),
+        "abort_reason": getattr(detection_result, "abort_reason", None),
+        "scan_slot_count": getattr(detection_result, "scan_slot_count", None),
+        "normal_scroll_count": getattr(
+            detection_result, "normal_scroll_count", None,
+        ),
+        "unique_position_count": getattr(
+            detection_result, "unique_position_count", None,
+        ),
+        "ocr_attempt_count": getattr(
+            detection_result, "ocr_attempt_count", None,
+        ),
+        "scroll_retry_count": getattr(
+            detection_result, "scroll_retry_count", None,
+        ),
+        "focus_restore_count": getattr(
+            detection_result, "focus_restore_count", None,
+        ),
+        "first_predicted_end_screen": getattr(
+            detection_result, "first_predicted_end_screen", None,
+        ),
+        "first_predicted_end_reason": getattr(
+            detection_result, "first_predicted_end_reason", None,
+        ),
+        "prediction_would_miss_content": getattr(
+            detection_result, "prediction_would_miss_content", None,
+        ),
+        "prediction_would_miss_rule_match": getattr(
+            detection_result, "prediction_would_miss_rule_match", None,
+        ),
+        "prediction_observation_complete": getattr(
+            detection_result, "prediction_observation_complete", None,
+        ),
+        "prediction_evidence_complete": getattr(
+            detection_result, "prediction_evidence_complete", None,
+        ),
+    }
+    return replace(document, versions=versions, **fields)
+
+
 def finalize_current_candidate_recording(
     capture_status: CaptureStatus,
     end_reason: Optional[str],
     abort_reason: Optional[str] = None,
+    detection_result: Optional[DetectionResult] = None,
 ):
     """Save one candidate document and release its builder best-effort."""
 
@@ -832,22 +1110,39 @@ def finalize_current_candidate_recording(
     recorded_observation_ids = {}
     if builder is None:
         return None
+    if abort_reason is None and detection_result is not None:
+        abort_reason = (
+            getattr(detection_result, "abort_reason", None)
+            or getattr(detection_result, "interrupt_reason", None)
+        )
+    failure_stage = "candidate_validation"
     try:
         document = builder.finalize(
             capture_status,
             end_reason=end_reason,
             abort_reason=abort_reason,
         )
+        document = _attach_dynamic_end_summary(document, detection_result)
         if ocr_record_store is not None:
-            ocr_record_store.save_candidate(document)
+            failure_stage = "store_candidate"
+            ocr_record_store.save_candidate(
+                document,
+                owner_candidate_record_id=builder.candidate_record_id,
+            )
         return document
     except Exception as exc:
         if ocr_record_store is not None:
             try:
+                error_fields = _safe_recording_error_fields(
+                    exc, failure_stage,
+                )
                 ocr_record_store.save_error(
                     type(exc).__name__,
                     "finalize_candidate",
-                    {"candidate_record_id": builder.candidate_record_id},
+                    {
+                        "candidate_record_id": builder.candidate_record_id,
+                        **error_fields,
+                    },
                 )
             except Exception:
                 pass
@@ -856,6 +1151,7 @@ def finalize_current_candidate_recording(
 
 def finalize_active_candidate_for_stop(
     exception_type: Optional[str] = None,
+    detection_result: Optional[DetectionResult] = None,
 ):
     """Finalize an unfinished current candidate using existing stop state."""
 
@@ -866,23 +1162,27 @@ def finalize_active_candidate_for_stop(
             CaptureStatus.ABORTED,
             None,
             exception_type,
+            detection_result,
         )
     if stop_reason == "esc":
         return finalize_current_candidate_recording(
             CaptureStatus.INTERRUPTED,
             None,
             "user_interrupted",
+            detection_result,
         )
     if stop_reason == "run_duration_elapsed":
         return finalize_current_candidate_recording(
             CaptureStatus.INTERRUPTED,
             None,
             "runtime_expired",
+            detection_result,
         )
     return finalize_current_candidate_recording(
         CaptureStatus.ABORTED,
         None,
         stop_reason or "existing_flow_aborted",
+        detection_result,
     )
 
 
@@ -1962,6 +2262,14 @@ def ocr_scroll_down():
     pyautogui.scroll(-steps)
 
 
+def ocr_interrupt_reason():
+    """Expose the existing stop fact to R07 without starting a new lifecycle."""
+
+    if not stop_event:
+        return None
+    return "runtime_expired" if stop_reason == "run_duration_elapsed" else "user_interrupted"
+
+
 def remaining_stay_seconds(target_seconds, started_at, now=None):
     """Return only the unspent part of the original candidate stay budget."""
     current = time.monotonic() if now is None else now
@@ -2017,6 +2325,9 @@ def ensure_ocr_region_calibrated():
             OCR_MIN_CONFIDENCE,
         ),
         rule_evaluation_mode=R04_RULE_EVALUATION_MODE,
+        dynamic_end_config=DYNAMIC_END_CONFIG,
+        restore_focus=restore_candidate_page_focus,
+        interrupt_reason_provider=ocr_interrupt_reason,
     )
     logger.info(
         '✅ OCR 校准完成: left=%s top=%s width=%s height=%s',
@@ -3590,13 +3901,6 @@ def run():
                             switch_result.confirmed_observation
                         )
 
-                    record_ocr_observation(
-                        first_observation,
-                        CaptureType.FORMAL_SCREEN,
-                        True,
-                        1,
-                    )
-
                     total_viewed += 1
                     if i == 0:
                         logger.info(
@@ -3646,7 +3950,9 @@ def run():
                         first_observation=first_observation,
                     )
                     if not view_completed:
-                        finalize_active_candidate_for_stop()
+                        finalize_active_candidate_for_stop(
+                            detection_result=detection_result,
+                        )
                         break
 
                     capture_status, capture_end_reason = (
@@ -3664,6 +3970,7 @@ def run():
                         finalize_current_candidate_recording(
                             capture_status,
                             capture_end_reason,
+                            detection_result=detection_result,
                         )
                         if previous_candidate_context is None:
                             if context_reason != 'stopped':
@@ -3685,6 +3992,7 @@ def run():
                         finalize_current_candidate_recording(
                             capture_status,
                             capture_end_reason,
+                            detection_result=detection_result,
                         )
                 else:
                     total_viewed += 1

@@ -1,4 +1,4 @@
-"""Offline loading and explicit R04 replay without later-stage aggregation."""
+"""Offline loading and pure R04--R07 replay views without source effects."""
 
 from dataclasses import dataclass, replace
 import json
@@ -24,20 +24,36 @@ from ocr_aggregation import (
     aggregation_screen_record_fields,
     restore_aggregation_config,
 )
+from ocr_similarity import (
+    DEFAULT_OCR_SIMILARITY_CONFIG,
+    CandidateSimilarityEvaluator,
+    OcrSimilarityConfig,
+    empty_similarity_summary,
+    failed_similarity_result,
+    similarity_config_digest,
+    similarity_config_from_snapshot,
+)
 
 from ocr_records import (
     CandidateOcrDocument,
+    CaptureType,
     DocumentBuildStatus,
+    DOCUMENT_VERSION,
     LEGACY_STORAGE_SCHEMA_VERSION,
     R04_STORAGE_SCHEMA_VERSION,
+    R06_AND_LATER_STORAGE_SCHEMA_VERSIONS,
     NormalizationStatus,
     OcrScreenRecord,
+    ReferenceResolution,
+    ReferenceResolutionStatus,
+    ReferenceSource,
     RecordVersionError,
     RunManifest,
     STORAGE_SCHEMA_VERSION,
     SUPPORTED_DOCUMENT_VERSIONS,
     SUPPORTED_STORAGE_SCHEMA_VERSIONS,
     validate_record_version,
+    recompute_similarity_summary,
 )
 from ocr_store import (
     CANDIDATES_NAME,
@@ -305,6 +321,288 @@ class CandidateAggregationReplay:
     issues: Tuple[ReplayIssue, ...] = ()
 
 
+@dataclass(frozen=True)
+class CandidateSimilarityReplay:
+    """In-memory R06 rebuild; the source candidate and source files stay immutable."""
+
+    source: CandidateOcrDocument
+    rebuilt: Optional[CandidateOcrDocument]
+    config_source: str
+    issues: Tuple[ReplayIssue, ...] = ()
+
+
+@dataclass(frozen=True)
+class DynamicEndReplayResult:
+    """One R07-only reconstruction from persisted candidate evidence.
+
+    This deliberately reports an offline bottom as *possible* at most.  It
+    does not re-run a confirmation capture and therefore cannot establish the
+    online ``scroll_bottom`` conclusion.
+    """
+
+    candidate_record_id: str
+    position_statuses: Tuple[str, ...]
+    consecutive_no_new_count: int
+    no_new_text_candidate: bool
+    offline_bottom_status: str
+    first_predicted_end_screen: Optional[int]
+    first_predicted_end_reason: Optional[str]
+    prediction_would_miss_content: Optional[bool]
+    prediction_would_miss_rule_match: Optional[bool]
+    prediction_observation_complete: Optional[bool]
+    prediction_evidence_complete: Optional[bool]
+    legacy_rule_completed: bool
+    recorded_dynamic_end_reason: Optional[str]
+    insufficient_evidence: bool
+
+
+_REPLAY_POSITION_STATUSES = frozenset((
+    "initial", "changed", "same", "uncertain", "unavailable",
+))
+
+
+def _replay_enum_value(value: object) -> object:
+    return getattr(value, "value", value)
+
+
+def _replay_has_uncertain_evidence(record: OcrScreenRecord) -> bool:
+    """Inspect existing R05/R06 projections; never calculate them again."""
+
+    aggregation_status = _replay_enum_value(record.aggregation_status)
+    if aggregation_status not in ("not_attempted", "completed"):
+        return True
+    if (
+        record.uncertain_segment_ids
+        or (record.uncertain_segment_count or 0) > 0
+        or (record.uncertain_char_count or 0) > 0
+        or _replay_enum_value(record.aggregation_duplicate_risk) == "elevated"
+    ):
+        return True
+    result = record.similarity_result
+    if result is None:
+        return False
+    if _replay_enum_value(result.effective_new_status) == "possible":
+        return True
+    if _replay_enum_value(result.comparison_class) == "uncertain":
+        return True
+    if _replay_enum_value(result.similarity_status) in (
+        "partial", "failed", "unavailable",
+    ):
+        return True
+    warnings = tuple(result.warning_codes) + tuple(record.aggregation_warning_codes)
+    return any(
+        any(token in str(code).lower() for token in (
+            "possible", "uncertain", "conflict", "mismatch",
+        ))
+        for code in warnings
+    )
+
+
+def _replay_has_effective_new_content(record: OcrScreenRecord) -> bool:
+    """Read only persisted R05/R06 positive evidence, including short text."""
+
+    if record.has_effective_new_text is True:
+        return True
+    result = record.similarity_result
+    if result is None:
+        return False
+    if (
+        result.has_effective_new_text is True
+        or _replay_enum_value(result.effective_new_status) == "present"
+        or (result.effective_new_segment_count or 0) > 0
+    ):
+        return True
+    return any(
+        decision.reason == "short_text_protected"
+        and _replay_enum_value(decision.decision) == "effective"
+        for decision in result.effective_new_decisions
+    )
+
+
+def _replay_is_full_no_new_slot(record: OcrScreenRecord, position: str) -> bool:
+    """The persisted-only form of the frozen full no-new predicate."""
+
+    result = record.similarity_result
+    return (
+        _replay_enum_value(record.capture_type) == "formal_screen"
+        and record.is_formal_screen is True
+        and record.is_position_confirmation is not True
+        and position == "changed"
+        and _replay_enum_value(record.aggregation_status) == "completed"
+        and result is not None
+        and _replay_enum_value(result.similarity_status) == "completed"
+        and _replay_enum_value(result.effective_new_status) == "none"
+        and not _replay_has_uncertain_evidence(record)
+        and not _replay_has_effective_new_content(record)
+    )
+
+
+def replay_dynamic_end(candidate: CandidateOcrDocument) -> DynamicEndReplayResult:
+    """Replay R07 facts from a saved candidate without OCR, UI, or writes.
+
+    The order is exactly ``candidate.screens``.  R07 position metadata is
+    reused when present; an older record without it remains unavailable (apart
+    from the order-only initial screen), rather than being treated as healthy.
+    No R03--R06 algorithm is invoked here.
+    """
+
+    if not isinstance(candidate, CandidateOcrDocument):
+        raise TypeError("candidate must be a CandidateOcrDocument")
+
+    positions: List[str] = []
+    insufficient = False
+    consecutive_no_new_count = 0
+    no_new_text_candidate = False
+    first_prediction_seen = False
+    saw_legacy_rule_after_prediction = False
+    saw_content_after_prediction = False
+
+    for index, record in enumerate(candidate.screens):
+        position = record.position_status
+        if position not in _REPLAY_POSITION_STATUSES:
+            # An old schema has no R07 position health.  The leading record is
+            # still ordered first, but is not evidence for a dynamic end.
+            position = "initial" if index == 0 else "unavailable"
+            insufficient = True
+        positions.append(position)
+
+        if position in ("uncertain", "unavailable"):
+            insufficient = True
+        if _replay_is_full_no_new_slot(record, position):
+            consecutive_no_new_count += 1
+            no_new_text_candidate = (
+                no_new_text_candidate or consecutive_no_new_count >= 2
+            )
+        else:
+            consecutive_no_new_count = 0
+
+        if (
+            candidate.first_predicted_end_screen is not None
+            and record.screen_index is not None
+            and record.screen_index >= candidate.first_predicted_end_screen
+        ):
+            first_prediction_seen = True
+            # G1: Only a saved rule_confirmation with legacy_match=True
+            # represents a confirmed legacy rule completion.  A first-pass
+            # formal_screen.legacy_match is only a candidate hit.
+            if (
+                _replay_enum_value(record.capture_type) == "rule_confirmation"
+                and record.legacy_match is True
+            ):
+                saw_legacy_rule_after_prediction = True
+            if _replay_has_effective_new_content(record):
+                saw_content_after_prediction = True
+
+    # G1: legacy_rule_completed is only true when a saved rule_confirmation
+    # with legacy_match=True exists.  formal_screen.legacy_match alone cannot
+    # represent a confirmed completion.
+    legacy_rule_completed = any(
+        _replay_enum_value(record.capture_type) == "rule_confirmation"
+        and record.legacy_match is True
+        for record in candidate.screens
+    )
+
+    source_abort_reason = candidate.abort_reason or candidate.capture_summary.abort_reason
+    if source_abort_reason is not None or _replay_enum_value(candidate.capture_status) in (
+        "aborted", "interrupted",
+    ):
+        insufficient = True
+
+    prediction_screen = candidate.first_predicted_end_screen
+    prediction_reason = candidate.first_predicted_end_reason
+    if prediction_screen is not None and not first_prediction_seen:
+        insufficient = True
+    if prediction_screen is None:
+        # Missing R07 fields in legacy data are unknown, never a healthy
+        # observation window or a negative miss conclusion.
+        insufficient = True
+
+    content_miss = candidate.prediction_would_miss_content
+    rule_miss = candidate.prediction_would_miss_rule_match
+    observation_complete = candidate.prediction_observation_complete
+    evidence_complete = candidate.prediction_evidence_complete
+    if prediction_screen is None:
+        content_miss = None
+        rule_miss = None
+        observation_complete = None
+        evidence_complete = None
+    elif saw_legacy_rule_after_prediction:
+        rule_miss = True
+        # A rule early stop leaves the later content window incomplete unless
+        # an already persisted positive content observation proves otherwise.
+        content_miss = True if saw_content_after_prediction else None
+    elif saw_content_after_prediction:
+        content_miss = True
+
+    # G2: Evidence completeness gates.  When persisted completeness fields
+    # are explicitly false, or when any inconsistency exists between the
+    # prediction, the persisted fields, and the abort state, the replay must
+    # output insufficient_evidence rather than treating the evidence as
+    # healthy possible-bottom proof.
+    if source_abort_reason is not None:
+        content_miss = None
+        rule_miss = None
+        observation_complete = None
+        evidence_complete = None
+
+    # G2: persisted incomplete evidence forces insufficient_evidence
+    persisted_observation_incomplete = (
+        candidate.prediction_observation_complete is False
+        or candidate.prediction_evidence_complete is False
+        or (prediction_screen is not None
+            and observation_complete is False)
+        or (prediction_screen is not None
+            and evidence_complete is False)
+    )
+    # G2: old-schema null completeness is not treated as complete unless all
+    # other signs (including the prediction presence) agree it is healthy.
+    has_explicit_completeness = (
+        candidate.prediction_observation_complete is not None
+        or candidate.prediction_evidence_complete is not None
+    )
+    prediction_exists = prediction_screen is not None
+    completions_both_null = (
+        candidate.prediction_observation_complete is None
+        and candidate.prediction_evidence_complete is None
+    )
+    completeness_is_healthy = (
+        prediction_exists
+        and not persisted_observation_incomplete
+        and observation_complete is not False
+        and evidence_complete is not False
+        and not completions_both_null
+    )
+
+    offline_bottom_status = "insufficient_evidence"
+    if (
+        prediction_screen is not None
+        and prediction_reason == "possible_scroll_bottom"
+        and first_prediction_seen
+        and source_abort_reason is None
+        and completeness_is_healthy
+    ):
+        offline_bottom_status = "possible_scroll_bottom"
+    else:
+        insufficient = True
+
+    return DynamicEndReplayResult(
+        candidate_record_id=candidate.candidate_record_id,
+        position_statuses=tuple(positions),
+        consecutive_no_new_count=consecutive_no_new_count,
+        no_new_text_candidate=no_new_text_candidate,
+        offline_bottom_status=offline_bottom_status,
+        first_predicted_end_screen=prediction_screen,
+        first_predicted_end_reason=prediction_reason,
+        prediction_would_miss_content=content_miss,
+        prediction_would_miss_rule_match=rule_miss,
+        prediction_observation_complete=observation_complete,
+        prediction_evidence_complete=evidence_complete,
+        legacy_rule_completed=legacy_rule_completed,
+        recorded_dynamic_end_reason=candidate.dynamic_end_reason,
+        insufficient_evidence=insufficient,
+    )
+
+
 class _ReplayContractError(ValueError):
     def __init__(self, error_type: str) -> None:
         self.error_type = error_type
@@ -320,7 +618,7 @@ def _replay_issue(error_type: str) -> ReplayIssue:
 
 
 def _validate_manifest_config(manifest: RunManifest) -> OcrNormalizationConfig:
-    if manifest.storage_schema_version != STORAGE_SCHEMA_VERSION:
+    if manifest.storage_schema_version not in R06_AND_LATER_STORAGE_SCHEMA_VERSIONS:
         raise _ReplayContractError("ManifestSchemaMismatchError")
     try:
         config = normalization_config_from_snapshot(
@@ -413,7 +711,7 @@ def replay_screen_normalization(
     try:
         if not isinstance(record, OcrScreenRecord):
             raise _ReplayContractError("InvalidScreenRecordError")
-        if record.storage_schema_version == STORAGE_SCHEMA_VERSION:
+        if record.storage_schema_version in R06_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             if legacy_min_confidence_override is not None:
                 raise _ReplayContractError("LegacyOverrideNotAllowedError")
             if manifest is not None:
@@ -545,6 +843,272 @@ def _candidate_replay_issue(error_type: str) -> ReplayIssue:
     return ReplayIssue(Path("<candidate-aggregation-replay>"), 0, error_type)
 
 
+def _candidate_similarity_replay_error(error_type: str) -> OcrReplayError:
+    return OcrReplayError(Path("<candidate-similarity-replay>"), 0, error_type)
+
+
+def _candidate_similarity_replay_issue(error_type: str) -> ReplayIssue:
+    return ReplayIssue(Path("<candidate-similarity-replay>"), 0, error_type)
+
+
+def _replay_reference_maps(
+    screens: Tuple[OcrScreenRecord, ...],
+) -> Tuple[Dict[str, OcrScreenRecord], Dict[int, str]]:
+    """Build resolver maps by persisted identity, not JSONL order."""
+
+    by_id: Dict[str, OcrScreenRecord] = {}
+    formal_by_index: Dict[int, str] = {}
+    for position, screen in enumerate(screens):
+        key = screen.screen_id
+        if key in by_id:
+            key = "{0}#duplicate-{1}".format(key, position)
+        by_id[key] = screen
+        if (
+            screen.capture_type == CaptureType.FORMAL_SCREEN
+            and screen.is_formal_screen is True
+            and isinstance(screen.screen_index, int)
+            and screen.screen_index not in formal_by_index
+        ):
+            formal_by_index[screen.screen_index] = screen.screen_id
+    return by_id, formal_by_index
+
+
+def _failed_similarity_projection(
+    screen: OcrScreenRecord,
+    config: OcrSimilarityConfig,
+) -> OcrScreenRecord:
+    source = (
+        ReferenceSource.FORMAL_PREVIOUS_INDEX
+        if screen.capture_type == CaptureType.FORMAL_SCREEN and screen.is_formal_screen
+        else ReferenceSource.EXPLICIT_RECORD
+    )
+    result = failed_similarity_result(
+        ReferenceResolution(
+            ReferenceResolutionStatus.UNAVAILABLE,
+            None,
+            None,
+            None,
+            source,
+            ("evaluation_failed",),
+        ),
+        config,
+    )
+    return replace(
+        screen,
+        storage_schema_version=STORAGE_SCHEMA_VERSION,
+        similarity_hash=result.current_simhash,
+        similarity_score=result.similarity_score,
+        overlap_ratio=result.overlap_ratio,
+        new_text_ratio=result.new_text_ratio,
+        has_effective_new_text=result.has_effective_new_text,
+        similarity_version=result.similarity_version,
+        similarity_result=result,
+    )
+
+
+def _evaluate_r06_screens(
+    screens: Tuple[OcrScreenRecord, ...],
+    config: OcrSimilarityConfig,
+) -> Tuple[OcrScreenRecord, ...]:
+    """Use the exact online evaluator/context without changing screen order."""
+
+    if not screens:
+        return ()
+    run_ids = {screen.run_id for screen in screens}
+    candidate_ids = {screen.candidate_record_id for screen in screens}
+    if len(run_ids) != 1 or len(candidate_ids) != 1:
+        raise _ReplayContractError("CandidateScreenIdentityMismatchError")
+    evaluator = CandidateSimilarityEvaluator(
+        next(iter(run_ids)), next(iter(candidate_ids)), config
+    )
+    rebuilt = []
+    try:
+        for screen in screens:
+            by_id, formal_by_index = _replay_reference_maps(tuple(rebuilt))
+            try:
+                result = evaluator.evaluate(
+                    screen,
+                    by_id,
+                    formal_by_index,
+                    source_schema_version=STORAGE_SCHEMA_VERSION,
+                )
+                rebuilt.append(replace(
+                    screen,
+                    storage_schema_version=STORAGE_SCHEMA_VERSION,
+                    similarity_hash=result.current_simhash,
+                    similarity_score=result.similarity_score,
+                    overlap_ratio=result.overlap_ratio,
+                    new_text_ratio=result.new_text_ratio,
+                    has_effective_new_text=result.has_effective_new_text,
+                    similarity_version=result.similarity_version,
+                    similarity_result=result,
+                ))
+            except Exception:
+                rebuilt.append(_failed_similarity_projection(screen, config))
+        return tuple(rebuilt)
+    finally:
+        evaluator.clear()
+
+
+def _similarity_document(
+    candidate: CandidateOcrDocument,
+    screens: Tuple[OcrScreenRecord, ...],
+    config: OcrSimilarityConfig,
+) -> CandidateOcrDocument:
+    summary = (
+        recompute_similarity_summary(screens)
+        if screens else empty_similarity_summary(config)
+    )
+    versions = dict(candidate.versions)
+    versions["similarity"] = config.similarity_version
+    return replace(
+        candidate,
+        storage_schema_version=STORAGE_SCHEMA_VERSION,
+        screens=screens,
+        similarity_summary=summary,
+        versions=versions,
+    )
+
+
+def _r05_rebuild_for_similarity(
+    candidate: CandidateOcrDocument,
+    config: OcrAggregationConfig,
+) -> CandidateOcrDocument:
+    """The mandatory R05 predecessor for 1.0/1.1 R06 replay."""
+
+    builder = CandidateOcrBuilder(
+        candidate.run_id,
+        candidate.sequence_number,
+        candidate_record_id=candidate.candidate_record_id,
+        created_at=candidate.created_at,
+        metadata=candidate.metadata,
+        aggregation_mode="record",
+        aggregation_config=config,
+        similarity_mode="disabled",
+    )
+    for screen in candidate.screens:
+        builder.add_screen(screen)
+    return builder.finalize(
+        candidate.capture_status,
+        end_reason=candidate.capture_summary.end_reason,
+        abort_reason=candidate.capture_summary.abort_reason,
+        completed_at=candidate.completed_at,
+    )
+
+
+def replay_candidate_similarity(
+    candidate: CandidateOcrDocument,
+    manifest: Optional[RunManifest] = None,
+    *,
+    strict: bool = True,
+    similarity_config: Optional[OcrSimilarityConfig] = None,
+    aggregation_config: Optional[OcrAggregationConfig] = None,
+    normalization_config: Optional[OcrNormalizationConfig] = None,
+) -> CandidateSimilarityReplay:
+    """Replay R06 with its exact online evaluator and explicit history.
+
+    Older records advance through their missing R04/R05 stages in memory.  No
+    source JSONL object, manifest, candidate, or screen is changed.
+    """
+
+    try:
+        if not isinstance(candidate, CandidateOcrDocument):
+            raise _ReplayContractError("InvalidCandidateSimilarityInputError")
+        storage_version = candidate.storage_schema_version
+        if storage_version in R06_AND_LATER_STORAGE_SCHEMA_VERSIONS:
+            if (
+                not isinstance(manifest, RunManifest)
+                or manifest.storage_schema_version != storage_version
+            ):
+                raise _ReplayContractError("ManifestSchemaMismatchError")
+            if manifest.run_id != candidate.run_id:
+                raise _ReplayContractError("ManifestRunMismatchError")
+            if manifest.similarity_mode == "disabled":
+                if candidate.similarity_summary is not None or any(
+                    screen.similarity_result is not None for screen in candidate.screens
+                ):
+                    raise _ReplayContractError("DisabledSimilarityMismatchError")
+                return CandidateSimilarityReplay(candidate, candidate, "manifest_disabled", ())
+            if manifest.similarity_mode != "record" or similarity_config is not None:
+                raise _ReplayContractError("SimilarityConfigOverrideError")
+            try:
+                config = similarity_config_from_snapshot(manifest.similarity_config)
+            except Exception as exc:
+                raise _ReplayContractError("ManifestSimilarityConfigError") from exc
+            if (
+                manifest.similarity_config_digest != similarity_config_digest(manifest.similarity_config)
+                or manifest.similarity_version != config.similarity_version
+                or manifest.similarity_config_version != config.similarity_config_version
+            ):
+                raise _ReplayContractError("ManifestSimilarityConfigMismatchError")
+            rebuilt = _similarity_document(
+                candidate, _evaluate_r06_screens(candidate.screens, config), config
+            )
+            if rebuilt != candidate:
+                raise _ReplayContractError("SimilarityReplayMismatchError")
+            return CandidateSimilarityReplay(candidate, rebuilt, "manifest", ())
+        if similarity_config is None:
+            raise _ReplayContractError("HistoricalSimilarityConfigRequiredError")
+        if storage_version == "1.2.0":
+            rebuilt = _similarity_document(
+                candidate, _evaluate_r06_screens(candidate.screens, similarity_config), similarity_config
+            )
+            return CandidateSimilarityReplay(candidate, rebuilt, "caller_config", ())
+        if aggregation_config is None:
+            raise _ReplayContractError("HistoricalAggregationConfigRequiredError")
+        if storage_version == "1.1.0":
+            r05_candidate = _r05_rebuild_for_similarity(candidate, aggregation_config)
+            rebuilt = _similarity_document(
+                r05_candidate,
+                _evaluate_r06_screens(r05_candidate.screens, similarity_config),
+                similarity_config,
+            )
+            return CandidateSimilarityReplay(candidate, rebuilt, "caller_config", ())
+        if storage_version == "1.0.0":
+            if normalization_config is None:
+                raise _ReplayContractError("HistoricalNormalizationConfigRequiredError")
+            normalized = tuple(
+                replay_screen_normalization(screen, config=normalization_config).normalized
+                for screen in candidate.screens
+            )
+            r04_candidate = CandidateOcrDocument(
+                run_id=candidate.run_id,
+                candidate_record_id=candidate.candidate_record_id,
+                sequence_number=candidate.sequence_number,
+                created_at=candidate.created_at,
+                completed_at=candidate.completed_at,
+                capture_status=candidate.capture_status,
+                screens=normalized,
+                capture_summary=candidate.capture_summary,
+                document_version=DOCUMENT_VERSION,
+                storage_schema_version=R04_STORAGE_SCHEMA_VERSION,
+                versions={
+                    "normalization": (
+                        normalized[0].normalization_version if normalized else None
+                    ),
+                },
+                metadata=candidate.metadata,
+            )
+            r05_candidate = _r05_rebuild_for_similarity(r04_candidate, aggregation_config)
+            rebuilt = _similarity_document(
+                r05_candidate,
+                _evaluate_r06_screens(r05_candidate.screens, similarity_config),
+                similarity_config,
+            )
+            return CandidateSimilarityReplay(candidate, rebuilt, "caller_config", ())
+        raise _ReplayContractError("UnsupportedStorageSchemaError")
+    except Exception as exc:
+        error_type = exc.error_type if isinstance(exc, _ReplayContractError) else type(exc).__name__
+        if strict:
+            raise _candidate_similarity_replay_error(error_type) from exc
+        return CandidateSimilarityReplay(
+            candidate,
+            None,
+            "unavailable",
+            (_candidate_similarity_replay_issue(error_type),),
+        )
+
+
 def _tolerant_candidate_rebuild(
     candidate: CandidateOcrDocument,
     config: OcrAggregationConfig,
@@ -612,6 +1176,7 @@ def _tolerant_candidate_rebuild(
         metadata=candidate.metadata,
         aggregation_mode="record",
         aggregation_config=config,
+        similarity_mode="disabled",
     )
     projected_by_position: Dict[int, OcrScreenRecord] = {}
     for position, screen in ordered_formal:
@@ -657,8 +1222,10 @@ def replay_candidate_aggregation(
             raise _ReplayContractError("InvalidCandidateAggregationInputError")
         if candidate.run_id != manifest.run_id:
             raise _ReplayContractError("ManifestRunMismatchError")
-        if candidate.storage_schema_version == STORAGE_SCHEMA_VERSION:
-            if manifest.storage_schema_version != STORAGE_SCHEMA_VERSION:
+        similarity_mode = "disabled"
+        similarity_config = DEFAULT_OCR_SIMILARITY_CONFIG
+        if candidate.storage_schema_version in R06_AND_LATER_STORAGE_SCHEMA_VERSIONS:
+            if manifest.storage_schema_version != candidate.storage_schema_version:
                 raise _ReplayContractError("ManifestSchemaMismatchError")
             if manifest.aggregation_mode == "disabled":
                 if candidate.document_build_status != DocumentBuildStatus.NOT_ATTEMPTED:
@@ -676,6 +1243,29 @@ def replay_candidate_aggregation(
                 or candidate.aggregation_config_digest != manifest.aggregation_config_digest
             ):
                 raise _ReplayContractError("ManifestAggregationConfigMismatchError")
+            if manifest.similarity_mode == "record":
+                try:
+                    similarity_config = similarity_config_from_snapshot(
+                        manifest.similarity_config
+                    )
+                except Exception as exc:
+                    raise _ReplayContractError(
+                        "ManifestSimilarityConfigError"
+                    ) from exc
+                if (
+                    manifest.similarity_config_digest
+                    != similarity_config_digest(manifest.similarity_config)
+                    or candidate.similarity_summary is None
+                ):
+                    raise _ReplayContractError(
+                        "ManifestSimilarityConfigMismatchError"
+                    )
+                similarity_mode = "record"
+            elif manifest.similarity_mode == "disabled":
+                if candidate.similarity_summary is not None:
+                    raise _ReplayContractError("DisabledSimilarityMismatchError")
+            else:
+                raise _ReplayContractError("ManifestSimilarityModeError")
             config_source = "manifest"
         elif candidate.storage_schema_version == R04_STORAGE_SCHEMA_VERSION:
             if aggregation_config is None:
@@ -711,6 +1301,8 @@ def replay_candidate_aggregation(
             metadata=candidate.metadata,
             aggregation_mode="record",
             aggregation_config=config,
+            similarity_mode=similarity_mode,
+            similarity_config=similarity_config,
         )
         for screen in candidate.screens:
             builder.add_screen(screen)

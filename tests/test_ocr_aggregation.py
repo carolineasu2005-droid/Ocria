@@ -271,6 +271,10 @@ class R04SegmentAdapterTests(AggregationFixtureMixin, unittest.TestCase):
             replace(record.segments[0], order=2),
             replace(record.segments[0], ocr_box_ids=("missing",)),
             replace(record.segments[0], comparison_text="wrong"),
+            replace(
+                record.segments[0],
+                comparison_text=record.segments[0].comparison_text + " ",
+            ),
         ):
             invalid = copy.copy(record)
             object.__setattr__(invalid, "segments", (changed_segment, *record.segments[1:]))

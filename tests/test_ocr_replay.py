@@ -3,9 +3,12 @@ from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from ocr_records import (
     CandidateOcrDocument,
+    AggregationStatus,
+    ComparisonClass,
     CaptureStatus,
     CaptureSummary,
     CaptureType,
@@ -16,6 +19,8 @@ from ocr_records import (
     OcrScreenRecord,
     RunManifest,
     RunStatus,
+    EffectiveNewStatus,
+    SimilarityStatus,
     STORAGE_SCHEMA_VERSION,
     SUPPORTED_DOCUMENT_VERSIONS,
     SUPPORTED_STORAGE_SCHEMA_VERSIONS,
@@ -42,8 +47,13 @@ from ocr_replay import (
     OcrRunReader,
     load_ocr_run,
     replay_candidate_aggregation,
+    replay_candidate_similarity,
+    replay_dynamic_end,
     replay_screen_normalization,
 )
+from ocr_similarity_sidecar import similarity_statistics, write_similarity_sidecar
+from ocr_store import JsonlOcrRecordStore
+from ocr_similarity import DEFAULT_OCR_SIMILARITY_CONFIG, OcrSimilarityConfig
 
 
 class OcrRunReaderTests(unittest.TestCase):
@@ -127,12 +137,36 @@ class OcrRunReaderTests(unittest.TestCase):
             capture_summary=summary,
         )
 
+    def make_candidate_for_screens(self, screens, **dynamic_fields):
+        summary = CaptureSummary(
+            actual_screen_count=len(screens),
+            ocr_attempt_count=len(screens),
+            scroll_attempt_count=max(0, len(screens) - 1),
+            scroll_retry_count=0,
+            end_screen_index=len(screens) or None,
+            capture_status=CaptureStatus.COMPLETED,
+            end_reason="existing_flow_completed",
+            abort_reason=None,
+        )
+        return CandidateOcrDocument(
+            run_id="run-replay",
+            candidate_record_id="candidate-r07",
+            sequence_number=1,
+            created_at="2026-07-30T12:00:00+08:00",
+            completed_at="2026-07-30T12:01:00+08:00",
+            capture_status=CaptureStatus.COMPLETED,
+            screens=tuple(screens),
+            capture_summary=summary,
+            **dynamic_fields,
+        )
+
     def make_legacy_r04_candidate(self, specifications, candidate_id="candidate-r05"):
         """Build valid frozen R04 members whose order may be malformed for R05."""
 
         builder = CandidateOcrBuilder(
             "run-replay", 1, candidate_record_id=candidate_id,
             created_at="2026-07-30T12:00:00+08:00",
+            aggregation_mode="disabled", similarity_mode="disabled",
         )
         for position, (screen_id, screen_index, text) in enumerate(specifications):
             item = OCRItem(
@@ -217,6 +251,7 @@ class OcrRunReaderTests(unittest.TestCase):
         builder = CandidateOcrBuilder(
             "run-replay", 1, candidate_record_id="candidate-1",
             created_at="2026-07-30T12:00:00+08:00", aggregation_mode="record",
+            similarity_mode="disabled",
         )
         builder.add_screen(source)
         candidate = builder.finalize(
@@ -788,6 +823,547 @@ class OcrRunReaderTests(unittest.TestCase):
             issue.supported_versions,
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
+
+    def test_r06_online_store_replay_and_sidecar_are_identical_for_synthetic_records(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = JsonlOcrRecordStore(
+                Path(temporary), run_id="run-r06-replay",
+                aggregation_mode="record", similarity_mode="record",
+            )
+            builder = CandidateOcrBuilder(
+                "run-r06-replay", 1, candidate_record_id="candidate-r06-replay",
+                created_at="2026-07-30T12:00:00+08:00",
+                aggregation_mode="record", similarity_mode="record",
+            )
+            screens = []
+            for index, text in enumerate(("历史 C++ 内容", "历史 C++ 内容 新增"), 1):
+                screen_id = "r06-replay-{0}".format(index)
+                item = OCRItem(
+                    text, 0.95,
+                    ((0, 0), (160, 0), (160, 20), (0, 20)),
+                )
+                normalization = normalize_ocr_text((NormalizationBox(
+                    "{0}:box:0".format(screen_id), item.text, item.box, 0,
+                    item.confidence,
+                ),))
+                screens.append(builder.build_screen_record(
+                    (item,), capture_type=CaptureType.FORMAL_SCREEN,
+                    is_formal_screen=True, screen_index=index, screen_id=screen_id,
+                    captured_at="2026-07-30T12:00:0{0}+08:00".format(index),
+                    normalization=normalization, ocr_min_confidence=0.85,
+                ))
+            candidate = builder.finalize(
+                CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+            )
+            for screen in screens:
+                self.assertTrue(store.save_screen(screen))
+            self.assertTrue(store.save_candidate(candidate))
+            aggregation_replay = replay_candidate_aggregation(candidate, store.manifest)
+            self.assertEqual(aggregation_replay.rebuilt, candidate)
+            replay = replay_candidate_similarity(candidate, store.manifest)
+            self.assertEqual(replay.rebuilt, candidate)
+            with self.assertRaises(OcrReplayError):
+                replay_candidate_similarity(
+                    candidate, store.manifest,
+                    similarity_config=DEFAULT_OCR_SIMILARITY_CONFIG,
+                )
+            tolerant = replay_candidate_similarity(
+                candidate, store.manifest, strict=False,
+                similarity_config=DEFAULT_OCR_SIMILARITY_CONFIG,
+            )
+            self.assertIsNone(tolerant.rebuilt)
+            self.assertEqual(tolerant.issues[0].error_type, "SimilarityConfigOverrideError")
+            sidecar = write_similarity_sidecar(
+                store.run_dir, store.manifest, (candidate,), strict=True,
+            )
+            lines = sidecar.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 3)
+            self.assertIn("r06_sidecar_manifest", lines[0])
+            self.assertNotIn("历史 C++ 内容", "\n".join(lines))
+            statistics = similarity_statistics((candidate,))
+            self.assertEqual(statistics["sample_count"], 2)
+            self.assertNotIn("历史 C++ 内容", str(statistics))
+            overridden = write_similarity_sidecar(
+                store.run_dir,
+                store.manifest,
+                (candidate,),
+                similarity_config=OcrSimilarityConfig(high_similarity_threshold=0.84),
+            )
+            self.assertNotEqual(overridden, sidecar)
+            self.assertEqual(candidate, replay.rebuilt)
+            with self.assertRaises(ValueError):
+                write_similarity_sidecar(store.run_dir, store.manifest, (candidate,))
+            store.close()
+
+    def test_r06_legacy_replay_advances_required_stages_without_guessing(self):
+        builder = CandidateOcrBuilder(
+            "run-replay", 1, candidate_record_id="legacy-r06",
+            created_at="2026-07-30T12:00:00+08:00",
+        )
+        item = OCRItem(
+            "legacy synthetic C++", 0.95,
+            ((0, 0), (160, 0), (160, 20), (0, 20)),
+        )
+        builder.build_screen_record(
+            (item,), capture_type=CaptureType.FORMAL_SCREEN,
+            is_formal_screen=True, screen_index=1, screen_id="legacy-r06-screen",
+            captured_at="2026-07-30T12:00:00+08:00",
+        )
+        raw = builder.finalize(
+            CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+            completed_at="2026-07-30T12:01:00+08:00",
+        ).to_dict()
+        raw["storage_schema_version"] = LEGACY_STORAGE_SCHEMA_VERSION
+        raw["document_version"] = DOCUMENT_VERSION
+        raw["screens"][0]["storage_schema_version"] = LEGACY_STORAGE_SCHEMA_VERSION
+        legacy = CandidateOcrDocument.from_dict(raw)
+        replay = replay_candidate_similarity(
+            legacy,
+            similarity_config=DEFAULT_OCR_SIMILARITY_CONFIG,
+            aggregation_config=DEFAULT_OCR_AGGREGATION_CONFIG,
+            normalization_config=DEFAULT_OCR_NORMALIZATION_CONFIG,
+        )
+        self.assertIsNotNone(replay.rebuilt)
+        self.assertEqual(replay.rebuilt.storage_schema_version, STORAGE_SCHEMA_VERSION)
+        self.assertIsNotNone(replay.rebuilt.similarity_summary)
+
+    def test_dynamic_end_replay_is_candidate_level_pure_and_keeps_prediction_nullables(self):
+        first = replace(
+            self.make_screen("candidate-r07", "r07-1"),
+            screen_index=1,
+            position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        same = replace(
+            self.make_screen("candidate-r07", "r07-2"),
+            screen_index=2,
+            position_status="same",
+            page_change_status="same",
+            reference_screen_id=first.screen_id,
+            dynamic_end_version="r07-v1",
+            prediction_reason="exact_same",
+        )
+        candidate = self.make_candidate_for_screens(
+            (first, same),
+            dynamic_end_mode="shadow",
+            dynamic_end_reason=None,
+            first_predicted_end_screen=2,
+            first_predicted_end_reason="possible_scroll_bottom",
+            prediction_would_miss_content=None,
+            prediction_would_miss_rule_match=None,
+            prediction_observation_complete=True,
+            prediction_evidence_complete=True,
+        )
+        source_before = candidate.to_json()
+
+        replay = replay_dynamic_end(candidate)
+
+        self.assertEqual(replay.position_statuses, ("initial", "same"))
+        self.assertEqual(replay.offline_bottom_status, "possible_scroll_bottom")
+        self.assertIsNone(replay.recorded_dynamic_end_reason)
+        self.assertIsNone(replay.prediction_would_miss_content)
+        self.assertIsNone(replay.prediction_would_miss_rule_match)
+        self.assertEqual(candidate.to_json(), source_before)
+
+    def test_dynamic_end_replay_replays_no_new_and_never_confirms_bottom(self):
+        builder = CandidateOcrBuilder(
+            "run-replay", 1, candidate_record_id="candidate-no-new",
+            created_at="2026-07-30T12:00:00+08:00",
+            aggregation_mode="record", similarity_mode="record",
+        )
+        for index in range(1, 4):
+            screen_id = "no-new-{0}".format(index)
+            item = OCRItem("历史 C++ 内容", 0.95,
+                           ((0, 0), (160, 0), (160, 20), (0, 20)))
+            normalization = normalize_ocr_text((NormalizationBox(
+                "{0}:box".format(screen_id), item.text, item.box, 0,
+                item.confidence,
+            ),))
+            builder.build_screen_record(
+                (item,), capture_type=CaptureType.FORMAL_SCREEN,
+                is_formal_screen=True, screen_index=index, screen_id=screen_id,
+                captured_at="2026-07-30T12:00:0{0}+08:00".format(index),
+                normalization=normalization, ocr_min_confidence=0.85,
+            )
+        source = builder.finalize(
+            CaptureStatus.COMPLETED, end_reason="existing_flow_completed",
+        )
+        # The builder above gives us real R05/R06-shaped records.  Freeze the
+        # persisted result projection expected by the full no-new predicate;
+        # the replay must read it, never recompute it.
+        for index, screen in enumerate(source.screens):
+            object.__setattr__(screen, "dynamic_end_version", "r07-v1")
+            object.__setattr__(
+                screen, "position_status", "initial" if index == 0 else "changed",
+            )
+            if index:
+                result = replace(
+                    screen.similarity_result,
+                    similarity_status=SimilarityStatus.COMPLETED,
+                    effective_new_status=EffectiveNewStatus.NONE,
+                    has_effective_new_text=False,
+                    effective_new_segment_count=0,
+                    ineffective_new_segment_count=0,
+                    possible_new_segment_count=0,
+                    effective_new_char_count=0,
+                    possible_new_char_count=0,
+                    effective_new_decisions=(),
+                    comparison_class=ComparisonClass.CHANGED_WITHOUT_EFFECTIVE_NEW,
+                    warning_codes=(),
+                )
+                object.__setattr__(screen, "aggregation_status", AggregationStatus.COMPLETED)
+                object.__setattr__(screen, "similarity_result", result)
+                object.__setattr__(screen, "has_effective_new_text", False)
+                object.__setattr__(screen, "uncertain_segment_ids", ())
+                object.__setattr__(screen, "uncertain_segment_count", 0)
+                object.__setattr__(screen, "uncertain_char_count", 0)
+                object.__setattr__(screen, "aggregation_warning_codes", ())
+                object.__setattr__(screen, "aggregation_duplicate_risk", None)
+        object.__setattr__(source, "dynamic_end_mode", "shadow")
+        candidate = source
+
+        replay = replay_dynamic_end(candidate)
+
+        self.assertTrue(replay.no_new_text_candidate)
+        self.assertGreaterEqual(replay.consecutive_no_new_count, 2)
+        self.assertEqual(replay.offline_bottom_status, "insufficient_evidence")
+        self.assertNotEqual(replay.offline_bottom_status, "scroll_bottom")
+
+    def test_dynamic_end_replay_handles_legacy_rule_store_failure_and_platform_purely(self):
+        first = replace(
+            self.make_screen("candidate-r07", "legacy-1"),
+            screen_index=1,
+            position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        confirmation = replace(
+            self.make_screen("candidate-r07", "legacy-2"),
+            screen_index=2,
+            is_formal_screen=False,
+            capture_type=CaptureType.RULE_CONFIRMATION,
+            position_status="same",
+            dynamic_end_version="r07-v1",
+        )
+        object.__setattr__(confirmation, "legacy_match", True)
+        candidate = self.make_candidate_for_screens(
+            (first, confirmation),
+            dynamic_end_mode="shadow",
+            dynamic_end_reason=None,
+            first_predicted_end_screen=1,
+            first_predicted_end_reason="possible_scroll_bottom",
+            prediction_observation_complete=False,
+            prediction_evidence_complete=False,
+        )
+        before = candidate.to_json()
+        with patch("sys.platform", "win32"):
+            windows = replay_dynamic_end(candidate)
+        with patch("sys.platform", "darwin"):
+            macos = replay_dynamic_end(candidate)
+
+        self.assertEqual(windows, macos)
+        self.assertTrue(windows.legacy_rule_completed)
+        self.assertTrue(windows.prediction_would_miss_rule_match)
+        self.assertIsNone(windows.prediction_would_miss_content)
+        self.assertIsNone(windows.recorded_dynamic_end_reason)
+        self.assertEqual(candidate.to_json(), before)
+
+        store_failed = replace(candidate, abort_reason="store_failed")
+        failed_replay = replay_dynamic_end(store_failed)
+        self.assertEqual(failed_replay.offline_bottom_status, "insufficient_evidence")
+        self.assertTrue(failed_replay.insufficient_evidence)
+        self.assertIsNone(failed_replay.prediction_would_miss_content)
+        self.assertIsNone(failed_replay.prediction_would_miss_rule_match)
+
+    def test_dynamic_end_replay_legacy_schema_and_output_do_not_expose_ocr_text(self):
+        private_text = "候选人 13800138000 secret@example.com"
+        screen = replace(
+            self.make_screen("candidate-r07", "private"),
+            raw_text=private_text,
+            raw_boxes=(replace(self.make_screen("candidate-r07", "private").raw_boxes[0], raw_text=private_text),),
+        )
+        raw = self.make_candidate(screen).to_dict()
+        raw["storage_schema_version"] = LEGACY_STORAGE_SCHEMA_VERSION
+        raw["screens"][0]["storage_schema_version"] = LEGACY_STORAGE_SCHEMA_VERSION
+        legacy = CandidateOcrDocument.from_dict(raw)
+
+        replay = replay_dynamic_end(legacy)
+
+        self.assertEqual(replay.position_statuses, ("initial",))
+        self.assertTrue(replay.insufficient_evidence)
+        self.assertIsNone(replay.first_predicted_end_screen)
+        self.assertNotIn(private_text, str(replay))
+        self.assertNotIn("13800138000", str(replay))
+        self.assertNotIn("secret@example.com", str(replay))
+
+    # ── R07-IMPL-001: Replay rule completion only from rule_confirmation ──
+
+    def test_impl001_first_pass_rule_hit_is_not_confirmed_completion(self):
+        """Only rule_confirmation + legacy_match=True is a completed rule."""
+        first = replace(
+            self.make_screen("candidate-r07", "001-1"),
+            screen_index=1,
+            position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        formal_hit = replace(
+            self.make_screen("candidate-r07", "001-2"),
+            screen_index=2,
+            capture_type=CaptureType.FORMAL_SCREEN,
+            is_formal_screen=True,
+            position_status="same",
+            dynamic_end_version="r07-v1",
+        )
+        object.__setattr__(formal_hit, "legacy_match", True)
+        confirmation_fail = replace(
+            self.make_screen("candidate-r07", "001-3"),
+            screen_index=2,
+            capture_type=CaptureType.RULE_CONFIRMATION,
+            is_formal_screen=False,
+            position_status="same",
+            dynamic_end_version="r07-v1",
+        )
+        object.__setattr__(confirmation_fail, "legacy_match", False)
+        candidate = self.make_candidate_for_screens(
+            (first, formal_hit, confirmation_fail),
+            dynamic_end_mode="shadow",
+            dynamic_end_reason=None,
+            first_predicted_end_screen=1,
+            first_predicted_end_reason="possible_scroll_bottom",
+        )
+        replay = replay_dynamic_end(candidate)
+        # G1: formal_screen.legacy_match alone does NOT confirm legacy rule
+        self.assertFalse(replay.legacy_rule_completed)
+        self.assertIsNone(replay.prediction_would_miss_rule_match)
+
+    def test_impl001_confirmed_rule_hit_is_completion(self):
+        first = replace(
+            self.make_screen("candidate-r07", "001-conf-1"),
+            screen_index=1,
+            position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        confirmed = replace(
+            self.make_screen("candidate-r07", "001-conf-2"),
+            screen_index=1,
+            capture_type=CaptureType.RULE_CONFIRMATION,
+            is_formal_screen=False,
+            position_status="same",
+            dynamic_end_version="r07-v1",
+        )
+        object.__setattr__(confirmed, "legacy_match", True)
+        candidate = self.make_candidate_for_screens(
+            (first, confirmed),
+            dynamic_end_mode="shadow",
+            dynamic_end_reason=None,
+            first_predicted_end_screen=1,
+            first_predicted_end_reason="possible_scroll_bottom",
+            prediction_observation_complete=False,
+            prediction_evidence_complete=False,
+        )
+        replay = replay_dynamic_end(candidate)
+        self.assertTrue(replay.legacy_rule_completed)
+        self.assertTrue(replay.prediction_would_miss_rule_match)
+
+    def test_impl001_no_first_prediction_no_rule_miss_claim(self):
+        first = self.make_screen("candidate-r07", "001-no-pred")
+        candidate = self.make_candidate_for_screens(
+            (first,),
+            dynamic_end_mode="shadow",
+            dynamic_end_reason=None,
+            first_predicted_end_screen=None,
+            first_predicted_end_reason=None,
+        )
+        replay = replay_dynamic_end(candidate)
+        self.assertFalse(replay.legacy_rule_completed)
+        self.assertIsNone(replay.prediction_would_miss_rule_match)
+        self.assertIsNone(replay.prediction_would_miss_content)
+
+    def test_impl001_legacy_schema_no_confirmation_record(self):
+        private = "候选人 13800138011"
+        screen = replace(
+            self.make_screen("candidate-r07", "001-legacy"),
+            raw_text=private,
+            raw_boxes=(replace(
+                self.make_screen("candidate-r07", "001-legacy").raw_boxes[0],
+                raw_text=private,
+            ),),
+        )
+        object.__setattr__(screen, "storage_schema_version", LEGACY_STORAGE_SCHEMA_VERSION)
+        raw = self.make_candidate(screen).to_dict()
+        raw["storage_schema_version"] = LEGACY_STORAGE_SCHEMA_VERSION
+        raw["screens"][0]["storage_schema_version"] = LEGACY_STORAGE_SCHEMA_VERSION
+        legacy = CandidateOcrDocument.from_dict(raw)
+        replay = replay_dynamic_end(legacy)
+        self.assertFalse(replay.legacy_rule_completed)
+        self.assertTrue(replay.insufficient_evidence)
+
+    def test_impl001_source_object_is_not_mutated(self):
+        first = replace(
+            self.make_screen("candidate-r07", "001-mut-1"),
+            screen_index=1,
+            position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        candidate = self.make_candidate_for_screens(
+            (first,),
+            dynamic_end_mode="shadow",
+            dynamic_end_reason=None,
+            first_predicted_end_screen=1,
+            first_predicted_end_reason="possible_scroll_bottom",
+        )
+        before = candidate.to_json()
+        replay_dynamic_end(candidate)
+        self.assertEqual(candidate.to_json(), before)
+
+    # ── R07-IMPL-002: Replay evidence completeness gate ──
+
+    def test_impl002_incomplete_evidence_is_insufficient(self):
+        first = replace(
+            self.make_screen("candidate-r07", "002-1"),
+            screen_index=1,
+            position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        second = replace(
+            self.make_screen("candidate-r07", "002-2"),
+            screen_index=2,
+            position_status="same",
+            dynamic_end_version="r07-v1",
+        )
+        candidate = self.make_candidate_for_screens(
+            (first, second),
+            dynamic_end_mode="shadow",
+            dynamic_end_reason=None,
+            first_predicted_end_screen=2,
+            first_predicted_end_reason="possible_scroll_bottom",
+            prediction_observation_complete=False,
+            prediction_evidence_complete=False,
+        )
+        replay = replay_dynamic_end(candidate)
+        self.assertEqual(replay.offline_bottom_status, "insufficient_evidence")
+        self.assertTrue(replay.insufficient_evidence)
+
+    def test_impl002_observation_false_evidence_true_is_insufficient(self):
+        first = replace(
+            self.make_screen("candidate-r07", "002-obs1"),
+            screen_index=1, position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        second = replace(
+            self.make_screen("candidate-r07", "002-obs2"),
+            screen_index=2, position_status="same",
+            dynamic_end_version="r07-v1",
+        )
+        candidate = self.make_candidate_for_screens(
+            (first, second),
+            first_predicted_end_screen=2,
+            first_predicted_end_reason="possible_scroll_bottom",
+            prediction_observation_complete=False,
+            prediction_evidence_complete=True,
+        )
+        replay = replay_dynamic_end(candidate)
+        self.assertEqual(replay.offline_bottom_status, "insufficient_evidence")
+        self.assertTrue(replay.insufficient_evidence)
+
+    def test_impl002_observation_true_evidence_false_is_insufficient(self):
+        first = replace(
+            self.make_screen("candidate-r07", "002-oe1"),
+            screen_index=1, position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        second = replace(
+            self.make_screen("candidate-r07", "002-oe2"),
+            screen_index=2, position_status="same",
+            dynamic_end_version="r07-v1",
+        )
+        candidate = self.make_candidate_for_screens(
+            (first, second),
+            first_predicted_end_screen=2,
+            first_predicted_end_reason="possible_scroll_bottom",
+            prediction_observation_complete=True,
+            prediction_evidence_complete=False,
+        )
+        replay = replay_dynamic_end(candidate)
+        self.assertEqual(replay.offline_bottom_status, "insufficient_evidence")
+        self.assertTrue(replay.insufficient_evidence)
+
+    def test_impl002_both_complete_true_is_possible(self):
+        first = replace(
+            self.make_screen("candidate-r07", "002-g-1"),
+            screen_index=1, position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        second = replace(
+            self.make_screen("candidate-r07", "002-g-2"),
+            screen_index=2, position_status="same",
+            dynamic_end_version="r07-v1",
+        )
+        candidate = self.make_candidate_for_screens(
+            (first, second),
+            first_predicted_end_screen=2,
+            first_predicted_end_reason="possible_scroll_bottom",
+            prediction_observation_complete=True,
+            prediction_evidence_complete=True,
+        )
+        replay = replay_dynamic_end(candidate)
+        self.assertEqual(replay.offline_bottom_status, "possible_scroll_bottom")
+        self.assertFalse(replay.insufficient_evidence)
+
+    def test_impl002_null_completeness_old_schema_is_insufficient(self):
+        first = replace(
+            self.make_screen("candidate-r07", "002-old-1"),
+            screen_index=1, position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        candidate = self.make_candidate_for_screens(
+            (first,),
+            first_predicted_end_screen=1,
+            first_predicted_end_reason="possible_scroll_bottom",
+            prediction_observation_complete=None,
+            prediction_evidence_complete=None,
+        )
+        replay = replay_dynamic_end(candidate)
+        self.assertEqual(replay.offline_bottom_status, "insufficient_evidence")
+        self.assertTrue(replay.insufficient_evidence)
+
+    def test_impl002_store_failure_no_abort_is_insufficient(self):
+        first = replace(
+            self.make_screen("candidate-r07", "002-sf-1"),
+            screen_index=1, position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        second = replace(
+            self.make_screen("candidate-r07", "002-sf-2"),
+            screen_index=2, position_status="same",
+            dynamic_end_version="r07-v1",
+        )
+        candidate = self.make_candidate_for_screens(
+            (first, second),
+            first_predicted_end_screen=2,
+            first_predicted_end_reason="possible_scroll_bottom",
+            prediction_observation_complete=False,
+            prediction_evidence_complete=False,
+        )
+        replay = replay_dynamic_end(candidate)
+        self.assertEqual(replay.offline_bottom_status, "insufficient_evidence")
+        self.assertTrue(replay.insufficient_evidence)
+
+    def test_impl002_source_object_not_mutated(self):
+        first = replace(
+            self.make_screen("candidate-r07", "002-mut-1"),
+            screen_index=1, position_status="initial",
+            dynamic_end_version="r07-v1",
+        )
+        candidate = self.make_candidate_for_screens(
+            (first,),
+            first_predicted_end_screen=2,
+            first_predicted_end_reason="possible_scroll_bottom",
+            prediction_observation_complete=False,
+            prediction_evidence_complete=False,
+        )
+        before = candidate.to_json()
+        replay_dynamic_end(candidate)
+        self.assertEqual(candidate.to_json(), before)
 
 
 if __name__ == "__main__":

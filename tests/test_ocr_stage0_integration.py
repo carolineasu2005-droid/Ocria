@@ -3,9 +3,9 @@ from unittest.mock import Mock, patch
 
 import simple_brush
 import ocr_normalization
-from ocr_detector import OCRKeywordDetector, ScanObservation
+from ocr_detector import DynamicEndConfig, OCRKeywordDetector, ScanObservation
 from ocr_normalization import NormalizationBox, normalize_ocr_text
-from ocr_records import CaptureStatus, CaptureType, RunStatus
+from ocr_records import CandidateOcrDocument, CaptureStatus, CaptureType, RunStatus
 from ocr_text import OCRItem
 
 
@@ -27,6 +27,7 @@ class FakeStore:
         self.screens = []
         self.candidates = []
         self.candidate_attempts = []
+        self.candidate_owner_attempts = []
         self.errors = []
         self.error_attempts = 0
         self.closed_status = None
@@ -35,8 +36,9 @@ class FakeStore:
         self.screens.append(record)
         return not self.fail_screens
 
-    def save_candidate(self, document):
+    def save_candidate(self, document, *, owner_candidate_record_id=None):
         self.candidate_attempts.append(document)
+        self.candidate_owner_attempts.append(owner_candidate_record_id)
         if self.candidate_save_error is not None:
             raise self.candidate_save_error
         if not self.enabled or not self.candidate_save_result:
@@ -172,13 +174,17 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         self.assertEqual(len(store.screens), 2)
         self.assertEqual(
             [record.capture_type for record in store.screens],
-            [CaptureType.FORMAL_SCREEN, CaptureType.SCROLL_CONFIRMATION],
+            [CaptureType.FORMAL_SCREEN, CaptureType.RULE_CONFIRMATION],
         )
         self.assertEqual(
             [record.is_formal_screen for record in store.screens],
             [True, False],
         )
         self.assertEqual(store.screens[0].raw_boxes[0].raw_text, "虚构 Python")
+        self.assertEqual(store.screens[0].position_status, "initial")
+        self.assertEqual(store.screens[0].page_change_status, "initial")
+        self.assertEqual(store.screens[0].prediction_reason, "initial_screen")
+        self.assertEqual(store.screens[0].dynamic_end_version, "r07-v1")
         for record in store.screens:
             self.assertEqual(record.normalization_status.value, "completed")
             self.assertEqual(record.normalization_version, "r04-v1")
@@ -207,6 +213,550 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNone(second)
         self.assertEqual(len(store.screens), 1)
+
+    def test_detector_callback_returns_store_bool_without_scan_control(self):
+        store = FakeStore()
+        self.start_builder(store)
+
+        result = simple_brush.record_detection_observation(
+            self.observation(),
+            CaptureType.FORMAL_SCREEN,
+            True,
+            1,
+        )
+
+        self.assertTrue(result.saved)
+        self.assertIs(result.record, store.screens[0])
+        self.assertEqual(result.position_decision.position_status, "initial")
+
+        failing_store = FakeStore(fail_screens=True)
+        simple_brush.current_candidate_builder = None
+        simple_brush.recorded_observation_ids = {}
+        simple_brush.ocr_record_store = failing_store
+        self.start_builder(failing_store)
+        failed = simple_brush.record_detection_observation(
+            self.observation("保存失败"),
+            CaptureType.FORMAL_SCREEN,
+            True,
+            1,
+        )
+        self.assertFalse(failed.saved)
+        self.assertEqual(len(failing_store.screens), 1)
+
+    def test_failed_screen_is_discarded_and_candidate_still_finalizes_once(self):
+        class RejectSecondScreenStore(FakeStore):
+            def __init__(self):
+                super().__init__()
+                self.screen_attempts = []
+
+            def save_screen(self, record):
+                self.screen_attempts.append(record)
+                if len(self.screen_attempts) == 2:
+                    return False
+                self.screens.append(record)
+                return True
+
+        store = RejectSecondScreenStore()
+        builder = self.start_builder(store)
+        first_observation = self.observation("第一屏成功保存的合成内容 Python")
+        failed_observation = self.observation("第二屏技术保存失败的合成内容 C++")
+
+        first = simple_brush.record_detection_observation(
+            first_observation, CaptureType.FORMAL_SCREEN, True, 1,
+        )
+        failed = simple_brush.record_detection_observation(
+            failed_observation, CaptureType.FORMAL_SCREEN, True, 2,
+        )
+        duplicate = simple_brush.record_detection_observation(
+            failed_observation, CaptureType.FORMAL_SCREEN, True, 2,
+        )
+
+        self.assertTrue(first.saved)
+        self.assertFalse(failed.saved)
+        self.assertFalse(duplicate.saved)
+        self.assertEqual(len(store.screen_attempts), 2)
+        self.assertEqual(builder.retained_screen_count, 1)
+
+        document = simple_brush.finalize_current_candidate_recording(
+            CaptureStatus.ABORTED, None, "store_failed",
+        )
+
+        self.assertEqual(len(store.candidates), 1)
+        self.assertIs(store.candidates[0], document)
+        self.assertEqual(document.capture_status, CaptureStatus.ABORTED)
+        self.assertEqual(document.capture_summary.abort_reason, "store_failed")
+        self.assertEqual(document.screens, (store.screens[0],))
+        self.assertEqual(
+            {
+                occurrence.source_screen_id
+                for segment in document.document_segments
+                for occurrence in segment.source_occurrences
+            },
+            {first.record.screen_id},
+        )
+        self.assertNotEqual(failed.record.screen_id, first.record.screen_id)
+        self.assertEqual(
+            document.candidate_record_id,
+            store.screens[0].candidate_record_id,
+        )
+        self.assertEqual(
+            document.candidate_record_id,
+            builder.candidate_record_id,
+        )
+        self.assertTrue(builder.finalized)
+
+    def test_record_validation_error_writes_only_sanitized_diagnostics(self):
+        store = FakeStore()
+        builder = self.start_builder(store)
+        private_text = "PRIVATE OCR BODY MUST NOT APPEAR"
+
+        with patch.object(
+            builder,
+            "build_screen_record",
+            side_effect=ValueError(
+                "aggregation segment classifications are invalid"
+            ),
+        ):
+            result = simple_brush.record_detection_observation(
+                self.observation(private_text),
+                CaptureType.FORMAL_SCREEN,
+                True,
+                2,
+            )
+
+        self.assertFalse(result.saved)
+        self.assertEqual(result.failure_stage, "screen_record_validation")
+        self.assertEqual(
+            result.validation_code, "r05_segment_partition_invalid",
+        )
+        self.assertEqual(len(store.errors), 1)
+        error_type, operation, context = store.errors[0]
+        self.assertEqual(error_type, "ValueError")
+        self.assertEqual(operation, "record_ocr_observation")
+        self.assertEqual(
+            context["failure_stage"], "screen_record_validation",
+        )
+        self.assertEqual(
+            context["sanitized_error_message"],
+            "aggregation segment classifications are invalid",
+        )
+        self.assertNotIn(private_text, repr(context))
+        self.assertEqual(builder.retained_screen_count, 0)
+
+    def test_formal_slots_build_classify_and_save_one_canonical_record_once(self):
+        store = FakeStore()
+        builder = self.start_builder(store)
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.return_value = [
+            OCRItem(
+                "同一视觉位置的完整候选人内容用于通过既有加载健康阈值并保持足够长的文本", 0.99,
+                ((0, 0), (20, 0), (20, 10), (0, 10)),
+            )
+        ]
+        scroll = Mock()
+        wait = Mock()
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=Mock(),
+            max_scans=2,
+            scroll=scroll,
+            wait=wait,
+            observation_callback=simple_brush.record_detection_observation,
+        )
+        simple_brush.ocr_detector = detector
+
+        with patch.object(
+            builder, "build_screen_record", wraps=builder.build_screen_record,
+        ) as build, patch.object(
+            detector, "_match_observation", wraps=detector._match_observation,
+        ) as rule, patch(
+            "simple_brush.classify_position", wraps=simple_brush.classify_position,
+        ) as classify, patch.object(
+            store, "save_screen", wraps=store.save_screen,
+        ) as save:
+            result = detector.detect(simple_brush.parse_keyword_rules('"不存在"'))
+
+        self.assertFalse(result.confirmed_match)
+        self.assertEqual(capture.calls, 2)
+        self.assertEqual(rule.call_count, 2)
+        self.assertEqual(build.call_count, 2)
+        self.assertEqual(classify.call_count, 2)
+        self.assertEqual(save.call_count, 2)
+        scroll.assert_called_once()
+        self.assertEqual(
+            [record.capture_type for record in store.screens],
+            [CaptureType.FORMAL_SCREEN, CaptureType.FORMAL_SCREEN],
+        )
+        self.assertEqual(
+            [record.position_status for record in store.screens],
+            ["initial", "same"],
+        )
+        self.assertEqual(store.screens[1].reference_screen_id, store.screens[0].screen_id)
+        self.assertIs(builder._screens[0], store.screens[0])
+        self.assertIs(builder._screens[1], store.screens[1])
+        self.assertTrue(detector.last_observation_result.saved)
+        self.assertEqual(detector.dynamic_end_state.scan_slot_count, 2)
+        self.assertEqual(detector.dynamic_end_state.normal_scroll_count, 1)
+        self.assertEqual(detector.dynamic_end_state.ocr_attempt_count, 2)
+        self.assertEqual(detector.dynamic_end_state.unique_position_count, 1)
+
+    @staticmethod
+    def _recovery_item(text):
+        return OCRItem(
+            text,
+            0.99,
+            ((0, 0), (320, 0), (320, 20), (0, 20)),
+        )
+
+    def _run_recovery_detector(self, *, mode, texts, max_scans, store=None):
+        store = FakeStore() if store is None else store
+        self.start_builder(store)
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.side_effect = [
+            [self._recovery_item(text)] for text in texts
+        ]
+        scroll = Mock()
+        wait = Mock()
+        restore_focus = Mock(return_value=True)
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=Mock(),
+            max_scans=max_scans,
+            scroll=scroll,
+            wait=wait,
+            observation_callback=simple_brush.record_detection_observation,
+            dynamic_end_config=DynamicEndConfig(mode=mode),
+            restore_focus=restore_focus,
+        )
+        simple_brush.ocr_detector = detector
+        result = detector.detect(simple_brush.parse_keyword_rules('"不存在"'))
+        return store, capture, scroll, wait, restore_focus, detector, result
+
+    def test_shadow_and_off_keep_first_same_recovery_side_effect_free(self):
+        for mode in ("off", "shadow"):
+            with self.subTest(mode=mode):
+                store, capture, scroll, wait, restore, detector, result = (
+                    self._run_recovery_detector(
+                        mode=mode,
+                        texts=("足够长的同一视觉位置内容用于保持加载健康" * 2,) * 2,
+                        max_scans=2,
+                    )
+                )
+                self.assertFalse(result.scroll_bottom_candidate)
+                restore.assert_not_called()
+                self.assertEqual(capture.calls, 2)
+                self.assertEqual(scroll.call_count, 1)
+                self.assertEqual(wait.call_count, 1)
+                self.assertEqual(detector.dynamic_end_state.focus_restore_count, 0)
+                self.assertEqual(detector.dynamic_end_state.scroll_retry_count, 0)
+                self.assertFalse(detector.dynamic_end_state.recovery_used)
+                self.assertNotIn(
+                    CaptureType.POSITION_CONFIRMATION,
+                    [record.capture_type for record in store.screens],
+                )
+
+    def test_shadow_candidate_summary_projects_nullable_prediction_fields(self):
+        same_text = "足够长的同一视觉位置内容用于保持加载健康" * 2
+        store, _capture, _scroll, _wait, _restore, _detector, result = (
+            self._run_recovery_detector(
+                mode="shadow", texts=(same_text,) * 3, max_scans=3,
+            )
+        )
+        document = simple_brush.finalize_current_candidate_recording(
+            CaptureStatus.COMPLETED,
+            "existing_flow_completed",
+            detection_result=result,
+        )
+
+        self.assertEqual(document.dynamic_end_mode, "shadow")
+        self.assertIsNone(document.dynamic_end_reason)
+        self.assertEqual(document.first_predicted_end_screen, 2)
+        self.assertEqual(document.first_predicted_end_reason, "possible_scroll_bottom")
+        self.assertIsNone(document.prediction_would_miss_content)
+        self.assertFalse(document.prediction_would_miss_rule_match)
+        self.assertTrue(document.prediction_observation_complete)
+        self.assertFalse(document.prediction_evidence_complete)
+        self.assertEqual(document.versions["dynamic_end"], "r07-v1")
+        self.assertIs(store.candidates[0], document)
+        restored = CandidateOcrDocument.from_dict(document.to_dict())
+        self.assertEqual(restored.first_predicted_end_screen, 2)
+        self.assertIsNone(restored.prediction_would_miss_content)
+
+    def test_shadow_store_failure_keeps_legacy_scan_and_invalidates_false_conclusions(self):
+        same_text = "足够长的同一视觉位置内容用于保持加载健康" * 2
+        store = FakeStore()
+        original_save_screen = store.save_screen
+        save_count = 0
+
+        def save_screen(record):
+            nonlocal save_count
+            save_count += 1
+            was_failed = store.fail_screens
+            store.fail_screens = save_count == 3
+            try:
+                return original_save_screen(record)
+            finally:
+                store.fail_screens = was_failed
+
+        store.save_screen = Mock(side_effect=save_screen)
+        _store, capture, scroll, wait, restore, detector, result = (
+            self._run_recovery_detector(
+                mode="shadow", texts=(same_text,) * 3, max_scans=3, store=store,
+            )
+        )
+
+        self.assertEqual(store.save_screen.call_count, 3)
+        self.assertEqual(capture.calls, 3)
+        self.assertEqual(scroll.call_count, 2)
+        self.assertEqual(wait.call_count, 2)
+        restore.assert_not_called()
+        self.assertEqual(detector.dynamic_end_state.scan_slot_count, 3)
+        self.assertIsNone(result.prediction_would_miss_content)
+        self.assertIsNone(result.prediction_would_miss_rule_match)
+        self.assertFalse(result.prediction_evidence_complete)
+
+    def test_shadow_detector_never_enters_upper_action_finalize_next_or_refresh_flow(self):
+        same_text = "足够长的同一视觉位置内容用于保持加载健康" * 2
+        with patch.object(simple_brush, "perform_favorite_action") as action, \
+             patch.object(simple_brush, "finalize_current_candidate_recording") as finalize, \
+             patch.object(simple_brush, "next_candidate") as next_candidate, \
+             patch.object(simple_brush, "refresh_page") as refresh:
+            self._run_recovery_detector(
+                mode="shadow", texts=(same_text,) * 3, max_scans=3,
+            )
+
+        action.assert_not_called()
+        finalize.assert_not_called()
+        next_candidate.assert_not_called()
+        refresh.assert_not_called()
+
+    def test_safe_first_same_returns_confirmed_bottom_once(self):
+        same_text = "足够长的同一视觉位置内容用于保持加载健康" * 2
+        store, capture, scroll, wait, restore, detector, result = (
+            self._run_recovery_detector(
+                mode="safe", texts=(same_text,) * 3, max_scans=3,
+            )
+        )
+
+        self.assertFalse(result.confirmed_match)
+        self.assertEqual(result.dynamic_end_reason, "scroll_bottom")
+        self.assertTrue(result.scroll_bottom_candidate)
+        self.assertEqual(capture.calls, 3)
+        self.assertEqual(scroll.call_count, 2)  # 1 normal + 1 retry
+        self.assertEqual(wait.call_count, 2)  # normal settle + confirmation settle
+        restore.assert_called_once()
+        self.assertEqual(
+            [record.capture_type for record in store.screens],
+            [
+                CaptureType.FORMAL_SCREEN,
+                CaptureType.FORMAL_SCREEN,
+                CaptureType.POSITION_CONFIRMATION,
+            ],
+        )
+        self.assertTrue(store.screens[2].is_position_confirmation)
+        self.assertEqual(store.screens[2].position_status, "same")
+        self.assertEqual(detector.dynamic_end_state.scan_slot_count, 2)
+        self.assertEqual(detector.dynamic_end_state.unique_position_count, 1)
+        self.assertEqual(detector.dynamic_end_state.ocr_attempt_count, 3)
+        self.assertEqual(detector.dynamic_end_state.normal_scroll_count, 1)
+        self.assertEqual(detector.dynamic_end_state.focus_restore_count, 1)
+        self.assertEqual(detector.dynamic_end_state.scroll_retry_count, 1)
+        self.assertEqual(
+            simple_brush.candidate_capture_status(result),
+            (CaptureStatus.COMPLETED_WITH_LIMIT, "scroll_bottom"),
+        )
+
+    def test_full_scroll_bottom_finalizes_completed_with_limit_candidate(self):
+        same_text = "Full 配置滚动到底的合成候选人内容" * 3
+        store, _capture, _scroll, _wait, _restore, _detector, result = (
+            self._run_recovery_detector(
+                mode="full", texts=(same_text,) * 3, max_scans=3,
+            )
+        )
+        status, end_reason = simple_brush.candidate_capture_status(result)
+        document = simple_brush.finalize_current_candidate_recording(
+            status, end_reason, detection_result=result,
+        )
+
+        self.assertEqual(status, CaptureStatus.COMPLETED_WITH_LIMIT)
+        self.assertEqual(end_reason, "scroll_bottom")
+        self.assertEqual(document.capture_status, CaptureStatus.COMPLETED_WITH_LIMIT)
+        self.assertEqual(document.dynamic_end_mode, "full")
+        self.assertEqual(document.dynamic_end_reason, "scroll_bottom")
+        self.assertEqual(len(document.screens), 3)
+        self.assertEqual(
+            sum(screen.is_position_confirmation is True for screen in document.screens),
+            1,
+        )
+        self.assertTrue(all(
+            screen.candidate_record_id == document.candidate_record_id
+            for screen in store.screens
+        ))
+        self.assertEqual(store.candidates, [document])
+
+    def test_full_two_healthy_changed_no_new_screens_finalize_candidate(self):
+        base_segments = tuple(
+            "合成历史片段 {0}，长度足够用于稳定边界匹配".format(index) * 2
+            for index in range(8)
+        )
+        pages = (base_segments, base_segments[1:], base_segments[2:])
+
+        class SegmentBackend:
+            def __init__(self, values):
+                self.values = values
+                self.calls = 0
+
+            def recognize(self, _image):
+                values = self.values[self.calls]
+                self.calls += 1
+                return tuple(
+                    OCRItem(
+                        text, 0.99,
+                        ((0, index * 30), (240, index * 30),
+                         (240, index * 30 + 20), (0, index * 30 + 20)),
+                    )
+                    for index, text in enumerate(values)
+                )
+
+        store = FakeStore()
+        self.start_builder(store)
+        backend = SegmentBackend(pages)
+        scroll = Mock()
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=FakeCapture(),
+            region=Mock(),
+            max_scans=8,
+            scroll=scroll,
+            wait=Mock(),
+            observation_callback=simple_brush.record_detection_observation,
+            dynamic_end_config=DynamicEndConfig(mode="full"),
+            restore_focus=Mock(return_value=True),
+        )
+        simple_brush.ocr_detector = detector
+
+        result = detector.detect(simple_brush.parse_keyword_rules('"不存在"'))
+        status, end_reason = simple_brush.candidate_capture_status(result)
+        document = simple_brush.finalize_current_candidate_recording(
+            status, end_reason, detection_result=result,
+        )
+
+        self.assertEqual(backend.calls, 3)
+        self.assertEqual(scroll.call_count, 2)
+        self.assertEqual(result.dynamic_end_reason, "no_new_text")
+        self.assertEqual(status, CaptureStatus.COMPLETED_WITH_LIMIT)
+        self.assertEqual(end_reason, "no_new_text")
+        self.assertEqual(
+            [screen.position_status for screen in document.screens],
+            ["initial", "changed", "changed"],
+        )
+        for screen in document.screens[1:]:
+            self.assertEqual(screen.aggregation_status.value, "completed")
+            self.assertEqual(
+                screen.similarity_result.similarity_status.value, "completed",
+            )
+            self.assertEqual(
+                screen.similarity_result.effective_new_status.value, "none",
+            )
+            self.assertFalse(screen.similarity_result.has_effective_new_text)
+            self.assertEqual(screen.similarity_result.effective_new_segment_count, 0)
+            self.assertEqual(screen.similarity_result.possible_new_segment_count, 0)
+            self.assertEqual(screen.uncertain_segment_ids, ())
+        self.assertEqual(document.dynamic_end_mode, "full")
+        self.assertEqual(document.dynamic_end_reason, "no_new_text")
+        self.assertEqual(document.capture_status, CaptureStatus.COMPLETED_WITH_LIMIT)
+        self.assertEqual(store.candidates, [document])
+
+    def test_confirmation_store_failure_is_not_a_bottom_candidate_or_retry(self):
+        same_text = "足够长的同一视觉位置内容用于保持加载健康" * 2
+        store = FakeStore()
+        original_save_screen = store.save_screen
+        save_count = 0
+
+        def save_screen(record):
+            nonlocal save_count
+            save_count += 1
+            was_failed = store.fail_screens
+            store.fail_screens = save_count == 3  # confirmation only
+            try:
+                return original_save_screen(record)
+            finally:
+                store.fail_screens = was_failed
+
+        store.save_screen = Mock(side_effect=save_screen)
+        store, capture, scroll, wait, restore, detector, result = (
+            self._run_recovery_detector(
+                mode="safe", texts=(same_text,) * 4, max_scans=3, store=store,
+            )
+        )
+
+        self.assertEqual(store.save_screen.call_count, 3)
+        self.assertEqual(capture.calls, 3)
+        self.assertEqual(scroll.call_count, 2)
+        self.assertEqual(wait.call_count, 2)
+        restore.assert_called_once()
+        self.assertFalse(result.scroll_bottom_candidate)
+        self.assertEqual(result.abort_reason, "store_failed")
+        self.assertEqual(result.recovery_reason, "store_failed")
+        self.assertEqual(detector.dynamic_end_state.scroll_retry_count, 1)
+
+    def test_recovery_never_invokes_page_lifecycle_or_next(self):
+        same_text = "足够长的同一视觉位置内容用于保持加载健康" * 2
+        with patch.object(simple_brush, "run_detail_load_gate", side_effect=AssertionError("P0")), \
+             patch.object(simple_brush, "confirm_candidate_switch", side_effect=AssertionError("R01")), \
+             patch.object(simple_brush, "next_candidate", side_effect=AssertionError("next")):
+            self._run_recovery_detector(
+                mode="safe", texts=(same_text,) * 4, max_scans=3,
+            )
+
+    def test_changed_confirmation_is_promoted_once_and_eighth_same_does_not_recover(self):
+        first = "第一段足够长的内容用于保持加载健康" * 2
+        changed = "第二段不同且足够长的内容用于保持加载健康" * 2
+        later = "第三段不同且足够长的内容用于保持加载健康" * 2
+        store, capture, scroll, wait, restore, detector, _result = (
+            self._run_recovery_detector(
+                mode="full", texts=(first, first, changed, later), max_scans=4,
+            )
+        )
+        self.assertEqual(capture.calls, 4)
+        self.assertEqual(scroll.call_count, 3)  # slot 2, retry, slot 4
+        self.assertEqual(wait.call_count, 3)
+        restore.assert_called_once()
+        self.assertEqual(
+            [record.capture_type for record in store.screens],
+            [CaptureType.FORMAL_SCREEN] * 4,
+        )
+        self.assertEqual(store.screens[2].screen_index, 3)
+        self.assertEqual(store.screens[2].position_status, "changed")
+        self.assertEqual(detector.dynamic_end_state.scan_slot_count, 4)
+        self.assertEqual(detector.dynamic_end_state.unique_position_count, 3)
+
+        values = tuple(
+            "第{0}段不同且足够长的内容用于保持加载健康".format(index) * 2
+            for index in range(1, 8)
+        )
+        eighth_store, eighth_capture, eighth_scroll, eighth_wait, eighth_restore, eighth_detector, eighth_result = (
+            self._run_recovery_detector(
+                mode="safe", texts=values + (values[-1],), max_scans=8,
+            )
+        )
+        self.assertEqual(eighth_capture.calls, 8)
+        self.assertEqual(eighth_scroll.call_count, 7)
+        self.assertEqual(eighth_wait.call_count, 7)
+        eighth_restore.assert_not_called()
+        self.assertEqual(eighth_detector.dynamic_end_state.focus_restore_count, 0)
+        self.assertEqual(eighth_detector.dynamic_end_state.scroll_retry_count, 0)
+        self.assertEqual(eighth_detector.dynamic_end_state.scan_slot_count, 8)
+        self.assertEqual(eighth_store.screens[-1].position_status, "same")
+        self.assertEqual(eighth_result.dynamic_end_reason, "max_screen_limit")
+        self.assertEqual(
+            simple_brush.candidate_capture_status(eighth_result),
+            (CaptureStatus.COMPLETED_WITH_LIMIT, "max_screen_limit"),
+        )
 
     def test_normalizer_failure_keeps_raw_screen_and_does_not_add_page_calls(self):
         store = FakeStore()
@@ -795,6 +1345,10 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         self.assertTrue(old_builder.finalized)
         self.assertEqual(document.capture_status, CaptureStatus.ABORTED)
         self.assertEqual(len(store.candidate_attempts), 1)
+        self.assertEqual(
+            store.candidate_owner_attempts,
+            [document.candidate_record_id],
+        )
         self.assertEqual(store.candidates, [])
         self.assertIsNone(simple_brush.current_candidate_builder)
         self.assertEqual(simple_brush.recorded_observation_ids, {})

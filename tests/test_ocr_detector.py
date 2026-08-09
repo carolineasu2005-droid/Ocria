@@ -2,6 +2,7 @@ from dataclasses import FrozenInstanceError, fields, replace
 from datetime import datetime, timezone
 import hashlib
 import random
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -14,6 +15,11 @@ from ocr_normalization import (
     NORMALIZATION_FAILED,
 )
 from ocr_detector import (
+    DYNAMIC_END_DEFAULT_MODE,
+    DYNAMIC_END_MODES,
+    DetectionResult,
+    DynamicEndConfig,
+    DynamicEndState,
     FINGERPRINT_HASH_PATTERN,
     FINGERPRINT_VERSION,
     RULE_COMPARISON_LEGACY_ONLY,
@@ -24,6 +30,7 @@ from ocr_detector import (
     RULE_EVALUATION_MODE_LEGACY_SHADOW,
     FingerprintBuildError,
     OCRKeywordDetector,
+    PositionDecision,
     RapidOCRBackend,
     ScanObservation,
     ScreenFingerprint,
@@ -33,6 +40,7 @@ from ocr_detector import (
     build_fingerprint_raw_text,
     build_screen_fingerprint,
     calculate_load_metrics,
+    classify_position,
     compare_screen_fingerprints,
     evaluate_detail_page_load,
     fingerprint_box_bounds,
@@ -51,6 +59,947 @@ from ocr_text import (
 
 def single_rule(keyword):
     return parse_keyword_rules(f'"{keyword}"')
+
+
+class DynamicEndFoundationTests(unittest.TestCase):
+    def test_modes_default_state_boundaries_and_invalid_values(self):
+        self.assertEqual(DYNAMIC_END_DEFAULT_MODE, "shadow")
+        self.assertEqual(DYNAMIC_END_MODES, ("off", "shadow", "safe", "full"))
+        for mode in DYNAMIC_END_MODES:
+            self.assertEqual(DynamicEndConfig(mode=mode).mode, mode)
+            self.assertEqual(DynamicEndState(mode=mode).mode, mode)
+        with self.assertRaisesRegex(ValueError, "mode"):
+            DynamicEndState(mode="invalid")
+        with self.assertRaisesRegex(ValueError, "bound"):
+            DynamicEndState(scan_slot_count=9)
+        with self.assertRaisesRegex(ValueError, "bound"):
+            DynamicEndState(normal_scroll_count=8)
+
+    def test_detection_result_keeps_legacy_completion_separate(self):
+        result = DetectionResult(success=True, confirmed_match=True)
+
+        self.assertTrue(result.confirmed_match)
+        self.assertIsNone(result.dynamic_end_reason)
+        self.assertIsNone(result.abort_reason)
+        self.assertIsNone(result.interrupt_reason)
+
+
+class PositionClassificationTests(unittest.TestCase):
+    def record(self, screen_id, exact_hash, **fields):
+        values = dict(
+            screen_id=screen_id,
+            exact_hash=exact_hash,
+            fingerprint_version="r03-v1",
+            aggregation_status="not_attempted",
+            uncertain_segment_ids=(),
+            uncertain_segment_count=0,
+            uncertain_char_count=0,
+            aggregation_duplicate_risk=None,
+            aggregation_warning_codes=(),
+            has_effective_new_text=False,
+            similarity_result=None,
+        )
+        values.update(fields)
+        return SimpleNamespace(**values)
+
+    def decide(self, previous, current, **health):
+        return classify_position(
+            previous, current,
+            load_health=health.get("load_health", True),
+            ocr_health=health.get("ocr_health", True),
+            identity_health=health.get("identity_health", True),
+        )
+
+    def test_initial_same_different_and_disabled_r05_r06(self):
+        first = self.record("one", "a" * 64)
+        self.assertEqual(self.decide(None, first).position_status, "initial")
+
+        same = self.decide(first, self.record("two", "a" * 64))
+        self.assertEqual((same.position_status, same.page_change_status), ("same", "same"))
+        self.assertEqual(same.reference_screen_id, "one")
+
+        different = self.decide(first, self.record("three", "b" * 64))
+        self.assertEqual((different.position_status, different.page_change_status), ("changed", "changed"))
+
+    def test_effective_new_and_protected_short_text_are_changed(self):
+        previous = self.record("one", "a" * 64)
+        effective = self.record("two", "a" * 64, has_effective_new_text=True)
+        self.assertEqual(self.decide(previous, effective).position_status, "changed")
+
+        protected = self.record(
+            "three", "a" * 64,
+            similarity_result=SimpleNamespace(
+                effective_new_status="present",
+                has_effective_new_text=True,
+                effective_new_segment_count=1,
+                effective_new_decisions=(SimpleNamespace(
+                    reason="short_text_protected", decision="effective",
+                ),),
+                warning_codes=(),
+            ),
+        )
+        self.assertEqual(self.decide(previous, protected).position_status, "changed")
+
+    def test_possible_or_uncertain_evidence_is_uncertain(self):
+        previous = self.record("one", "a" * 64)
+        possible = self.record(
+            "two", "a" * 64,
+            similarity_result=SimpleNamespace(
+                effective_new_status="possible", comparison_class="uncertain",
+                similarity_status="partial", warning_codes=(),
+            ),
+        )
+        decision = self.decide(previous, possible)
+        self.assertEqual(decision.position_status, "uncertain")
+        self.assertTrue(decision.insufficient_evidence)
+
+    def test_missing_r03_or_health_is_unavailable(self):
+        previous = self.record("one", "a" * 64)
+        cases = (
+            self.record("missing-r03", None),
+            self.record("load", "a" * 64),
+            self.record("ocr", "a" * 64),
+            self.record("identity", "a" * 64),
+        )
+        for current, health in (
+            (cases[0], {}),
+            (cases[1], {"load_health": None}),
+            (cases[2], {"ocr_health": False}),
+            (cases[3], {"identity_health": None}),
+        ):
+            with self.subTest(current=current.screen_id):
+                decision = self.decide(previous, current, **health)
+                self.assertEqual(decision.position_status, "unavailable")
+                self.assertTrue(decision.insufficient_evidence)
+
+
+class FirstSameRecoveryFailureTests(unittest.TestCase):
+    def _detector(self, *, callback, restore_focus=Mock(return_value=True),
+                  scroll=None, wait=None, interrupt_reason_provider=None):
+        return OCRKeywordDetector(
+            backend=FakeBackend(["no rule match"] * 4),
+            capture=FakeCapture(),
+            region=ScreenRegion(0, 0, 100, 100),
+            max_scans=3,
+            scroll=Mock() if scroll is None else scroll,
+            wait=Mock() if wait is None else wait,
+            observation_callback=callback,
+            dynamic_end_config=DynamicEndConfig(mode="safe"),
+            restore_focus=restore_focus,
+            interrupt_reason_provider=interrupt_reason_provider,
+        )
+
+    @staticmethod
+    def _callback_with_confirmation(**confirmation_values):
+        call_count = 0
+
+        def callback(_observation, _capture_type, _formal, _screen_index):
+            nonlocal call_count
+            call_count += 1
+            initial = call_count == 1
+            values = dict(
+                record=SimpleNamespace(
+                    screen_id="screen-{0}".format(call_count),
+                    exact_hash="a" * 64,
+                ),
+                saved=True,
+                position_decision=PositionDecision(
+                    "initial" if initial else "same",
+                    "initial" if initial else "same",
+                    None if initial else "screen-{0}".format(call_count - 1),
+                    "test",
+                ),
+                load_health=True,
+                ocr_health=True,
+                identity_health=True,
+            )
+            if call_count == 3:
+                values.update(confirmation_values)
+            return SimpleNamespace(**values)
+
+        return callback
+
+    def test_confirmation_failure_reasons_are_precise_and_do_not_end_scan(self):
+        cases = (
+            ("load_failed", {"load_health": False}),
+            ("ocr_failed", {"ocr_health": False}),
+            ("switch_failed", {"identity_health": False}),
+            ("store_failed", {"saved": False}),
+            (
+                "position_unresolved",
+                {"position_decision": PositionDecision(
+                    "uncertain", "same", "screen-2", "test", True,
+                )},
+            ),
+        )
+        for expected, values in cases:
+            with self.subTest(expected=expected):
+                detector = self._detector(
+                    callback=self._callback_with_confirmation(**values),
+                )
+                result = detector.detect(single_rule("absent"))
+                self.assertEqual(result.recovery_reason, expected)
+                self.assertIsNone(result.dynamic_end_reason)
+                self.assertFalse(result.confirmed_match)
+
+    def test_focus_scroll_capture_and_interrupt_failures_are_precise(self):
+        callback = self._callback_with_confirmation()
+        detector = self._detector(callback=callback, restore_focus=Mock(return_value=False))
+        self.assertEqual(detector.detect(single_rule("absent")).recovery_reason, "focus_restore_failed")
+
+        scroll = Mock(side_effect=[None, RuntimeError("synthetic"), None])
+        detector = self._detector(
+            callback=self._callback_with_confirmation(), scroll=scroll,
+        )
+        self.assertEqual(detector.detect(single_rule("absent")).recovery_reason, "scroll_failed")
+
+        interrupt_calls = iter((None, "user_interrupted"))
+        detector = self._detector(
+            callback=self._callback_with_confirmation(),
+            interrupt_reason_provider=lambda: next(interrupt_calls, "user_interrupted"),
+        )
+        result = detector.detect(single_rule("absent"))
+        self.assertEqual(result.interrupt_reason, "user_interrupted")
+        self.assertIsNone(result.dynamic_end_reason)
+
+        runtime_calls = iter((None, "runtime_expired"))
+        detector = self._detector(
+            callback=self._callback_with_confirmation(),
+            interrupt_reason_provider=lambda: next(runtime_calls, "runtime_expired"),
+        )
+        result = detector.detect(single_rule("absent"))
+        self.assertEqual(result.interrupt_reason, "runtime_expired")
+        self.assertIsNone(result.dynamic_end_reason)
+
+
+class ShadowPredictionTests(unittest.TestCase):
+    @staticmethod
+    def _record(index, *, effective_new=False, protected_short=False,
+                possible=False, completed_evidence=True):
+        result = None
+        aggregation_status = "not_attempted"
+        if completed_evidence:
+            aggregation_status = "completed"
+            result = SimpleNamespace(
+                similarity_status="partial" if possible else "completed",
+                effective_new_status=(
+                    "possible" if possible else
+                    "present" if (effective_new or protected_short) else "none"
+                ),
+                has_effective_new_text=effective_new,
+                effective_new_segment_count=1 if effective_new else 0,
+                effective_new_decisions=(
+                    (SimpleNamespace(reason="short_text_protected", decision="effective"),)
+                    if protected_short else ()
+                ),
+                warning_codes=(),
+            )
+        return SimpleNamespace(
+            screen_id="shadow-{0}".format(index),
+            exact_hash=("a" if index < 3 else chr(ord("a") + index)) * 64,
+            fingerprint_version="r03-v1",
+            aggregation_status=aggregation_status,
+            uncertain_segment_ids=(),
+            uncertain_segment_count=0,
+            uncertain_char_count=0,
+            aggregation_duplicate_risk=None,
+            aggregation_warning_codes=(),
+            has_effective_new_text=effective_new,
+            similarity_result=result,
+            capture_type="formal_screen",
+            is_formal_screen=True,
+        )
+
+    def _run(
+        self,
+        positions,
+        *,
+        effective_new_at=(),
+        protected_short_at=(),
+        possible_at=(),
+        completed_evidence=True,
+        mode="shadow",
+        pages=None,
+        interrupt_reason_provider=None,
+        saved_at=(),
+        unhealthy_at=(),
+    ):
+        formal_calls = 0
+        capture = FakeCapture()
+        backend = FakeBackend(pages or ["absent"] * (len(positions) + 1))
+        scroll = Mock()
+        wait = Mock()
+
+        def callback(_observation, capture_type, is_formal, _screen_index):
+            nonlocal formal_calls
+            if is_formal:
+                formal_calls += 1
+                index = formal_calls
+                position = positions[index - 1]
+                healthy = index not in unhealthy_at
+                return SimpleNamespace(
+                    record=self._record(
+                        index,
+                        effective_new=index in effective_new_at,
+                        protected_short=index in protected_short_at,
+                        possible=index in possible_at,
+                        completed_evidence=completed_evidence,
+                    ),
+                    saved=index not in saved_at,
+                    position_decision=PositionDecision(
+                        position,
+                        "initial" if position == "initial" else (
+                            "same" if position == "same" else "changed"
+                        ),
+                        None if index == 1 else "shadow-{0}".format(index - 1),
+                        "test",
+                        position in ("uncertain", "unavailable"),
+                    ),
+                    load_health=healthy,
+                    ocr_health=healthy,
+                    identity_health=healthy,
+                )
+            return SimpleNamespace(record=self._record(99), saved=True)
+
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=ScreenRegion(0, 0, 100, 100),
+            max_scans=len(positions),
+            scroll=scroll,
+            wait=wait,
+            observation_callback=callback,
+            dynamic_end_config=DynamicEndConfig(mode=mode),
+            interrupt_reason_provider=interrupt_reason_provider,
+        )
+        result = detector.detect(single_rule("MATCH"))
+        return capture, backend, scroll, wait, detector, result
+
+    def test_shadow_effect_sequence_matches_off_and_keeps_legacy_rule_return(self):
+        args = dict(
+            positions=("initial", "same", "changed"),
+            pages=("absent", "absent", "MATCH", "MATCH"),
+        )
+        off = self._run(mode="off", **args)
+        shadow = self._run(mode="shadow", **args)
+        for off_value, shadow_value in zip(off[:4], shadow[:4]):
+            if isinstance(off_value, Mock):
+                self.assertEqual(off_value.call_args_list, shadow_value.call_args_list)
+            else:
+                self.assertEqual(off_value.calls, shadow_value.calls)
+        self.assertTrue(shadow[-1].confirmed_match)
+        self.assertIsNone(shadow[-1].dynamic_end_reason)
+        self.assertEqual(shadow[-1].first_predicted_end_screen, 2)
+        self.assertEqual(shadow[-1].first_predicted_end_reason, "possible_scroll_bottom")
+        self.assertTrue(shadow[-1].prediction_would_miss_rule_match)
+        self.assertIsNone(shadow[-1].prediction_would_miss_content)
+
+    def test_shadow_prediction_true_false_null_and_first_prediction_is_frozen(self):
+        _capture, _backend, _scroll, _wait, _detector, true_result = self._run(
+            ("initial", "same", "changed", "changed"),
+            effective_new_at=(3,),
+        )
+        self.assertEqual(true_result.first_predicted_end_screen, 2)
+        self.assertEqual(true_result.first_predicted_end_reason, "possible_scroll_bottom")
+        self.assertTrue(true_result.prediction_would_miss_content)
+        self.assertFalse(true_result.prediction_would_miss_rule_match)
+        self.assertTrue(true_result.prediction_observation_complete)
+        self.assertTrue(true_result.prediction_evidence_complete)
+
+        _capture, _backend, _scroll, _wait, _detector, false_result = self._run(
+            ("initial", "same", "changed", "changed"),
+        )
+        self.assertFalse(false_result.prediction_would_miss_content)
+        self.assertFalse(false_result.prediction_would_miss_rule_match)
+        self.assertTrue(false_result.prediction_evidence_complete)
+
+        _capture, _backend, _scroll, _wait, _detector, short_result = self._run(
+            ("initial", "same", "changed"), protected_short_at=(3,),
+        )
+        self.assertTrue(short_result.prediction_would_miss_content)
+
+        _capture, _backend, _scroll, _wait, _detector, disabled_result = self._run(
+            ("initial", "same", "changed"), completed_evidence=False,
+        )
+        self.assertIsNone(disabled_result.prediction_would_miss_content)
+        self.assertFalse(disabled_result.prediction_would_miss_rule_match)
+        self.assertTrue(disabled_result.prediction_observation_complete)
+        self.assertFalse(disabled_result.prediction_evidence_complete)
+
+    def test_shadow_marks_late_content_and_insufficient_cases_without_new_effects(self):
+        for changed_at in (7, 8):
+            positions = ["initial", "same"] + ["changed"] * 6
+            _capture, _backend, _scroll, _wait, _detector, result = self._run(
+                tuple(positions), effective_new_at=(changed_at,),
+            )
+            with self.subTest(changed_at=changed_at):
+                self.assertTrue(result.prediction_would_miss_content)
+                self.assertEqual(result.first_predicted_end_screen, 2)
+
+        for positions in (("initial", "same", "uncertain"), ("initial", "same", "unavailable")):
+            _capture, _backend, _scroll, _wait, _detector, result = self._run(positions)
+            self.assertIsNone(result.prediction_would_miss_content)
+            self.assertFalse(result.prediction_evidence_complete)
+
+        _capture, _backend, _scroll, _wait, _detector, result = self._run(
+            ("initial", "same", "changed"), saved_at=(3,),
+        )
+        self.assertIsNone(result.prediction_would_miss_content)
+        self.assertIsNone(result.prediction_would_miss_rule_match)
+        self.assertFalse(result.prediction_evidence_complete)
+
+    def test_shadow_interrupts_are_nullable_and_do_not_change_effects(self):
+        baseline = self._run(("initial", "same", "changed"))
+        interrupted = self._run(
+            ("initial", "same", "changed"),
+            interrupt_reason_provider=lambda: "runtime_expired",
+        )
+        self.assertEqual(baseline[0].calls, interrupted[0].calls)
+        self.assertEqual(baseline[2].call_args_list, interrupted[2].call_args_list)
+        self.assertEqual(baseline[3].call_args_list, interrupted[3].call_args_list)
+        self.assertEqual(interrupted[-1].interrupt_reason, "runtime_expired")
+        self.assertIsNone(interrupted[-1].prediction_would_miss_content)
+        self.assertIsNone(interrupted[-1].prediction_would_miss_rule_match)
+
+
+class SafeFullReturnTests(ShadowPredictionTests):
+    def test_safe_never_ends_for_no_new_but_full_requires_two_slots(self):
+        _capture, _backend, _scroll, _wait, _detector, safe_result = self._run(
+            ("initial", "changed", "changed"), mode="safe",
+        )
+        self.assertEqual(safe_result.dynamic_end_reason, "max_screen_limit")
+        self.assertNotEqual(safe_result.dynamic_end_reason, "no_new_text")
+
+        _capture, _backend, _scroll, _wait, _detector, single_result = self._run(
+            ("initial", "changed", "same"), mode="full",
+        )
+        self.assertEqual(single_result.dynamic_end_reason, "max_screen_limit")
+        self.assertNotEqual(single_result.dynamic_end_reason, "no_new_text")
+
+        _capture, _backend, _scroll, _wait, detector, full_result = self._run(
+            ("initial", "changed", "changed", "changed"), mode="full",
+        )
+        self.assertEqual(full_result.dynamic_end_reason, "no_new_text")
+        self.assertEqual(full_result.scans_completed, 3)
+        self.assertEqual(detector.dynamic_end_state.consecutive_no_new_count, 2)
+
+    def test_full_no_new_resets_for_new_short_possible_uncertain_and_disabled_evidence(self):
+        cases = (
+            ("effective_new", {"effective_new_at": (3,)}),
+            ("protected_short", {"protected_short_at": (3,)}),
+            ("possible", {"possible_at": (3,)}),
+            ("uncertain", {"positions": (
+                "initial", "changed", "uncertain", "changed", "changed", "changed",
+            )}),
+            ("disabled", {"completed_evidence": False}),
+        )
+        for name, values in cases:
+            with self.subTest(name=name):
+                positions = values.pop(
+                    "positions", (
+                        "initial", "changed", "changed", "changed", "changed", "changed",
+                    ),
+                )
+                _capture, _backend, _scroll, _wait, _detector, result = self._run(
+                    positions, mode="full", **values,
+                )
+                if name == "disabled":
+                    self.assertEqual(result.dynamic_end_reason, "max_screen_limit")
+                else:
+                    self.assertEqual(result.dynamic_end_reason, "no_new_text")
+                    self.assertEqual(result.scans_completed, 5)
+
+    def test_full_rule_match_precedes_no_new_and_keeps_null_dynamic_reason(self):
+        _capture, _backend, _scroll, _wait, _detector, result = self._run(
+            ("initial", "changed", "changed"),
+            mode="full",
+            pages=("absent", "MATCH", "MATCH"),
+        )
+        self.assertTrue(result.confirmed_match)
+        self.assertIsNone(result.dynamic_end_reason)
+        self.assertEqual(result.scans_completed, 2)
+
+    def test_safe_full_store_and_interrupt_return_without_a_normal_end(self):
+        _capture, _backend, _scroll, _wait, _detector, store_result = self._run(
+            ("initial", "changed", "changed"), mode="safe", saved_at=(2,),
+        )
+        self.assertEqual(store_result.abort_reason, "store_failed")
+        self.assertIsNone(store_result.dynamic_end_reason)
+
+        _capture, _backend, _scroll, _wait, _detector, interrupt_result = self._run(
+            ("initial", "changed"),
+            mode="full",
+            interrupt_reason_provider=lambda: "user_interrupted",
+        )
+        self.assertEqual(interrupt_result.interrupt_reason, "user_interrupted")
+        self.assertIsNone(interrupt_result.dynamic_end_reason)
+
+
+# ── R07-IMPL-003: Confirmation capture type aligned with PositionDecision ──
+
+class ConfirmationCaptureTypeTests(unittest.TestCase):
+    """R07-IMPL-003: confirmation capture type resolved by canonical decision.
+
+    These tests verify the detector-level ``_final_confirmation_capture_type``
+    static method, the promotion in ``_attempt_position_confirmation``, and the
+    absence of a ``position_unresolved`` abort on a changed confirmation.
+    The in-callback record promotion (G3 proper) is verified in the
+    ``_record_ocr_observation_result`` integration path within
+    test_ocr_stage0_integration.
+    """
+
+    @staticmethod
+    def _detector_with_callback(pages, callback, *, mode="safe", scroll=None,
+                                max_scans=4):
+        return OCRKeywordDetector(
+            backend=FakeBackend(pages),
+            capture=FakeCapture(),
+            region=ScreenRegion(0, 0, 100, 100),
+            max_scans=max_scans,
+            scroll=scroll or Mock(),
+            wait=Mock(),
+            observation_callback=callback,
+            dynamic_end_config=DynamicEndConfig(mode=mode),
+            restore_focus=Mock(return_value=True),
+        )
+
+    @staticmethod
+    def _record(index, *, effective_new=False, protected_short=False):
+        result = SimpleNamespace(
+            similarity_status="completed",
+            effective_new_status=(
+                "present" if (effective_new or protected_short) else "none"
+            ),
+            has_effective_new_text=effective_new,
+            effective_new_segment_count=1 if effective_new else 0,
+            effective_new_decisions=(
+                (SimpleNamespace(reason="short_text_protected", decision="effective"),)
+                if protected_short else ()
+            ),
+            warning_codes=(),
+        )
+        return SimpleNamespace(
+            screen_id="slot-{0}".format(index),
+            exact_hash=("a" * 64) if index <= 2 else ("b" * 64),
+            fingerprint_version="r03-v1",
+            aggregation_status="completed",
+            uncertain_segment_ids=(),
+            uncertain_segment_count=0,
+            uncertain_char_count=0,
+            aggregation_duplicate_risk=None,
+            aggregation_warning_codes=(),
+            has_effective_new_text=effective_new,
+            similarity_result=result,
+            capture_type="formal_screen",
+            is_formal_screen=True,
+        )
+
+    def test_confirmation_same_no_effective_new_is_position_confirmation(self):
+        """G3: exact same + no effective new → position_confirmation → scroll_bottom.
+
+        After 2 slots (initial, same), recovery confirmation returns same →
+        scroll_bottom.  The detector must NOT abort with position_unresolved.
+        """
+        call_count = 0
+
+        def callback(_obs, capture_type, _formal, _screen_index):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return SimpleNamespace(
+                    record=ConfirmationCaptureTypeTests._record(1),
+                    saved=True,
+                    position_decision=PositionDecision(
+                        "initial", "initial", None, "initial_screen",
+                    ),
+                    load_health=True, ocr_health=True, identity_health=True,
+                )
+            if call_count == 2:
+                return SimpleNamespace(
+                    record=ConfirmationCaptureTypeTests._record(2),
+                    saved=True,
+                    position_decision=PositionDecision(
+                        "same", "same", "slot-1", "exact_same",
+                    ),
+                    load_health=True, ocr_health=True, identity_health=True,
+                )
+            # confirmation: same → scroll_bottom
+            return SimpleNamespace(
+                record=ConfirmationCaptureTypeTests._record(3),
+                saved=True,
+                position_decision=PositionDecision(
+                    "same", "same", "slot-2", "exact_same",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector_with_callback(
+            ["absent", "absent"], callback, max_scans=2,
+        )
+        result = detector.detect(single_rule("absent"))
+        # G3: same confirmation → scroll_bottom, no abort
+        self.assertIsNone(result.abort_reason)
+        from ocr_detector import _record_has_effective_new_content
+        self.assertEqual(
+            _record_has_effective_new_content(ConfirmationCaptureTypeTests._record(3)),
+            False,
+        )
+
+    def test_confirmation_effective_new_promotes_to_formal(self):
+        """G3: effective_new → changed decision → confirm no position_unresolved.
+
+        The detector's recovery path must not abort with position_unresolved
+        when canonical PositionDecision is changed.  Promotion to formal screen
+        happens in the record callback (simple_brush.py G3 fix).
+        """
+        call_count = 0
+
+        def callback(_obs, capture_type, _formal, _screen_index):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return SimpleNamespace(
+                    record=ConfirmationCaptureTypeTests._record(1),
+                    saved=True,
+                    position_decision=PositionDecision(
+                        "initial", "initial", None, "initial_screen",
+                    ),
+                    load_health=True, ocr_health=True, identity_health=True,
+                )
+            if call_count == 2:
+                return SimpleNamespace(
+                    record=ConfirmationCaptureTypeTests._record(2),
+                    saved=True,
+                    position_decision=PositionDecision(
+                        "same", "same", "slot-1", "exact_same",
+                    ),
+                    load_health=True, ocr_health=True, identity_health=True,
+                )
+            # confirmation: changed → promoted_slot=True
+            return SimpleNamespace(
+                record=ConfirmationCaptureTypeTests._record(3, effective_new=True),
+                saved=True,
+                position_decision=PositionDecision(
+                    "changed", "same", "slot-2", "effective_new_content",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector_with_callback(
+            ["absent", "absent", "absent"], callback, max_scans=3,
+        )
+        result = detector.detect(single_rule("absent"))
+        # G3: changed confirmation must not abort with position_unresolved
+        self.assertIsNone(result.abort_reason)
+        # G3: changed confirmation either promoted or scan continued
+        self.assertNotEqual(result.abort_reason, "position_unresolved")
+
+    def test_confirmation_short_text_protected_promotes_to_formal(self):
+        """G3: short_text_protected → changed → no position_unresolved abort."""
+        call_count = 0
+
+        def callback(_obs, capture_type, _formal, _screen_index):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return SimpleNamespace(
+                    record=ConfirmationCaptureTypeTests._record(1),
+                    saved=True,
+                    position_decision=PositionDecision(
+                        "initial", "initial", None, "initial_screen",
+                    ),
+                    load_health=True, ocr_health=True, identity_health=True,
+                )
+            if call_count == 2:
+                return SimpleNamespace(
+                    record=ConfirmationCaptureTypeTests._record(2),
+                    saved=True,
+                    position_decision=PositionDecision(
+                        "same", "same", "slot-1", "exact_same",
+                    ),
+                    load_health=True, ocr_health=True, identity_health=True,
+                )
+            return SimpleNamespace(
+                record=ConfirmationCaptureTypeTests._record(3, protected_short=True),
+                saved=True,
+                position_decision=PositionDecision(
+                    "changed", "same", "slot-2", "effective_new_content",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector_with_callback(
+            ["absent", "absent", "absent"], callback, max_scans=3,
+        )
+        result = detector.detect(single_rule("absent"))
+        self.assertIsNone(result.abort_reason)
+        self.assertNotEqual(result.abort_reason, "position_unresolved")
+
+    def test_changed_confirmation_is_single_record_no_double_save(self):
+        """G3: changed confirmation does not trigger a second save."""
+        call_count = 0
+        callback_calls = []
+
+        def callback(obs, capture_type, is_formal, screen_index):
+            nonlocal call_count
+            call_count += 1
+            callback_calls.append((capture_type, is_formal, screen_index))
+            if call_count == 1:
+                return SimpleNamespace(
+                    record=ConfirmationCaptureTypeTests._record(1),
+                    saved=True,
+                    position_decision=PositionDecision(
+                        "initial", "initial", None, "initial_screen",
+                    ),
+                    load_health=True, ocr_health=True, identity_health=True,
+                )
+            if call_count == 2:
+                return SimpleNamespace(
+                    record=ConfirmationCaptureTypeTests._record(2),
+                    saved=True,
+                    position_decision=PositionDecision(
+                        "same", "same", "slot-1", "exact_same",
+                    ),
+                    load_health=True, ocr_health=True, identity_health=True,
+                )
+            return SimpleNamespace(
+                record=ConfirmationCaptureTypeTests._record(3, effective_new=True),
+                saved=True,
+                position_decision=PositionDecision(
+                    "changed", "same", "slot-2", "effective_new_content",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector_with_callback(
+            ["absent", "absent", "absent"], callback, max_scans=3,
+        )
+        result = detector.detect(single_rule("absent"))
+        self.assertIsNone(result.abort_reason)
+        # G3: each unique observation is processed at most once
+        self.assertEqual(call_count, len(callback_calls))
+
+    def test_same_confirmation_does_not_occupy_formal_slot(self):
+        """G3: _final_confirmation_capture_type with same decision stays position_confirmation."""
+        from ocr_detector import DynamicEndState
+        decision = PositionDecision("same", "same", "slot-1", "exact_same")
+        state = DynamicEndState(mode="safe", scan_slot_count=2)
+        result = OCRKeywordDetector._final_confirmation_capture_type(
+            decision, "position_confirmation", False, None, state)
+        self.assertEqual(result, ("position_confirmation", False, None))
+
+    def test_slot_eight_boundary_does_not_trigger_confirmation(self):
+        """G3: _final_confirmation_capture_type promotes changed to formal screen."""
+        from ocr_detector import DynamicEndState
+        decision = PositionDecision("changed", "same", "slot-1", "effective_new_content")
+        state = DynamicEndState(mode="safe", scan_slot_count=2)
+        result = OCRKeywordDetector._final_confirmation_capture_type(
+            decision, "position_confirmation", False, None, state)
+        self.assertEqual(result, ("formal_screen", True, 3))
+
+
+# ── R07-IMPL-005: Safe/full rule branch respects Store failure priority ──
+
+class SafeFullStorePriorityTests(unittest.TestCase):
+    """R07-IMPL-005: safe/full must check Store failure before rule confirmation."""
+
+    def _detector(self, *, mode, callback, pages=("MATCH", "MATCH"),
+                  scroll=None, interrupt_reason_provider=None):
+        return OCRKeywordDetector(
+            backend=FakeBackend(pages),
+            capture=FakeCapture(),
+            region=ScreenRegion(0, 0, 100, 100),
+            max_scans=3,
+            scroll=scroll or Mock(),
+            wait=Mock(),
+            observation_callback=callback,
+            dynamic_end_config=DynamicEndConfig(mode=mode),
+            interrupt_reason_provider=interrupt_reason_provider,
+        )
+
+    def test_off_rule_hit_store_false_keeps_legacy_return(self):
+        """G5: off mode rule hit + Store false keeps legacy confirmation."""
+        def callback(_obs, capture_type, _formal, _screen_index):
+            return SimpleNamespace(
+                record=SimpleNamespace(screen_id="off-1"),
+                saved=False,
+                position_decision=PositionDecision(
+                    "initial", "initial", None, "initial_screen",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector(mode="off", callback=callback)
+        result = detector.detect(single_rule("MATCH"))
+        # off keeps legacy rule confirmation; G5 does not add Store gate here
+        self.assertTrue(result.confirmed_match)
+
+    def test_shadow_rule_hit_store_false_keeps_legacy_return(self):
+        """G5: shadow mode rule hit + Store false keeps legacy confirmation."""
+        def callback(_obs, capture_type, _formal, _screen_index):
+            return SimpleNamespace(
+                record=SimpleNamespace(screen_id="shadow-1"),
+                saved=False,
+                position_decision=PositionDecision(
+                    "initial", "initial", None, "initial_screen",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector(mode="shadow", callback=callback)
+        result = detector.detect(single_rule("MATCH"))
+        self.assertTrue(result.confirmed_match)
+
+    def test_safe_rule_hit_store_false_aborts_not_confirms(self):
+        """G5: safe mode rule hit + Store false → store_failed, NOT confirmed."""
+        def callback(_obs, capture_type, _formal, _screen_index):
+            return SimpleNamespace(
+                record=SimpleNamespace(screen_id="safe-1"),
+                saved=False,
+                position_decision=PositionDecision(
+                    "initial", "initial", None, "initial_screen",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector(mode="safe", callback=callback)
+        result = detector.detect(single_rule("MATCH"))
+        self.assertFalse(result.confirmed_match)
+        self.assertEqual(result.abort_reason, "store_failed")
+        self.assertIsNone(result.dynamic_end_reason)
+
+    def test_full_rule_hit_store_false_aborts_not_confirms(self):
+        """G5: full mode rule hit + Store false → store_failed, NOT confirmed."""
+        def callback(_obs, capture_type, _formal, _screen_index):
+            return SimpleNamespace(
+                record=SimpleNamespace(screen_id="full-1"),
+                saved=False,
+                position_decision=PositionDecision(
+                    "initial", "initial", None, "initial_screen",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector(mode="full", callback=callback)
+        result = detector.detect(single_rule("MATCH"))
+        self.assertFalse(result.confirmed_match)
+        self.assertEqual(result.abort_reason, "store_failed")
+        self.assertIsNone(result.dynamic_end_reason)
+
+    def test_full_callback_exception_aborts_before_scroll_or_normal_end(self):
+        callback_calls = []
+        scroll = Mock()
+
+        def callback(_obs, capture_type, _formal, _screen_index):
+            callback_calls.append(capture_type)
+            raise ValueError("private callback detail must not escape")
+
+        detector = self._detector(
+            mode="full", callback=callback, pages=("absent", "absent"),
+            scroll=scroll,
+        )
+        result = detector.detect(single_rule("missing"))
+
+        self.assertEqual(callback_calls, ["formal_screen"])
+        self.assertEqual(result.abort_reason, "unexpected_error")
+        self.assertIsNone(result.dynamic_end_reason)
+        self.assertFalse(result.confirmed_match)
+        scroll.assert_not_called()
+
+    def test_safe_rule_hit_no_rule_confirmation_on_store_failure(self):
+        """G5: safe/full must not enter rule confirmation when Store failed."""
+        callback_calls = []
+
+        def callback(_obs, capture_type, _formal, _screen_index):
+            callback_calls.append(capture_type)
+            return SimpleNamespace(
+                record=SimpleNamespace(screen_id="safe-no-conf"),
+                saved=False,
+                position_decision=PositionDecision(
+                    "initial", "initial", None, "initial_screen",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector(mode="safe", callback=callback)
+        result = detector.detect(single_rule("MATCH"))
+        self.assertFalse(result.confirmed_match)
+        # The callback must be called exactly once (the initial formal screen),
+        # not twice (no rule_confirmation callback).
+        self.assertEqual(callback_calls, ["formal_screen"])
+
+    def test_off_shadow_confirmations_count_preserved(self):
+        """G5: off/shadow rule confirmation count unchanged from legacy."""
+        off_calls = []
+        shadow_calls = []
+
+        def off_cb(_obs, capture_type, _formal, _screen_index):
+            off_calls.append(capture_type)
+            return SimpleNamespace(
+                record=SimpleNamespace(screen_id="off"),
+                saved=True,
+                position_decision=PositionDecision(
+                    "initial", "initial", None, "initial_screen",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        def shadow_cb(_obs, capture_type, _formal, _screen_index):
+            shadow_calls.append(capture_type)
+            return SimpleNamespace(
+                record=SimpleNamespace(screen_id="shadow"),
+                saved=True,
+                position_decision=PositionDecision(
+                    "initial", "initial", None, "initial_screen",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        off = self._detector(mode="off", callback=off_cb)
+        shadow = self._detector(mode="shadow", callback=shadow_cb)
+        off_res = off.detect(single_rule("MATCH"))
+        shadow_res = shadow.detect(single_rule("MATCH"))
+        self.assertTrue(off_res.confirmed_match)
+        self.assertTrue(shadow_res.confirmed_match)
+        self.assertEqual(off_calls, shadow_calls)
+        self.assertEqual(off_calls, ["formal_screen", "rule_confirmation"])
+
+    def test_safe_full_store_failure_does_not_second_save(self):
+        """G5: Store failure does not trigger a second save for the same screen."""
+        save_calls = []
+
+        def callback(_obs, capture_type, _formal, _screen_index):
+            save_calls.append(capture_type)
+            return SimpleNamespace(
+                record=SimpleNamespace(screen_id="sf-no-2nd"),
+                saved=False,
+                position_decision=PositionDecision(
+                    "initial", "initial", None, "initial_screen",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector(mode="safe", callback=callback)
+        detector.detect(single_rule("MATCH"))
+        # Exactly one formal_screen callback, no rule_confirmation
+        self.assertEqual(save_calls, ["formal_screen"])
+
+    def test_safe_full_rule_with_store_true_works_as_confirmed(self):
+        """G5: safe + rule hit + saved=true works normally."""
+        def callback(_obs, capture_type, _formal, _screen_index):
+            return SimpleNamespace(
+                record=SimpleNamespace(screen_id="safe-good"),
+                saved=True,
+                position_decision=PositionDecision(
+                    "initial", "initial", None, "initial_screen",
+                ),
+                load_health=True, ocr_health=True, identity_health=True,
+            )
+
+        detector = self._detector(mode="safe", callback=callback)
+        result = detector.detect(single_rule("MATCH"))
+        self.assertTrue(result.confirmed_match)
+        self.assertIsNone(result.dynamic_end_reason)
 
 
 def render_parameterized_log(call):

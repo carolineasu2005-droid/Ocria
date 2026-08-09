@@ -1,6 +1,7 @@
 """Thread-safe, best-effort JSONL persistence for stage-0 OCR records."""
 
 from datetime import datetime
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -8,7 +9,7 @@ import platform as platform_module
 import re
 import sys
 import threading
-from typing import Any, Dict, Mapping, Optional, Protocol
+from typing import Any, Dict, Mapping, Optional, Protocol, Set, Tuple
 from uuid import uuid4
 
 from ocr_normalization import (
@@ -26,6 +27,12 @@ from ocr_aggregation import (
     OcrAggregationConfig,
     aggregation_config_digest,
     aggregation_config_snapshot,
+)
+from ocr_similarity import (
+    DEFAULT_OCR_SIMILARITY_CONFIG,
+    OcrSimilarityConfig,
+    canonical_similarity_config,
+    similarity_config_digest,
 )
 
 from ocr_records import (
@@ -50,6 +57,24 @@ CANDIDATES_NAME = "candidates.jsonl"
 ERRORS_NAME = "errors.jsonl"
 DEFAULT_CONSECUTIVE_FAILURE_LIMIT = 3
 RULE_EVALUATION_MODE_LEGACY_SHADOW = "legacy_shadow"
+_SAFE_DIAGNOSTIC_TOKEN = re.compile(r"^[a-z0-9_]{1,64}$")
+_SAFE_FAILURE_STAGES = frozenset({
+    "screen_record_validation",
+    "position_classification",
+    "store_screen",
+    "candidate_validation",
+    "store_candidate",
+    "r05_projection",
+    "r06_projection",
+})
+_SAFE_DIAGNOSTIC_MESSAGES = frozenset({
+    "aggregation segment classifications are invalid",
+    "document occurrence screen is invalid",
+    "similarity projection does not match nested result",
+    "effective-new boolean does not match confirmed segments",
+    "validation failed",
+    "operation failed",
+})
 
 
 class ScreenManifestIdentityMismatchError(ValueError):
@@ -62,7 +87,12 @@ class OcrRecordStore(Protocol):
     def save_screen(self, record: OcrScreenRecord) -> bool:
         ...
 
-    def save_candidate(self, document: CandidateOcrDocument) -> bool:
+    def save_candidate(
+        self,
+        document: CandidateOcrDocument,
+        *,
+        owner_candidate_record_id: Optional[str] = None,
+    ) -> bool:
         ...
 
     def save_error(
@@ -96,7 +126,12 @@ class JsonlOcrRecordStore:
         normalization_config: Optional[Mapping[str, Any]] = None,
         aggregation_mode: str = "disabled",
         aggregation_config: Optional[OcrAggregationConfig] = None,
+        similarity_mode: str = "disabled",
+        similarity_config: Optional[OcrSimilarityConfig] = None,
         rule_evaluation_mode: str = RULE_EVALUATION_MODE_LEGACY_SHADOW,
+        dynamic_end_version: Optional[str] = None,
+        dynamic_end_mode: Optional[str] = None,
+        dynamic_end_config: Optional[Mapping[str, Any]] = None,
         fsync: bool = False,
         run_id: Optional[str] = None,
         started_at: Optional[datetime] = None,
@@ -108,6 +143,16 @@ class JsonlOcrRecordStore:
             raise ValueError("aggregation_mode must be disabled or record")
         if aggregation_config is not None and not isinstance(aggregation_config, OcrAggregationConfig):
             raise TypeError("aggregation_config must be an OcrAggregationConfig")
+        if similarity_mode not in ("disabled", "record"):
+            raise ValueError("similarity_mode must be disabled or record")
+        if similarity_config is not None and not isinstance(similarity_config, OcrSimilarityConfig):
+            raise TypeError("similarity_config must be an OcrSimilarityConfig")
+        if dynamic_end_mode is not None and dynamic_end_mode not in (
+            "off", "shadow", "safe", "full",
+        ):
+            raise ValueError("dynamic_end_mode must be off, shadow, safe, or full")
+        if dynamic_end_config is not None and not isinstance(dynamic_end_config, Mapping):
+            raise TypeError("dynamic_end_config must be a mapping")
 
         self._lock = threading.RLock()
         self._fsync = bool(fsync)
@@ -116,6 +161,16 @@ class JsonlOcrRecordStore:
         self._consecutive_failures = 0
         self._consecutive_failure_limit = consecutive_failure_limit
         self._closed_call_reported = False
+        # A digest gives field-for-field JSONL equivalence without retaining
+        # candidate OCR body in memory after the append operation.
+        self._saved_screen_digests: Dict[Tuple[str, str, str], str] = {}
+        # This is Store-owned lifetime state, established only after a screen
+        # line has been written successfully.  It deliberately does not use
+        # the later candidate document's embedded screens to discover owner
+        # keys: those fields have not yet passed strict validation.
+        self._candidate_screen_digest_keys: Dict[
+            Tuple[str, str], Set[Tuple[str, str, str]]
+        ] = {}
 
         current = datetime.now().astimezone() if started_at is None else started_at
         started_at_text = timezone_iso(current)
@@ -167,6 +222,11 @@ class JsonlOcrRecordStore:
             normalization_config_digest
             or calculate_normalization_config_digest(config_snapshot)
         )
+        active_similarity_config = similarity_config or DEFAULT_OCR_SIMILARITY_CONFIG
+        similarity_snapshot = (
+            canonical_similarity_config(active_similarity_config)
+            if similarity_mode == "record" else None
+        )
         self.manifest = RunManifest(
             run_id=self.run_id,
             started_at=started_at_text,
@@ -194,6 +254,34 @@ class JsonlOcrRecordStore:
             aggregation_config=(
                 aggregation_config_snapshot(aggregation_config or DEFAULT_OCR_AGGREGATION_CONFIG)
                 if aggregation_mode == "record" else None
+            ),
+            similarity_mode=similarity_mode,
+            similarity_version=(
+                active_similarity_config.similarity_version
+                if similarity_mode == "record" else None
+            ),
+            similarity_config_version=(
+                active_similarity_config.similarity_config_version
+                if similarity_mode == "record" else None
+            ),
+            similarity_config_digest=(
+                similarity_config_digest(similarity_snapshot)
+                if similarity_snapshot is not None else None
+            ),
+            similarity_config=similarity_snapshot,
+            business_short_terms_version=(
+                active_similarity_config.business_short_terms_version
+                if similarity_mode == "record" else None
+            ),
+            business_short_terms_digest=(
+                active_similarity_config.business_short_terms_digest()
+                if similarity_mode == "record" else None
+            ),
+            dynamic_end_version=dynamic_end_version,
+            dynamic_end_mode=dynamic_end_mode,
+            dynamic_end_config=(
+                dict(dynamic_end_config)
+                if dynamic_end_config is not None else None
             ),
             data_files={
                 "manifest": RUN_MANIFEST_NAME,
@@ -278,11 +366,24 @@ class JsonlOcrRecordStore:
             "path",
             "capture_type",
         }
-        return {
+        safe = {
             key: to_json_compatible(value)
             for key, value in context.items()
             if key in allowed
         }
+        failure_stage = context.get("failure_stage")
+        if failure_stage in _SAFE_FAILURE_STAGES:
+            safe["failure_stage"] = failure_stage
+        validation_code = context.get("validation_code")
+        if (
+            isinstance(validation_code, str)
+            and _SAFE_DIAGNOSTIC_TOKEN.fullmatch(validation_code) is not None
+        ):
+            safe["validation_code"] = validation_code
+        sanitized_message = context.get("sanitized_error_message")
+        if sanitized_message in _SAFE_DIAGNOSTIC_MESSAGES:
+            safe["sanitized_error_message"] = sanitized_message
+        return safe
 
     def _error_record(
         self,
@@ -380,7 +481,87 @@ class JsonlOcrRecordStore:
             )
             if saved:
                 self.manifest.screen_record_count += 1
+                key = self._screen_digest_key(record)
+                if key is not None:
+                    self._saved_screen_digests[key] = hashlib.sha256(
+                        json_dumps(record).encode("utf-8")
+                    ).hexdigest()
+                    self._candidate_screen_digest_keys.setdefault(
+                        key[:2], set()
+                    ).add(key)
         return saved
+
+    @staticmethod
+    def _screen_digest_key(
+        record: OcrScreenRecord,
+    ) -> Optional[Tuple[str, str, str]]:
+        """Return the internal digest key only for a concrete screen record."""
+
+        if not isinstance(record, OcrScreenRecord):
+            return None
+        return (
+            record.run_id,
+            record.candidate_record_id,
+            record.screen_id,
+        )
+
+    def _candidate_owner_key(
+        self,
+        document: CandidateOcrDocument,
+        owner_candidate_record_id: Optional[str],
+    ) -> Optional[Tuple[str, str]]:
+        """Resolve terminal cleanup ownership without trusting embedded screens.
+
+        The production call path supplies the Builder's candidate identity.
+        The document identity remains a compatibility fallback only when every
+        embedded screen agrees with it.  An identity disagreement can therefore
+        never make an embedded screen select another candidate's cache.
+        """
+
+        if owner_candidate_record_id is not None:
+            if not isinstance(owner_candidate_record_id, str) or not owner_candidate_record_id:
+                return None
+            return (self.run_id, owner_candidate_record_id)
+        if (
+            isinstance(document, CandidateOcrDocument)
+            and document.run_id == self.run_id
+            and all(
+                isinstance(screen, OcrScreenRecord)
+                and screen.run_id == document.run_id
+                and screen.candidate_record_id == document.candidate_record_id
+                for screen in document.screens
+            )
+        ):
+            return (self.run_id, document.candidate_record_id)
+        return None
+
+    def _release_candidate_screen_digests(
+        self,
+        owner_key: Optional[Tuple[str, str]],
+    ) -> None:
+        """Idempotently release Store-owned keys for one terminal candidate."""
+
+        if owner_key is None:
+            return
+        for key in self._candidate_screen_digest_keys.pop(owner_key, set()):
+            self._saved_screen_digests.pop(key, None)
+
+    @staticmethod
+    def _validate_explicit_candidate_owner(
+        document: CandidateOcrDocument,
+        owner_candidate_record_id: Optional[str],
+    ) -> None:
+        """Bind a trusted terminal owner to the document before persistence."""
+
+        if owner_candidate_record_id is None:
+            return
+        if (
+            not isinstance(document, CandidateOcrDocument)
+            or owner_candidate_record_id != document.candidate_record_id
+        ):
+            raise ScreenManifestIdentityMismatchError(
+                "trusted owner and candidate document identities do not match"
+            )
 
     def _validate_screen_identity(self, record: OcrScreenRecord) -> None:
         if not isinstance(record, OcrScreenRecord):
@@ -411,26 +592,75 @@ class JsonlOcrRecordStore:
                 raise ScreenManifestIdentityMismatchError(
                     "formal screen aggregation was not attempted in record mode"
                 )
+        else:
+            aggregation_identity = (
+                record.aggregation_version,
+                record.aggregation_config_version,
+                record.aggregation_config_digest,
+            )
+            manifest_aggregation_identity = (
+                self.manifest.aggregation_version,
+                self.manifest.aggregation_config_version,
+                self.manifest.aggregation_config_digest,
+            )
+            if (
+                self.manifest.aggregation_mode != "record"
+                or aggregation_identity != manifest_aggregation_identity
+            ):
+                raise ScreenManifestIdentityMismatchError(
+                    "screen aggregation identity does not match run manifest"
+                )
+        result = record.similarity_result
+        if self.manifest.similarity_mode == "disabled":
+            if result is not None:
+                raise ScreenManifestIdentityMismatchError(
+                    "disabled manifest cannot save a similarity result"
+                )
             return
-        aggregation_identity = (
-            record.aggregation_version,
-            record.aggregation_config_version,
-            record.aggregation_config_digest,
-        )
-        manifest_aggregation_identity = (
-            self.manifest.aggregation_version,
-            self.manifest.aggregation_config_version,
-            self.manifest.aggregation_config_digest,
-        )
-        if (
-            self.manifest.aggregation_mode != "record"
-            or aggregation_identity != manifest_aggregation_identity
-        ):
+        if result is None:
             raise ScreenManifestIdentityMismatchError(
-                "screen aggregation identity does not match run manifest"
+                "record similarity mode requires a completed similarity projection"
+            )
+        screen_similarity_identity = (
+            result.similarity_version,
+            result.similarity_config_version,
+            result.similarity_config_digest,
+        )
+        manifest_similarity_identity = (
+            self.manifest.similarity_version,
+            self.manifest.similarity_config_version,
+            self.manifest.similarity_config_digest,
+        )
+        if screen_similarity_identity != manifest_similarity_identity:
+            raise ScreenManifestIdentityMismatchError(
+                "screen similarity identity does not match run manifest"
             )
 
-    def save_candidate(self, document: CandidateOcrDocument) -> bool:
+    @staticmethod
+    def _validate_candidate_embedded_screen_identities(
+        document: CandidateOcrDocument,
+    ) -> None:
+        """Require each persisted candidate member to carry document identity."""
+
+        if not isinstance(document, CandidateOcrDocument):
+            return
+        for screen in document.screens:
+            if not isinstance(screen, OcrScreenRecord):
+                continue
+            if (
+                screen.run_id != document.run_id
+                or screen.candidate_record_id != document.candidate_record_id
+            ):
+                raise ScreenManifestIdentityMismatchError(
+                    "candidate and embedded screen identities do not match"
+                )
+
+    def save_candidate(
+        self,
+        document: CandidateOcrDocument,
+        *,
+        owner_candidate_record_id: Optional[str] = None,
+    ) -> bool:
         context = {
             "candidate_record_id": getattr(
                 document, "candidate_record_id", None
@@ -438,7 +668,14 @@ class JsonlOcrRecordStore:
             "record_type": getattr(document, "record_type", None),
         }
         with self._lock:
+            owner_key = self._candidate_owner_key(
+                document, owner_candidate_record_id,
+            )
             try:
+                self._validate_explicit_candidate_owner(
+                    document, owner_candidate_record_id,
+                )
+                self._validate_candidate_embedded_screen_identities(document)
                 for screen in document.screens:
                     self._validate_screen_identity(screen)
                 if document.run_id != self.run_id:
@@ -459,18 +696,51 @@ class JsonlOcrRecordStore:
                     raise ScreenManifestIdentityMismatchError(
                         "candidate aggregation identity does not match run manifest"
                     )
+                if self.manifest.similarity_mode == "disabled":
+                    if document.similarity_summary is not None:
+                        raise ScreenManifestIdentityMismatchError(
+                            "disabled manifest cannot save a similarity summary"
+                        )
+                else:
+                    summary = document.similarity_summary
+                    if summary is None:
+                        raise ScreenManifestIdentityMismatchError(
+                            "record similarity mode requires a candidate summary"
+                        )
+                    if (
+                        summary.similarity_version != self.manifest.similarity_version
+                        or summary.similarity_config_version != self.manifest.similarity_config_version
+                        or summary.similarity_config_digest != self.manifest.similarity_config_digest
+                    ):
+                        raise ScreenManifestIdentityMismatchError(
+                            "candidate similarity identity does not match run manifest"
+                        )
+                for screen in document.screens:
+                    expected_digest = self._saved_screen_digests.get(
+                        self._screen_digest_key(screen)
+                    )
+                    actual_digest = hashlib.sha256(
+                        json_dumps(screen).encode("utf-8")
+                    ).hexdigest()
+                    if expected_digest is None or actual_digest != expected_digest:
+                        raise ScreenManifestIdentityMismatchError(
+                            "screen JSONL and candidate screen are not identical"
+                        )
             except Exception as exc:
                 self._record_failure("save_candidate", exc, context)
                 return False
-            saved = self._save_record(
-                self.candidates_path,
-                document,
-                "save_candidate",
-                context,
-            )
-            if saved:
-                self.manifest.candidate_record_count += 1
-        return saved
+            else:
+                saved = self._save_record(
+                    self.candidates_path,
+                    document,
+                    "save_candidate",
+                    context,
+                )
+                if saved:
+                    self.manifest.candidate_record_count += 1
+                return saved
+            finally:
+                self._release_candidate_screen_digests(owner_key)
 
     def save_error(
         self,
@@ -516,6 +786,10 @@ class JsonlOcrRecordStore:
                 )
                 return False
             finally:
+                # Closing is the terminal Store boundary, including runs with
+                # screens that never reached a candidate document.
+                self._saved_screen_digests.clear()
+                self._candidate_screen_digest_keys.clear()
                 self._enabled = False
             return True
 

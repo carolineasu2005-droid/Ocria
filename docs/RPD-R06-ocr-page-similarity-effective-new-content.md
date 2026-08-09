@@ -31,7 +31,7 @@ BossOCR 当前固定扫描最多 8 屏。R03 为每次 OCR 页面提供唯一权
 
 1. 只有 exact hash 时，任何一个字符变化都会变成“不同”，无法表达近似程度。
 2. 只报告比例而不保存分子、分母，无法审计零分母、字符会计和算法升级。
-3. OCR 的重复框、split/merge、格式字符、低置信度孤立乱码可能被误记为有效新增。
+3. OCR 的重复框、格式字符、低置信度孤立乱码可能被误记为有效新增；split/merge 已由 R05 识别并归入 matched，R06 不得重新猜测。
 4. 短文本既可能是 UI 噪声，也可能是年份、日期、版本号、技术栈或岗位词，不能用简单长度阈值删除。
 5. 若 reference 只靠 JSONL 行顺序或列表前一项猜测，在线与离线结果会漂移。
 6. R06 若进入滚动结束或候选人动作控制，会越界提前实现 R07，并可能改变现有业务行为。
@@ -82,8 +82,8 @@ R03 页面精确指纹
 
 - R03：权威回答“完全相同吗”。
 - R04：权威提供可比较文本和 segment 来源映射。
-- R05：权威提供当前屏 segment 的三分分类和候选人聚合证据。
-- R06：在以上结果上派生相似度、比例、有效新增和中性类别。
+- R05：权威提供当前屏 segment 的三分分类、1→1/1→2/2→1 split/merge match evidence 和候选人聚合证据；有完整 split/merge evidence 的当前 segment 属于 `matched`。
+- R06：在以上结果上派生相似度、比例、有效新增和中性类别；只为 `new/uncertain` 生成有效新增 decision，不重算、推断、覆盖或修正 R05 split/merge。
 - R07：未来才可消费 R06 信号并控制扫描。
 
 ## 7. 用户场景
@@ -110,7 +110,7 @@ load retry、switch check、scroll confirmation 等只有在记录里存在显�
 
 ### 7.6 OCR 伪影或证据不足
 
-明确格式伪影、重复框、split/merge 或满足组合证据的低置信度孤立乱码可以标为无效；证据不足时必须标为 `uncertain`，并保守视为“可能有效”。
+明确格式伪影、重复框或满足组合证据的低置信度孤立乱码可以标为无效。split/merge 由 R05 以 match evidence 识别并归入 `matched`，不进入 R06 new/uncertain 有效新增 decision；证据不足时必须标为 `uncertain`，并保守视为“可能有效”。
 
 ## 8. Reference screen 产品规则
 
@@ -202,15 +202,17 @@ R05 new_text_char_count = R06 new_char_count + R06 uncertain_char_count
 
 1. `format_only`：只有格式/分隔结构，无受保护词元或业务字符；
 2. `duplicate_artifact`：R04 重复框几何与文本证据共同支持；
-3. `split_merge_artifact`：R05 邻接匹配和当前/基准 segment 组合证据共同支持；
-4. `low_confidence_noise`：孤立、低置信度、无结构、无保护命中的组合证据支持；
-5. `likely_repeated_ui_noise`：跨至少 3 个正式屏的文本、几何稳定性和重复位置组合证据支持。
+3. `low_confidence_noise`：孤立、低置信度、无结构、无保护命中的组合证据支持；
+4. `likely_repeated_ui_noise`：跨至少 3 个正式屏的文本、几何稳定性和重复位置组合证据支持。
+
+`split_merge_artifact` 在 `r06-v1` 是 reserved / never emitted：合法 R05 split/merge evidence 已属于 matched，而 R06 不对 matched 生成 `EffectiveNewDecision`。R05 仍标为 new 的内容不得仅凭 fuzzy 分数、文本相似、相邻拼接或 document ID 被 R06 猜测为 split/merge 伪影。
 
 仅凭文本短、常见、重复或“看起来像 UI”均不足以判无效。
 
 ## 14. uncertain 保守原则
 
 - R05 `uncertain_segment_ids` 不进入“明确无效”结论。
+- 若 new/uncertain segment 非法出现在 R05 `match_evidence.current_segment_ids`，这是前序 partition/evidence 合同冲突，不是 split/merge 正例；R06 停止有效新增分类，输出 unavailable/null/uncertain，并保留 R05 源对象。
 - R06 证据缺失、证据冲突、阈值灰区、reference 不可靠或分类异常时使用 `uncertain`。
 - `uncertain` 新增在布尔兼容投影中保守视为可能有效，但中性类别优先为 `uncertain`。
 - uncertain 只影响记录解释，不影响扫描或业务动作。
@@ -297,6 +299,7 @@ R06 失败必须 fail open：保留前序结果、记录脱敏 warning、继续�
 6. UI 噪声若证据不足，易伤害公司/项目/岗位短词，必须保守。
 7. 超长文本若无界建立 n-gram Counter，会引发性能和内存风险。
 8. 当前 R05 工作区实现尚未提交且 Change 7 曾阻塞，R06 后续开发必须先重新确认基线。
+9. R06 若对 R05 new 重新猜 split/merge，会制造第二套 diff 权威；r06-v1 必须只保留 R05 matched evidence，未来扩展须先升级 R05/R06 Schema 与版本。
 
 ## 24. 验收标准
 
@@ -307,6 +310,7 @@ R06 失败必须 fail open：保留前序结果、记录脱敏 warning、继续�
 - [ ] 每个比例保存 numerator/denominator，零分母为 null。
 - [ ] R05 聚合投影兼容关系通过验证，uncertain 不重复计数。
 - [ ] 有效新增逐 segment 有 reason/evidence，未知情况使用 uncertain。
+- [ ] R05 1→2/2→1 split/merge evidence 仅保留在 matched；R06 不为 matched 生成 decision，合法 new 不输出 `split_merge_artifact`，非法 new/uncertain evidence 关系降级为前序合同冲突。
 - [ ] 所列短文本、年份、日期和版本号全部受保护。
 - [ ] 没有 UI 文案黑名单。
 - [ ] `comparison_class` 仅使用冻结中性枚举和优先级。

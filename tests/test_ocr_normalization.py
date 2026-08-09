@@ -1173,8 +1173,8 @@ class OcrComparisonTextTests(unittest.TestCase):
             raw_text="",
         )
 
-        self.assertEqual(STORAGE_SCHEMA_VERSION, "1.2.0")
-        self.assertEqual(record.storage_schema_version, "1.2.0")
+        self.assertEqual(STORAGE_SCHEMA_VERSION, "1.4.0")
+        self.assertEqual(record.storage_schema_version, "1.4.0")
         self.assertIsNone(record.normalized_text)
         self.assertIsNone(record.comparison_text)
         self.assertEqual(record.segments, ())

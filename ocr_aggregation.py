@@ -1225,9 +1225,10 @@ def _validate_r04_segment(
         raise R04SegmentAdapterError("segment_normalized_text_invalid")
     if segment.comparison_text != build_comparison_text(segment.normalized_text):
         raise R04SegmentAdapterError("segment_comparison_text_invalid")
-    if not segment.comparison_text or any(
-        character.isspace() for character in segment.comparison_text
-    ):
+    # Equality with build_comparison_text above already proves that the value
+    # is non-empty and whitespace-free; its construction removes every
+    # Unicode whitespace character.  Do not scan the same string twice.
+    if not segment.comparison_text:
         raise R04SegmentAdapterError("segment_comparison_text_invalid")
     if not segment.ocr_box_ids or len(set(segment.ocr_box_ids)) != len(segment.ocr_box_ids):
         raise R04SegmentAdapterError("segment_box_ids_invalid")
@@ -1344,6 +1345,15 @@ class HistoricalSequenceIndex:
 
     def positions(self, comparison_key: Sequence[str]) -> Tuple[int, ...]:
         return self._keys.get(tuple(comparison_key), ())
+
+    def fork(self) -> "HistoricalSequenceIndex":
+        """Copy mutable index containers while sharing frozen segment values."""
+
+        clone = object.__new__(type(self))
+        clone.__dict__ = self.__dict__.copy()
+        clone._keys = dict(self._keys)
+        clone._segments = list(self._segments)
+        return clone
 
     def clear(self) -> None:
         self._keys.clear()
@@ -1672,6 +1682,20 @@ class CandidateDocumentAggregator:
         if code not in self._warnings:
             self._warnings.append(code)
         self._partial = True
+
+    def fork(self) -> "CandidateDocumentAggregator":
+        """Create an isolated working state without deep-copying frozen data."""
+
+        clone = object.__new__(type(self))
+        clone.__dict__ = self.__dict__.copy()
+        clone._document = list(self._document)
+        clone._index = self._index.fork()
+        clone._screens = dict(self._screens)
+        clone._screen_results = dict(self._screen_results)
+        clone._formal_indexes = dict(self._formal_indexes)
+        clone._warnings = list(self._warnings)
+        clone._evidence = list(self._evidence)
+        return clone
 
     def _append(self, segments: Sequence[OcrTextSegment], role: AggregationOccurrenceRole) -> Tuple[str, ...]:
         appended = []
