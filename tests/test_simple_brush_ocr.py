@@ -5042,26 +5042,28 @@ class SimpleBrushOCRTests(unittest.TestCase):
         sleep.assert_called_once_with(0.5)
         restore_focus.assert_called_once_with()
 
-    def test_restore_candidate_page_focus_clicks_ocr_inner_region_twice(self):
-        region = simple_brush.ScreenRegion(left=100, top=200, width=300, height=100)
-        simple_brush.ocr_detector = Mock(region=region)
+    def test_shared_detail_focus_restore_clicks_calibrated_region_twice(self):
+        simple_brush.focus_restore_region = simple_brush.ScreenRegion(
+            left=100, top=200, width=300, height=100,
+        )
         with (
             patch.object(
                 simple_brush,
-                "random_point_in_inner_region",
+                "random_point_in_region",
                 side_effect=[(180.0, 240.0), (260.0, 250.0)],
             ) as random_point,
             patch.object(simple_brush, "human_click") as click,
-            patch.object(simple_brush.time, "sleep") as sleep,
-            patch.object(simple_brush, "select_screen_region") as select,
-            patch.object(
-                simple_brush,
-                "ensure_focus_restore_region_calibrated",
-            ) as forward_focus_calibrate,
+            patch.object(simple_brush, "human_delay", return_value=True) as delay,
         ):
-            self.assertTrue(simple_brush.restore_candidate_page_focus())
+            self.assertTrue(simple_brush.restore_candidate_detail_focus())
 
-        self.assertEqual(random_point.call_args_list, [call(region), call(region)])
+        self.assertEqual(
+            random_point.call_args_list,
+            [
+                call(simple_brush.focus_restore_region),
+                call(simple_brush.focus_restore_region),
+            ],
+        )
         self.assertEqual(
             click.call_args_list,
             [
@@ -5069,14 +5071,12 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 call(260.0, 250.0, offset=0, region_width=300, region_height=100),
             ],
         )
-        self.assertEqual(sleep.call_args_list, [call(0.15), call(0.15)])
-        select.assert_not_called()
-        forward_focus_calibrate.assert_not_called()
+        self.assertEqual(delay.call_args_list, [call(0.3, 0.5), call(0.3, 0.5)])
 
     def test_favorite_focus_wrapper_delegates_to_neutral_helper(self):
         with patch.object(
             simple_brush,
-            "restore_candidate_page_focus",
+            "restore_candidate_detail_focus",
             return_value=False,
         ) as restore_focus:
             self.assertFalse(
@@ -5084,6 +5084,50 @@ class SimpleBrushOCRTests(unittest.TestCase):
             )
 
         restore_focus.assert_called_once_with()
+
+    def test_favorite_restore_uses_shared_calibrated_focus_region(self):
+        favorite_region = simple_brush.ScreenRegion(
+            left=100, top=200, width=60, height=30,
+        )
+        focus_region = simple_brush.ScreenRegion(
+            left=600, top=300, width=120, height=60,
+        )
+        simple_brush.favorite_button_region = favorite_region
+        simple_brush.focus_restore_region = focus_region
+        simple_brush.ocr_detector = Mock(
+            region=simple_brush.ScreenRegion(left=10, top=20, width=30, height=40),
+        )
+        with (
+            patch.object(
+                simple_brush,
+                "random_point_in_inner_region",
+                return_value=(120, 215),
+            ) as favorite_point,
+            patch.object(
+                simple_brush,
+                "random_point_in_region",
+                side_effect=[(650, 330), (660, 340)],
+            ) as focus_point,
+            patch.object(simple_brush, "human_click") as click,
+            patch.object(simple_brush.time, "sleep"),
+            patch.object(simple_brush, "human_delay", return_value=True) as delay,
+        ):
+            self.assertTrue(simple_brush.perform_favorite_action())
+
+        favorite_point.assert_called_once_with(favorite_region)
+        self.assertEqual(
+            focus_point.call_args_list,
+            [call(focus_region), call(focus_region)],
+        )
+        self.assertEqual(
+            click.call_args_list,
+            [
+                call(120, 215, offset=0, region_width=60, region_height=30),
+                call(650, 330, offset=0, region_width=120, region_height=60),
+                call(660, 340, offset=0, region_width=120, region_height=60),
+            ],
+        )
+        self.assertEqual(delay.call_args_list, [call(0.3, 0.5), call(0.3, 0.5)])
 
     def test_perform_favorite_action_restores_focus_after_favorite_click(self):
         region = simple_brush.ScreenRegion(left=100, top=200, width=300, height=100)

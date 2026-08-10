@@ -2182,8 +2182,30 @@ def perform_favorite_action():
 
 
 def restore_candidate_page_focus_after_favorite():
-    """Restore detail-page focus after favorite through the neutral helper."""
-    return restore_candidate_page_focus()
+    """Restore detail-page focus after favorite through the shared helper."""
+    return restore_candidate_detail_focus()
+
+
+def restore_candidate_detail_focus():
+    """Restore candidate-detail focus through the calibrated safe region."""
+    for attempt in range(1, 3):
+        try:
+            focus_x, focus_y = random_point_in_region(focus_restore_region)
+            human_click(
+                focus_x,
+                focus_y,
+                offset=0,
+                region_width=focus_restore_region.width,
+                region_height=focus_restore_region.height,
+            )
+            human_delay(0.3, 0.5)
+        except Exception as exc:
+            logger.error(
+                '❌ 详情页第 %s 次焦点恢复点击失败 error_type=%s',
+                attempt,
+                type(exc).__name__,
+            )
+    return True
 
 
 def restore_candidate_page_focus():
@@ -2941,23 +2963,7 @@ def forward_one_candidate():
         return True
     finally:
         # 只要进入转发处理函数，所有退出路径都统一恢复详情页焦点两次。
-        for attempt in range(1, 3):
-            try:
-                focus_x, focus_y = random_point_in_region(focus_restore_region)
-                human_click(
-                    focus_x,
-                    focus_y,
-                    offset=0,
-                    region_width=focus_restore_region.width,
-                    region_height=focus_restore_region.height,
-                )
-                human_delay(0.3, 0.5)
-            except Exception as exc:
-                logger.error(
-                    '❌ 转发流程第 %s 次焦点恢复点击失败 error_type=%s',
-                    attempt,
-                    type(exc).__name__,
-                )
+        restore_candidate_detail_focus()
 
 
 # ─── 刷简历核心 ─────────────────────────────────────
