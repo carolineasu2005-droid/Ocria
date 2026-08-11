@@ -1295,7 +1295,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "refresh_page") as refresh,
             patch.object(
                 simple_brush,
-                "restore_candidate_page_focus",
+                "restore_candidate_detail_focus",
                 return_value=focus_result,
                 side_effect=focus_side_effect,
             ) as focus_restore,
@@ -2610,7 +2610,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ) as next_candidate,
             patch.object(
                 simple_brush,
-                "restore_candidate_page_focus",
+                "restore_candidate_detail_focus",
                 return_value=True,
             ) as restore_focus,
             patch.object(
@@ -2763,7 +2763,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ) as next_candidate,
             patch.object(
                 simple_brush,
-                "restore_candidate_page_focus",
+                "restore_candidate_detail_focus",
                 return_value=True,
             ) as restore_focus,
             patch.object(simple_brush, "refresh_page") as refresh,
@@ -4651,6 +4651,30 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.assertIsNone(simple_brush.batch_filter_regions)
         self.assertIsNone(simple_brush.favorite_button_region)
 
+    def test_load_calibration_profile_favorite_does_not_require_forward_regions(self):
+        profile = sample_profile(missing=(
+            "forward_icon",
+            "email_tab",
+            "input_box",
+            "recent_email",
+            "forward_button",
+        ))
+
+        self.assertTrue(simple_brush.load_calibration_profile_into_runtime(
+            profile,
+            action_mode_value=simple_brush.ACTION_MODE_FAVORITE,
+        ))
+
+        self.assertIsNone(simple_brush.forward_click_regions)
+        self.assertEqual(
+            simple_brush.favorite_button_region,
+            profile.areas["favorite_button_region"],
+        )
+        self.assertEqual(
+            simple_brush.focus_restore_region,
+            profile.areas["focus_restore_region"],
+        )
+
     def test_load_calibration_profile_missing_favorite_field_rejects_favorite_mode(self):
         profile = sample_profile(missing=("favorite_button_region",))
 
@@ -5084,6 +5108,81 @@ class SimpleBrushOCRTests(unittest.TestCase):
             )
 
         restore_focus.assert_called_once_with()
+
+    def test_legacy_focus_restore_entry_uses_safe_region_not_ocr_body(self):
+        focus_region = simple_brush.ScreenRegion(
+            left=100, top=100, width=100, height=80,
+        )
+        simple_brush.focus_restore_region = focus_region
+
+        class OCRBodyForbidden:
+            @property
+            def region(self):
+                raise AssertionError("focus restore must not access OCR body region")
+
+        simple_brush.ocr_detector = OCRBodyForbidden()
+        with (
+            patch.object(
+                simple_brush,
+                "random_point_in_region",
+                side_effect=[(120, 120), (180, 160)],
+            ) as point,
+            patch.object(simple_brush, "human_click") as click,
+            patch.object(simple_brush, "human_delay", return_value=True),
+        ):
+            self.assertTrue(simple_brush.restore_candidate_page_focus())
+
+        self.assertEqual(point.call_args_list, [call(focus_region), call(focus_region)])
+        self.assertEqual(
+            click.call_args_list,
+            [
+                call(120, 120, offset=0, region_width=100, region_height=80),
+                call(180, 160, offset=0, region_width=100, region_height=80),
+            ],
+        )
+
+    def test_r07_detector_receives_shared_safe_focus_restore_callback(self):
+        ocr_region = simple_brush.ScreenRegion(
+            left=1000, top=500, width=400, height=500,
+        )
+        with (
+            patch.object(
+                simple_brush,
+                "select_screen_region",
+                return_value=ocr_region,
+            ),
+            patch.object(simple_brush, "save_region_preview"),
+            patch.object(simple_brush, "OCRKeywordDetector") as detector_class,
+        ):
+            self.assertTrue(simple_brush.ensure_ocr_region_calibrated())
+
+        self.assertIs(
+            detector_class.call_args.kwargs["restore_focus"],
+            simple_brush.restore_candidate_detail_focus,
+        )
+
+    def test_shared_focus_restore_reports_failure_after_click_error(self):
+        focus_region = simple_brush.ScreenRegion(
+            left=100, top=100, width=100, height=80,
+        )
+        simple_brush.focus_restore_region = focus_region
+        with (
+            patch.object(
+                simple_brush,
+                "random_point_in_region",
+                side_effect=[(120, 120), (180, 160)],
+            ),
+            patch.object(
+                simple_brush,
+                "human_click",
+                side_effect=[RuntimeError("first click failed"), None],
+            ) as click,
+            patch.object(simple_brush, "human_delay", return_value=True) as delay,
+        ):
+            self.assertFalse(simple_brush.restore_candidate_detail_focus())
+
+        self.assertEqual(click.call_count, 2)
+        delay.assert_called_once_with(0.3, 0.5)
 
     def test_favorite_restore_uses_shared_calibrated_focus_region(self):
         favorite_region = simple_brush.ScreenRegion(
@@ -5918,7 +6017,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.assertEqual(user_input.call_count, 4)
         self.assertEqual(simple_brush.action_mode, simple_brush.ACTION_MODE_FAVORITE)
         self.assertEqual(simple_brush.backup_email, "")
-        self.assertFalse(simple_brush.focus_restore_calibration_requested)
+        self.assertTrue(simple_brush.focus_restore_calibration_requested)
         self.assertFalse(simple_brush.forward_click_calibration_requested)
 
     def test_interactive_duration_retries_invalid_input(self):
@@ -6214,6 +6313,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             simple_brush.action_mode = simple_brush.ACTION_MODE_FAVORITE
             simple_brush.forward_enabled = True
             simple_brush.forward_keywords = [Mock(source='"Python"')]
+            simple_brush.focus_restore_calibration_requested = True
 
         def record(name, result=True):
             def action(*_args, **_kwargs):
@@ -6238,6 +6338,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "safe_wait", return_value=True),
             patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(simple_brush, "click_first_candidate", side_effect=record("detail")),
+            patch.object(
+                simple_brush,
+                "ensure_focus_restore_region_calibrated",
+                side_effect=record("focus_calibrate"),
+            ) as focus_calibrate,
             patch.object(
                 simple_brush,
                 "ensure_favorite_button_region_calibrated",
@@ -6265,8 +6370,16 @@ class SimpleBrushOCRTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["detail", "favorite_calibrate", "ocr_calibrate", "timer_start", "view"],
+            [
+                "detail",
+                "focus_calibrate",
+                "favorite_calibrate",
+                "ocr_calibrate",
+                "timer_start",
+                "view",
+            ],
         )
+        focus_calibrate.assert_called_once_with()
         favorite_calibrate.assert_called_once_with()
 
     def test_run_cli_favorite_calibrates_before_viewing(self):

@@ -1440,13 +1440,15 @@ def load_calibration_profile_into_runtime(
 
     mode = action_mode_value or action_mode
 
-    loaded_forward_regions = ForwardClickRegions(
-        forward_icon=_profile_region(profile, 'forward_icon'),
-        email_tab=_profile_region(profile, 'email_tab'),
-        input_box=_profile_region(profile, 'input_box'),
-        recent_email=_profile_region(profile, 'recent_email'),
-        forward_button=_profile_region(profile, 'forward_button'),
-    )
+    loaded_forward_regions = None
+    if mode == ACTION_MODE_FORWARD:
+        loaded_forward_regions = ForwardClickRegions(
+            forward_icon=_profile_region(profile, 'forward_icon'),
+            email_tab=_profile_region(profile, 'email_tab'),
+            input_box=_profile_region(profile, 'input_box'),
+            recent_email=_profile_region(profile, 'recent_email'),
+            forward_button=_profile_region(profile, 'forward_button'),
+        )
     loaded_batch_regions = BatchFilterRegions(
         first_candidate=_profile_region(profile, 'first_candidate'),
         open_filter=_profile_region(profile, 'open_filter'),
@@ -1647,7 +1649,12 @@ def get_user_input(
         print()
         return
 
-    if forward_enabled and action_mode == ACTION_MODE_FORWARD:
+    if action_mode == ACTION_MODE_FAVORITE:
+        # 收藏模式也需要详情页安全空白区；无模板时在首位详情稳定后校准。
+        focus_restore_calibration_requested = True
+        forward_click_calibration_requested = False
+        print('  将在第一位候选人详情页打开后校准安全焦点恢复区域')
+    elif forward_enabled and action_mode == ACTION_MODE_FORWARD:
         calibrate_forward = input(
             '\n是否校准完整邮件转发点击区域（包含焦点恢复区域）？[y/N]\n> '
         ).strip().lower()
@@ -2188,6 +2195,7 @@ def restore_candidate_page_focus_after_favorite():
 
 def restore_candidate_detail_focus():
     """Restore candidate-detail focus through the calibrated safe region."""
+    restored = True
     for attempt in range(1, 3):
         try:
             focus_x, focus_y = random_point_in_region(focus_restore_region)
@@ -2200,32 +2208,18 @@ def restore_candidate_detail_focus():
             )
             human_delay(0.3, 0.5)
         except Exception as exc:
+            restored = False
             logger.error(
                 '❌ 详情页第 %s 次焦点恢复点击失败 error_type=%s',
                 attempt,
                 type(exc).__name__,
             )
-    return True
+    return restored
 
 
 def restore_candidate_page_focus():
-    """Restore detail-page focus inside the calibrated OCR body region."""
-    if ocr_detector is None:
-        logger.warning('OCR 正文区域未就绪，跳过详情页焦点恢复')
-        return False
-
-    region = ocr_detector.region
-    for _ in range(2):
-        x, y = random_point_in_inner_region(region)
-        human_click(
-            x,
-            y,
-            offset=0,
-            region_width=region.width,
-            region_height=region.height,
-        )
-        time.sleep(0.15)
-    return True
+    """Compatibility entry point for safe candidate-detail focus recovery."""
+    return restore_candidate_detail_focus()
 
 
 def get_clipboard_text():
@@ -2371,7 +2365,7 @@ def ensure_ocr_region_calibrated():
         ),
         rule_evaluation_mode=R04_RULE_EVALUATION_MODE,
         dynamic_end_config=DYNAMIC_END_CONFIG,
-        restore_focus=restore_candidate_page_focus,
+        restore_focus=restore_candidate_detail_focus,
         interrupt_reason_provider=ocr_interrupt_reason,
     )
     logger.info(
@@ -3520,7 +3514,7 @@ def confirm_candidate_switch(
                 return None
             focus_error_type = None
             try:
-                focus_recovered = restore_candidate_page_focus()
+                focus_recovered = restore_candidate_detail_focus()
             except Exception as exc:
                 focus_recovered = False
                 focus_error_type = type(exc).__name__
