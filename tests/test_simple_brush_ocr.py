@@ -7252,7 +7252,7 @@ class StartupMenuTests(unittest.TestCase):
         ):
             self.assertEqual(simple_brush.main(), 0)
 
-        self.assertIn("开始运行 BossOCR", user_input.call_args.args[0])
+        self.assertIn("开始运行 Ocria Am7", user_input.call_args.args[0])
         self.assertIn("创建或更新校准模板", user_input.call_args.args[0])
         run.assert_called_once_with()
 

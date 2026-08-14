@@ -1,0 +1,17 @@
+change_id=AM7-R01-C05
+scope=TID 0.6 §14.1 Full Legacy Regression
+repository_relative_cwd=.
+commit=a7c941989a038d7a998ccee707e14b4fd9125cda
+tree=b3ddfa62cf1673ffc59887b06517baacf9c79cd7
+operator=automated_night_batch
+command=.\venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py' -v
+timestamp_capture=not_captured_at_command_start; execution preceded the recorded R04 start timestamp.
+exit_code=1
+tests=783
+failures=1
+errors=0
+skips=0
+stdout_stderr=Sanitized actual output retained as failure summary only. Full raw test output contains runtime/log material that is prohibited from repository evidence.
+failure_test=tests.test_simple_brush_ocr.StartupMenuTests.test_interactive_menu_shows_and_run_delegates_to_existing_flow
+failure_assertion=Existing test expects menu text '开始运行 BossOCR'; active C03 surface displays '开始运行 Ocria Am7'.
+result=FAIL — C03 active-display migration conflicts with an unchanged existing-test assertion.

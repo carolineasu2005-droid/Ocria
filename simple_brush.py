@@ -1231,11 +1231,11 @@ listener = keyboard.Listener(on_press=on_press)
 
 # ─── 用户交互输入 ───────────────────────────────────
 def choose_startup_action():
-    """Prompt an interactive user to run BossOCR, calibrate, or exit."""
+    """Prompt an interactive user to run Ocria Am7, calibrate, or exit."""
     while True:
         raw = input(
             '\n请选择操作：\n\n'
-            '1. 开始运行 BossOCR\n'
+            '1. 开始运行 Ocria Am7\n'
             '2. 创建或更新校准模板\n'
             '0. 退出\n> '
         ).strip()
@@ -3707,7 +3707,7 @@ def run():
         raise
 
     logger.info('\n' + '=' * 50)
-    logger.info('BOSS 直聘极简刷简历 v4 启动')
+    logger.info('Ocria Am7 启动')
     logger.info(f'停留: {MIN_STAY_SECONDS}-{MAX_STAY_SECONDS}s | 每 {BATCH_SIZE} 人刷新')
     if forward_enabled:
         logger.info('rule_count=%s', len(forward_keywords))

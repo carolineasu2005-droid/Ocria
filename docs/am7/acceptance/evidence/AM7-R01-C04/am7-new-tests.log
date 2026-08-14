@@ -1,0 +1,20 @@
+change_id=AM7-R01-C04
+scope=TID 0.6 §14.3 new AM7 guard and Golden tests
+repository_relative_cwd=.
+command=.\\venv\\Scripts\\python.exe -m unittest -v tests.test_am7_r01_baseline_metadata tests.test_am7_r01_brand_contract tests.test_am7_r01_golden_replay
+{"change_id":"AM7-R01-C04","scope":"TID 0.6 §14.3 new AM7 guard and Golden tests","command":".\\\\venv\\\\Scripts\\\\python.exe -m unittest -v tests.test_am7_r01_baseline_metadata tests.test_am7_r01_brand_contract tests.test_am7_r01_golden_replay","start":"2026-08-14T01:01:27.4619284+08:00","end":"2026-08-14T01:01:28.4860899+08:00","exit_code":0,"tests":7,"failures":0,"errors":0,"skips":0,"result":"PASS"}
+stdout:
+
+stderr:
+test_c01_absent_origin_state_is_preserved_as_historical_evidence (tests.test_am7_r01_baseline_metadata.Am7R01BaselineMetadataTests.test_c01_absent_origin_state_is_preserved_as_historical_evidence) ... ok
+test_c01_confirmation_and_c02_boundary_are_independent (tests.test_am7_r01_baseline_metadata.Am7R01BaselineMetadataTests.test_c01_confirmation_and_c02_boundary_are_independent) ... ok
+test_source_identity_and_history_preserving_relation_are_frozen (tests.test_am7_r01_baseline_metadata.Am7R01BaselineMetadataTests.test_source_identity_and_history_preserving_relation_are_frozen) ... ok
+test_active_identity_surfaces_are_ocria_am7 (tests.test_am7_r01_brand_contract.Am7R01BrandContractTests.test_active_identity_surfaces_are_ocria_am7) ... ok
+test_retained_legacy_identifiers_and_release_notes_contract_are_unchanged (tests.test_am7_r01_brand_contract.Am7R01BrandContractTests.test_retained_legacy_identifiers_and_release_notes_contract_are_unchanged) ... ok
+test_fixture_text_is_explicitly_limited_to_the_human_approved_pool (tests.test_am7_r01_golden_replay.Am7R01GoldenReplayTests.test_fixture_text_is_explicitly_limited_to_the_human_approved_pool) ... ok
+test_strict_load_and_frozen_expected_replay_are_exactly_equivalent (tests.test_am7_r01_golden_replay.Am7R01GoldenReplayTests.test_strict_load_and_frozen_expected_replay_are_exactly_equivalent) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.054s
+
+OK

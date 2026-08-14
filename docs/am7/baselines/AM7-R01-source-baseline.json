@@ -1,0 +1,53 @@
+{
+  "schema_version": "am7-source-baseline-v1",
+  "product": {
+    "name": "Ocria",
+    "generation": "Am7"
+  },
+  "source": {
+    "product": "BossOCR",
+    "repository": "https://github.com/carolineasu2005-droid/Boss-OCR.git",
+    "branch": "main",
+    "commit": "a7c941989a038d7a998ccee707e14b4fd9125cda",
+    "parent": "79bc98e9fac5de3ee50d081125b66f1c73aa6c61",
+    "tree": "b3ddfa62cf1673ffc59887b06517baacf9c79cd7",
+    "tag": "V1.3.1",
+    "release_url": "https://github.com/carolineasu2005-droid/Boss-OCR/releases/tag/V1.3.1",
+    "release_published_at": "2026-08-11T13:52:42Z",
+    "asset": {
+      "name": "BossOCR-Windows-x64.zip",
+      "size_bytes": 123421312,
+      "sha256": "1be803a15af01779786585c7bc84fd1dc1722a002f146762d6e8f9e2f11f22a9"
+    }
+  },
+  "relationship": {
+    "type": "history-preserving-derived-repository",
+    "bossocr_role": "legacy_stable_fallback",
+    "ocria_role": "am7_development_mainline",
+    "fallback_mode": "manual_product_line",
+    "automatic_runtime_fallback": false
+  },
+  "repository_boundary": {
+    "origin_status": "configured",
+    "origin_url": "https://github.com/carolineasu2005-droid/Ocria.git",
+    "upstream_remote_name": "bossocr-upstream",
+    "upstream_fetch_url": "https://github.com/carolineasu2005-droid/Boss-OCR.git",
+    "upstream_push_disabled": true
+  },
+  "confirmation": {
+    "status": "confirmed",
+    "confirmed_at": "2026-08-13T22:25:40+08:00",
+    "python": "3.11.9 x64",
+    "evidence_refs": [
+      "docs/am7/baselines/AM7-R01-source-baseline.md",
+      "docs/am7/acceptance/evidence/AM7-R01-C01/gate-summary.md",
+      "docs/am7/acceptance/evidence/AM7-R01-C01/README.md",
+      "docs/am7/PROVENANCE.md",
+      "docs/am7/acceptance/evidence/AM7-R01-C02/command-manifest.md",
+      "docs/am7/acceptance/evidence/AM7-R01-C02/before-configuration.log",
+      "docs/am7/acceptance/evidence/AM7-R01-C02/configuration-and-verification.log",
+      "docs/am7/acceptance/evidence/AM7-R01-C02/final-verification.log"
+    ],
+    "human_approver": "Human Project Owner"
+  }
+}

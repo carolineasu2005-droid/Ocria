@@ -1,0 +1,10 @@
+change_id=AM7-R01-C03
+gate=R06
+timestamp=2026-08-14T00:00:00+08:00
+command=PowerShell R06 benchmark/output-contract harness
+result=HARNESS_INFRASTRUCTURE_FAILURE
+benchmark_module_invoked=false
+raw_json_created=false
+exit_code=1
+stdout_stderr=PowerShell parser error: missing 'in' after variable in foreach loop; the harness did not execute the benchmark module.
+resolution=correct the harness syntax, preserve this record, then run the formal R06 module once to obtain raw JSON.

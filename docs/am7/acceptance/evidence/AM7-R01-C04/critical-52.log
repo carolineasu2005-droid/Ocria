@@ -1,0 +1,13 @@
+change_id=AM7-R01-C04
+scope=TID 0.6 §14.2 exact Critical Legacy Regression Suite
+repository_relative_cwd=.
+command=.\venv\Scripts\python.exe -m unittest -v <52 fixed qualified tests from TID 0.6 §14.2>
+start=2026-08-14T00:36:04+08:00
+end=2026-08-14T00:36:06+08:00
+exit_code=0
+test_count=52
+failures=0
+errors=0
+skips=0
+result=PASS
+stdout_stderr=Execution transcript contained only test/framework diagnostics and no retained candidate OCR body, credential, or local absolute path.

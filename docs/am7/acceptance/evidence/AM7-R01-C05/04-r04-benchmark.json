@@ -1,0 +1,15 @@
+{
+  "normalization_version": "r04-v1",
+  "normalization_config_version": "r04-config-v1",
+  "normalization_config_digest": "3597727e595b16c3aba7bfa41653b617f11277e78ce52379c99ee3afafcb84d5",
+  "rows": [
+    {"scenario":"unique-0","boxes":0,"runs":25,"median_ms":0.0359,"p95_ms":0.0431,"candidate_count":0,"survivor_confirmation_count":0,"survivor_count":0,"suppressed_count":0,"gray_count":0,"peak_kib":9.56,"gc_retained_kib":0.23,"deterministic":true},
+    {"scenario":"unique-1","boxes":1,"runs":25,"median_ms":0.0851,"p95_ms":0.1048,"candidate_count":0,"survivor_confirmation_count":0,"survivor_count":1,"suppressed_count":0,"gray_count":0,"peak_kib":12.5,"gc_retained_kib":0.23,"deterministic":true},
+    {"scenario":"unique-8","boxes":8,"runs":25,"median_ms":0.2826,"p95_ms":0.3452,"candidate_count":0,"survivor_confirmation_count":0,"survivor_count":8,"suppressed_count":0,"gray_count":0,"peak_kib":23.41,"gc_retained_kib":0.23,"deterministic":true},
+    {"scenario":"unique-100","boxes":100,"runs":25,"median_ms":2.8107,"p95_ms":3.3924,"candidate_count":0,"survivor_confirmation_count":0,"survivor_count":100,"suppressed_count":0,"gray_count":0,"peak_kib":185.98,"gc_retained_kib":0.23,"deterministic":true},
+    {"scenario":"unique-500","boxes":500,"runs":25,"median_ms":19.5378,"p95_ms":21.5823,"candidate_count":0,"survivor_confirmation_count":0,"survivor_count":500,"suppressed_count":0,"gray_count":0,"peak_kib":888.68,"gc_retained_kib":0.26,"deterministic":true},
+    {"scenario":"far-same-text-500","boxes":500,"runs":25,"median_ms":12.7392,"p95_ms":15.3897,"candidate_count":0,"survivor_confirmation_count":0,"survivor_count":500,"suppressed_count":0,"gray_count":0,"peak_kib":901.01,"gc_retained_kib":0.26,"deterministic":true},
+    {"scenario":"dense-same-position-text-500","boxes":500,"runs":25,"median_ms":13.2069,"p95_ms":14.4701,"candidate_count":499,"survivor_confirmation_count":499,"survivor_count":1,"suppressed_count":499,"gray_count":0,"peak_kib":1002.97,"gc_retained_kib":0.32,"deterministic":true},
+    {"scenario":"dense-100-repeated-identical","boxes":100,"runs":100,"median_ms":2.5798,"p95_ms":3.3954,"candidate_count":99,"survivor_confirmation_count":99,"survivor_count":1,"suppressed_count":99,"gray_count":0,"peak_kib":208.58,"gc_retained_kib":0.23,"deterministic":true}
+  ]
+}

@@ -20,16 +20,16 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 
 rem Safe smoke test: no keywords, no forwarding, and no BOSS window interaction.
-"dist\BossOCR\BossOCR.exe" --no-forward --auto --duration-seconds 0
+"dist\Ocria\Ocria.exe" --no-forward --auto --duration-seconds 0
 if errorlevel 1 exit /b 1
 
 if not exist "release" mkdir "release"
-if exist "release\BossOCR-Windows-x64.zip" del /q "release\BossOCR-Windows-x64.zip"
-powershell -NoProfile -Command "Compress-Archive -Path 'dist\BossOCR\*' -DestinationPath 'release\BossOCR-Windows-x64.zip' -CompressionLevel Optimal"
+if exist "release\Ocria-Am7-Windows-x64.zip" del /q "release\Ocria-Am7-Windows-x64.zip"
+powershell -NoProfile -Command "Compress-Archive -Path 'dist\Ocria\*' -DestinationPath 'release\Ocria-Am7-Windows-x64.zip' -CompressionLevel Optimal"
 if errorlevel 1 exit /b 1
 
-certutil -hashfile "release\BossOCR-Windows-x64.zip" SHA256
+certutil -hashfile "release\Ocria-Am7-Windows-x64.zip" SHA256
 echo.
-echo Build completed: release\BossOCR-Windows-x64.zip
+echo Build completed: release\Ocria-Am7-Windows-x64.zip
 
 endlocal

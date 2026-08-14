@@ -1,0 +1,17 @@
+change_id=AM7-R01-C05
+scope=TID 0.6 §14.1.2 R05 benchmark and output contract
+repository_relative_cwd=.
+commit=a7c941989a038d7a998ccee707e14b4fd9125cda
+tree=b3ddfa62cf1673ffc59887b06517baacf9c79cd7
+operator=automated_night_batch
+command=.\venv\Scripts\python.exe -m tests.benchmark_r05_aggregation
+start=2026-08-14T01:23:18.2860806+08:00
+end=2026-08-14T01:23:39.0318876+08:00
+exit_code=0
+scenario_count=18
+aggregation_config_digest=047ec8c40aab9b28ed3a7a6a63695f416677e1a73c25f3c398d77eca3b31ff7a
+contract_blocker_count=0
+output_contract=PASS
+raw_json_status=not_durably_captured_at_execution_time
+evidence_gap=The actual module emitted valid JSON and the complete TID output contract passed, but the full raw JSON was not written to a repository evidence file during this C05 invocation. It is not reconstructed and the benchmark is not rerun merely to obtain a log.
+result=PASS — benchmark contract; EB-04 raw-evidence completeness remains incomplete.

@@ -1,0 +1,18 @@
+AM7-R01 C05 final automated acceptance — active brand audit
+TID: 0.7 / Approved §14.5
+Repository baseline: a7c941989a038d7a998ccee707e14b4fd9125cda
+
+command: TID §14.5 scoped active-brand audit
+start_time: 2026-08-14T21:30:53.1362339+08:00
+end_time: 2026-08-14T21:30:53.2122930+08:00
+exit_code: 0
+active_file_count: 8
+expected_active_identity: PASS
+forbidden_stale_identity: PASS
+spec_name_assignments: 2
+spec_ocria_name_assignments: 2
+workflow_notes_file_contract_matches: 1
+BossOCR_residual_count: 7
+unclassified_residual_count: 0
+residual_classification: only retained BossOCR.spec references, the frozen workflow notes-file path, and declared provenance/history references.
+result: PASS

@@ -1,0 +1,74 @@
+change_id=AM7-R01-C02
+phase=configuration_and_verification
+repo_relative_cwd=.
+approved_origin_url=https://github.com/carolineasu2005-droid/Ocria.git
+capture_start=2026-08-13T23:42:42.8233659+08:00
+---
+timestamp=2026-08-13T23:42:42.8292362+08:00
+label=disable_bossocr_upstream_push
+command=git remote set-url --push bossocr-upstream no_push://bossocr-upstream
+stdout_stderr=<empty>
+exit_code=0
+---
+timestamp=2026-08-13T23:42:42.8870677+08:00
+label=configure_approved_origin
+command=git remote add origin https://github.com/carolineasu2005-droid/Ocria.git
+stdout_stderr=<empty>
+exit_code=0
+---
+timestamp=2026-08-13T23:42:42.9450406+08:00
+label=remote_verbose_after
+command=git remote -v
+bossocr-upstream	https://github.com/carolineasu2005-droid/Boss-OCR.git (fetch)
+bossocr-upstream	no_push://bossocr-upstream (push)
+origin	https://github.com/carolineasu2005-droid/Ocria.git (fetch)
+origin	https://github.com/carolineasu2005-droid/Ocria.git (push)
+exit_code=0
+---
+timestamp=2026-08-13T23:42:43.0026697+08:00
+label=origin_fetch_after
+command=git remote get-url origin
+https://github.com/carolineasu2005-droid/Ocria.git
+exit_code=0
+---
+timestamp=2026-08-13T23:42:43.0563257+08:00
+label=origin_push_after
+command=git remote get-url --push origin
+https://github.com/carolineasu2005-droid/Ocria.git
+exit_code=0
+---
+timestamp=2026-08-13T23:42:43.1224769+08:00
+label=bossocr_fetch_after
+command=git remote get-url bossocr-upstream
+https://github.com/carolineasu2005-droid/Boss-OCR.git
+exit_code=0
+---
+timestamp=2026-08-13T23:42:43.1745581+08:00
+label=bossocr_push_after
+command=git remote get-url --push bossocr-upstream
+no_push://bossocr-upstream
+exit_code=0
+---
+timestamp=2026-08-13T23:42:43.2245436+08:00
+label=url_rewrite_audit_after
+command=git config --show-origin --get-regexp '^url\\..*\\.(insteadOf|pushInsteadOf)$'
+stdout_stderr=<empty>
+exit_code=1
+---
+timestamp=2026-08-13T23:42:43.2772426+08:00
+label=remote_config_origins
+command=git config --show-origin --get-regexp ^remote\.(origin|bossocr-upstream)\.(url|fetch|pushurl)$
+file:.git/config	remote.bossocr-upstream.url https://github.com/carolineasu2005-droid/Boss-OCR.git
+file:.git/config	remote.bossocr-upstream.fetch +refs/heads/*:refs/remotes/bossocr-upstream/*
+file:.git/config	remote.bossocr-upstream.pushurl no_push://bossocr-upstream
+file:.git/config	remote.origin.url https://github.com/carolineasu2005-droid/Ocria.git
+file:.git/config	remote.origin.fetch +refs/heads/*:refs/remotes/origin/*
+exit_code=0
+---
+timestamp=2026-08-13T23:42:43.3290827+08:00
+label=baseline_ancestor_after
+command=git merge-base --is-ancestor <baseline> HEAD
+stdout_stderr=<empty>
+exit_code=0
+capture_end=2026-08-13T23:42:43.3845243+08:00
+configuration_command_result=PASS

@@ -13,10 +13,10 @@ if not exist "venv\Scripts\python.exe" (
 )
 
 echo ========================================
-echo  BOSS 直聘自动刷简历
+echo  Ocria Am7
 echo ========================================
 echo.
-echo 1. 打开 Edge，进入 BOSS 直聘"推荐牛人"页面
+echo 1. 打开 Chrome（优先）或 Edge（回退），进入 BOSS 直聘"推荐牛人"页面
 echo 2. 将鼠标移到第一位候选人卡片上
 echo 3. 本窗口倒计时 3 秒后将自动开始
 echo.

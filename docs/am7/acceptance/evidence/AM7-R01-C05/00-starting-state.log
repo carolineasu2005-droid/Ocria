@@ -1,0 +1,15 @@
+change_id=AM7-R01-C05
+scope=Night Batch starting-state and predecessor evidence review
+repository_relative_cwd=.
+timestamp=2026-08-14T01:17:56.7420478+08:00
+head=a7c941989a038d7a998ccee707e14b4fd9125cda
+tree=b3ddfa62cf1673ffc59887b06517baacf9c79cd7
+command=git status --short --branch; git status --porcelain --untracked-files=all; git remote -v; read C02/C03/C04 evidence
+exit_code=0
+origin_fetch=https://github.com/carolineasu2005-droid/Ocria.git
+origin_push=https://github.com/carolineasu2005-droid/Ocria.git
+upstream_fetch=https://github.com/carolineasu2005-droid/Boss-OCR.git
+upstream_push=no_push://bossocr-upstream
+carry_forward_c03=Full Legacy Regression had an existing menu-display assertion conflict after the authorized active display identity change.
+carry_forward_c04=Full Legacy Regression remained failing for that same C03 issue; Golden and Critical 52 passed.
+result=STARTED — predecessor state recorded; no acceptance result inferred.

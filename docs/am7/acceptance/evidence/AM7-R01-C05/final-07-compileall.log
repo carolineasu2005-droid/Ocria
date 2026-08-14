@@ -1,0 +1,15 @@
+AM7-R01 C05 final automated acceptance — compile target / compileall contract
+TID: 0.7 / Approved §14.1
+Repository baseline: a7c941989a038d7a998ccee707e14b4fd9125cda
+Execution environment: .\\venv\\Scripts\\python.exe
+
+command: TID §14.1 19-target existence manifest followed by .\\venv\\Scripts\\python.exe -m compileall -q @compileTargets
+start_time: 2026-08-14T21:28:46.8727211+08:00
+end_time: 2026-08-14T21:28:47.0847537+08:00
+target_count: 19
+target_existence: PASS
+exit_code: 0
+output: (empty)
+missing-output-pattern: not found
+output_contract: PASS
+result: PASS

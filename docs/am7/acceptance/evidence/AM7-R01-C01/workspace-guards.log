@@ -1,0 +1,114 @@
+evidence_recovery=true
+reason=raw execution evidence recovery
+change_id=AM7-R01-C01
+repo_relative_cwd=.
+baseline_commit=a7c941989a038d7a998ccee707e14b4fd9125cda
+baseline_tree=b3ddfa62cf1673ffc59887b06517baacf9c79cd7
+command_start=2026-08-13T23:31:04.3113883+08:00
+---
+timestamp=2026-08-13T23:31:04.3159670+08:00
+label=protected_production_and_benchmark_diff
+command=git diff --exit-code <baseline> -- ocr_detector.py ocr_text.py ocr_normalization.py ocr_aggregation.py ocr_similarity.py ocr_records.py ocr_candidate.py ocr_store.py ocr_replay.py ocr_similarity_sidecar.py ocr_calibration.py calibration_profiles.py calibration_steps.py calibration_template.py mouse_motion.py ocr_fixture_demo.py ocr_mac_demo.py tests/benchmark_r04_normalization.py tests/benchmark_r05_aggregation.py tests/benchmark_r06_similarity.py
+stdout_stderr=<empty>
+exit_code=0
+---
+timestamp=2026-08-13T23:31:04.3698177+08:00
+label=existing_tests_byte_identity_diff
+command=git diff --exit-code <baseline> -- tests/test_calibration_profiles.py tests/test_calibration_steps.py tests/test_calibration_template.py tests/test_mouse_motion.py tests/test_ocr_aggregation.py tests/test_ocr_calibration.py tests/test_ocr_candidate.py tests/test_ocr_detector.py tests/test_ocr_normalization.py tests/test_ocr_records.py tests/test_ocr_replay.py tests/test_ocr_similarity.py tests/test_ocr_stage0_integration.py tests/test_ocr_store.py tests/test_ocr_text.py tests/test_simple_brush_ocr.py
+stdout_stderr=<empty>
+exit_code=0
+---
+timestamp=2026-08-13T23:31:04.4226417+08:00
+label=unstaged_whitespace
+command=git diff --check
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+exit_code=0
+---
+timestamp=2026-08-13T23:31:04.4779659+08:00
+label=staged_whitespace
+command=git diff --cached --check
+stdout_stderr=<empty>
+exit_code=0
+---
+timestamp=2026-08-13T23:31:04.5304754+08:00
+label=baseline_to_worktree_whitespace
+command=git diff --check <baseline> -- .
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+exit_code=0
+---
+timestamp=2026-08-13T23:31:04.5933284+08:00
+label=tracked_changes
+command=git diff --name-only <baseline> -- .
+.gitignore
+exit_code=0
+tracked_change_count=1
+tracked_manifest_decision=.gitignore=C01_allowlist
+---
+timestamp=2026-08-13T23:31:04.6481238+08:00
+label=untracked_files
+command=git ls-files --others --exclude-standard
+docs/RPD-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+docs/TID-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+docs/am7/README.md
+docs/am7/acceptance/evidence/AM7-R01-C01/README.md
+docs/am7/acceptance/evidence/AM7-R01-C01/compileall.log
+docs/am7/acceptance/evidence/AM7-R01-C01/environment.log
+docs/am7/acceptance/evidence/AM7-R01-C01/full-legacy-regression.log
+docs/am7/acceptance/evidence/AM7-R01-C01/full-legacy-regression.raw.log.gz.base64
+docs/am7/acceptance/evidence/AM7-R01-C01/gate-summary.md
+docs/am7/acceptance/evidence/AM7-R01-C01/r04-benchmark.json
+docs/am7/acceptance/evidence/AM7-R01-C01/r04-result.log
+docs/am7/acceptance/evidence/AM7-R01-C01/r05-benchmark.json
+docs/am7/acceptance/evidence/AM7-R01-C01/r05-result.log
+docs/am7/acceptance/evidence/AM7-R01-C01/r06-benchmark.json
+docs/am7/acceptance/evidence/AM7-R01-C01/r06-result.log
+docs/am7/baselines/AM7-R01-source-baseline.json
+docs/am7/baselines/AM7-R01-source-baseline.md
+exit_code=0
+untracked_count=17
+untracked_manifest_decision=all_listed_paths_are_C01_allowlist: approved_RPD_TID, docs/am7/README.md, docs/am7/baselines/**, docs/am7/acceptance/evidence/AM7-R01-C01/**
+---
+timestamp=2026-08-13T23:31:04.6971326+08:00
+label=deleted_tracked
+command=git diff --name-only --diff-filter=D <baseline> -- .
+stdout=<empty>
+exit_code=0
+deleted_tracked_count=0
+---
+timestamp=2026-08-13T23:31:04.7517611+08:00
+label=worktree_status
+command=git status --porcelain --untracked-files=all
+ M .gitignore
+?? docs/RPD-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+?? docs/TID-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+?? docs/am7/README.md
+?? docs/am7/acceptance/evidence/AM7-R01-C01/README.md
+?? docs/am7/acceptance/evidence/AM7-R01-C01/compileall.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/environment.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/full-legacy-regression.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/full-legacy-regression.raw.log.gz.base64
+?? docs/am7/acceptance/evidence/AM7-R01-C01/gate-summary.md
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r04-benchmark.json
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r04-result.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r05-benchmark.json
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r05-result.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r06-benchmark.json
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r06-result.log
+?? docs/am7/baselines/AM7-R01-source-baseline.json
+?? docs/am7/baselines/AM7-R01-source-baseline.md
+exit_code=0
+worktree_status_count=18
+---
+timestamp=2026-08-13T23:31:04.8041120+08:00
+label=ignored_entries_classification
+command=git status --short --ignored --untracked-files=all
+raw_ignored_entry_count=6510
+known_venv_ignored_count=6440
+known_cache_ignored_count=2734
+known_runtime_build_ignored_count=0
+unknown_ignored_count=0
+classification_correction=two quoted entries are setuptools files beneath venv/ and are classified as known venv outputs
+raw_ignored_paths_not_persisted=category_counts_only; all entries are known ignored venv/cache/runtime/build outputs
+exit_code=0
+command_end=2026-08-13T23:31:15.9482972+08:00
+result=PASS

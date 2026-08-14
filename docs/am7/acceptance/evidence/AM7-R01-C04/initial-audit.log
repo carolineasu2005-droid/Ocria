@@ -1,0 +1,163 @@
+change_id=AM7-R01-C04
+phase=initial_audit
+repo_relative_cwd=.
+synthetic_source_policy=approved_pool_and_obvious_synthetic_placeholders_only; no data/ocr_runs or real candidate assets read
+capture_start=2026-08-14T00:14:41.0446311+08:00
+---
+timestamp=2026-08-14T00:14:41.0512140+08:00
+label=worktree_status
+command=git status --short --branch; git diff --stat; git diff --name-only
+## main...bossocr-upstream/main
+ M .github/workflows/windows-release.yml
+ M .gitignore
+ M BossOCR.spec
+ M build-windows.bat
+ M docs/README.md
+ M setup.bat
+ M simple_brush.py
+ M start.bat
+?? README.md
+?? docs/RPD-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+?? docs/TID-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+?? docs/am7/
+warning: in the working copy of '.github/workflows/windows-release.yml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'BossOCR.spec', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'build-windows.bat', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'setup.bat', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'simple_brush.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'start.bat', LF will be replaced by CRLF the next time Git touches it
+ .github/workflows/windows-release.yml | 18 +++++++++---------
+ .gitignore                            |  6 ++++++
+ BossOCR.spec                          |  4 ++--
+ build-windows.bat                     | 10 +++++-----
+ docs/README.md                        | 32 ++++++++++++++++----------------
+ setup.bat                             |  2 +-
+ simple_brush.py                       |  6 +++---
+ start.bat                             |  4 ++--
+ 8 files changed, 44 insertions(+), 38 deletions(-)
+warning: in the working copy of '.github/workflows/windows-release.yml', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'BossOCR.spec', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'build-windows.bat', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'setup.bat', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'simple_brush.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'start.bat', LF will be replaced by CRLF the next time Git touches it
+.github/workflows/windows-release.yml
+.gitignore
+BossOCR.spec
+build-windows.bat
+docs/README.md
+setup.bat
+simple_brush.py
+start.bat
+exit_code=0
+---
+timestamp=2026-08-14T00:14:41.2172996+08:00
+label=c03_carry_forward
+command=Get-Content C03 Full Regression and final brand audit evidence summaries
+change_id=AM7-R01-C03
+gate=Full_Legacy_Regression
+repo_relative_cwd=.
+command_start=2026-08-13T23:56:43.0132278+08:00
+command=.\\venv\\Scripts\\python.exe -m unittest discover -s tests -p 'test_*.py' -v
+command_end=2026-08-13T23:57:03.0518046+08:00
+exit_code=1
+test_count=776
+failures=reported_in_raw_capture
+errors=reported_in_raw_capture
+skips=0
+raw_capture=full-legacy-regression.raw.log.gz.base64
+raw_capture_encoding=base64(gzip(utf-8 stdout/stderr capture))
+path_redaction=repository_absolute_paths_replaced_with_<repo>
+result=FAIL
+forbidden_absent build-windows.bat :: dist\BossOCR\BossOCR.exe
+forbidden_absent build-windows.bat :: release\BossOCR-Windows-x64.zip
+forbidden_absent simple_brush.py :: Prompt an interactive user to run BossOCR, calibrate, or exit.
+forbidden_absent simple_brush.py :: 1. Ã¥Â¼ÂÃ¥Â§ÂÃ¨Â¿ÂÃ¨Â¡Â BossOCR
+forbidden_absent simple_brush.py :: BOSS Ã§ÂÂ´Ã¨ÂÂÃ¦ÂÂÃ§Â®ÂÃ¥ÂÂ·Ã§Â®ÂÃ¥ÂÂ v4 Ã¥ÂÂ¯Ã¥ÂÂ¨
+spec_name_assignment_count=2
+spec_ocria_assignment_count=2
+workflow_notes_file_contract_match_count=1
+bossocr_residual file=build-windows.bat; line=19; classification=allowed; text="venv\Scripts\python.exe" -m PyInstaller --clean --noconfirm BossOCR.spec
+bossocr_residual file=.github/workflows/windows-release.yml; line=37; classification=allowed; text=run: python -m PyInstaller --clean --noconfirm BossOCR.spec
+bossocr_residual file=.github/workflows/windows-release.yml; line=65; classification=allowed; text=gh release create "${{ github.ref_name }}" release\Ocria-Am7-Windows-x64.zip release\Ocria-Am7-Windows-x64.zip.sha256 --title "Ocria Am7 ${{ github.ref_name }}" --notes-file release-notes\Issue-1-BossOCR-release-notes.md
+bossocr_residual file=docs/README.md; line=5; classification=allowed; text=Ocria Am7 Ã§ÂÂ source baselineÃ£ÂÂÃ§ÂÂ¬Ã§Â«Â repository boundary Ã¥ÂÂÃ¤ÂºÂºÃ¥Â·Â¥ fallback Ã¥ÂÂ³Ã§Â³Â»Ã¨Â§Â [`am7/PROVENANCE.md`](am7/PROVENANCE.md)Ã£ÂÂAM7-R01 C03 Ã¥ÂÂªÃ¨Â¿ÂÃ§Â§Â»Ã¦Â´Â»Ã¨Â·ÂÃ¤ÂºÂ§Ã¥ÂÂÃ¨ÂºÂ«Ã¤Â»Â½Ã¯Â¼ÂÃ¤Â¸ÂÃ¦ÂÂ BossOCR historical release Ã¤Â¼ÂªÃ¨Â£ÂÃ¤Â¸Âº Ocria releaseÃ£ÂÂ
+bossocr_residual file=docs/README.md; line=418; classification=allowed; text=Ã¨ÂÂÃ¦ÂÂ¬Ã¤Â¼ÂÃ¥Â®ÂÃ¨Â£ÂÃ¦ÂÂÃ¥Â»ÂºÃ¤Â¾ÂÃ¨ÂµÂÃ£ÂÂÃ¨Â¿ÂÃ¨Â¡ÂÃ¥ÂÂ¨Ã©ÂÂÃ¦ÂµÂÃ¨Â¯ÂÃ£ÂÂÃ¤Â½Â¿Ã§ÂÂ¨ `BossOCR.spec` Ã§ÂÂÃ¦ÂÂÃ¦ÂÂ§Ã¥ÂÂ¶Ã¥ÂÂ°Ã§ÂÂ one-dir Ã¥ÂºÂÃ§ÂÂ¨Ã¯Â¼ÂÃ¥Â¹Â¶Ã¤Â»Â¥ `--no-forward --auto` Ã¥ÂÂÃ¥Â®ÂÃ¥ÂÂ¨Ã¥ÂÂÃ§ÂÂÃ¦ÂµÂÃ¨Â¯ÂÃ£ÂÂÃ¦ÂÂÃ¥ÂÂÃ¥ÂÂÃ¦ÂÂ¬Ã¥ÂÂ°Ã¥ÂÂÃ§Â¼Â©Ã¥ÂÂÃ¤Â½ÂÃ¤ÂºÂÃ¯Â¼Â
+bossocr_residual file=README.md; line=4; classification=allowed; text=candidate review using local OCR. It preserves the confirmed BossOCR Legacy
+bossocr_residual file=README.md; line=12; classification=allowed; text=Ocria has a history-preserving provenance relationship with BossOCR. BossOCR remains
+bossocr_residual_count=7
+residual_violation_count=0
+command_end=2026-08-14T00:12:23.2253458+08:00
+exit_code=0
+result=PASS
+exit_code=0
+---
+timestamp=2026-08-14T00:14:41.2202896+08:00
+label=c02_boundary
+command=git remote get-url origin; git remote get-url bossocr-upstream; git remote get-url --push bossocr-upstream
+https://github.com/carolineasu2005-droid/Ocria.git
+https://github.com/carolineasu2005-droid/Boss-OCR.git
+no_push://bossocr-upstream
+exit_code=0
+---
+timestamp=2026-08-14T00:14:41.3719580+08:00
+label=current_baseline_metadata
+command=.\venv\Scripts\python.exe -m json.tool docs/am7/baselines/AM7-R01-source-baseline.json
+{
+    "schema_version": "am7-source-baseline-v1",
+    "product": {
+        "name": "Ocria",
+        "generation": "Am7"
+    },
+    "source": {
+        "product": "BossOCR",
+        "repository": "https://github.com/carolineasu2005-droid/Boss-OCR.git",
+        "branch": "main",
+        "commit": "a7c941989a038d7a998ccee707e14b4fd9125cda",
+        "parent": "79bc98e9fac5de3ee50d081125b66f1c73aa6c61",
+        "tree": "b3ddfa62cf1673ffc59887b06517baacf9c79cd7",
+        "tag": "V1.3.1",
+        "release_url": "https://github.com/carolineasu2005-droid/Boss-OCR/releases/tag/V1.3.1",
+        "release_published_at": "2026-08-11T13:52:42Z",
+        "asset": {
+            "name": "BossOCR-Windows-x64.zip",
+            "size_bytes": 123421312,
+            "sha256": "1be803a15af01779786585c7bc84fd1dc1722a002f146762d6e8f9e2f11f22a9"
+        }
+    },
+    "relationship": {
+        "type": "history-preserving-derived-repository",
+        "bossocr_role": "legacy_stable_fallback",
+        "ocria_role": "am7_development_mainline",
+        "fallback_mode": "manual_product_line",
+        "automatic_runtime_fallback": false
+    },
+    "repository_boundary": {
+        "origin_status": "configured",
+        "origin_url": "https://github.com/carolineasu2005-droid/Ocria.git",
+        "upstream_remote_name": "bossocr-upstream",
+        "upstream_fetch_url": "https://github.com/carolineasu2005-droid/Boss-OCR.git",
+        "upstream_push_disabled": true
+    },
+    "confirmation": {
+        "status": "confirmed",
+        "confirmed_at": "2026-08-13T22:25:40+08:00",
+        "python": "3.11.9 x64",
+        "evidence_refs": [
+            "docs/am7/baselines/AM7-R01-source-baseline.md",
+            "docs/am7/acceptance/evidence/AM7-R01-C01/gate-summary.md",
+            "docs/am7/acceptance/evidence/AM7-R01-C01/README.md",
+            "docs/am7/PROVENANCE.md",
+            "docs/am7/acceptance/evidence/AM7-R01-C02/command-manifest.md",
+            "docs/am7/acceptance/evidence/AM7-R01-C02/before-configuration.log",
+            "docs/am7/acceptance/evidence/AM7-R01-C02/configuration-and-verification.log",
+            "docs/am7/acceptance/evidence/AM7-R01-C02/final-verification.log"
+        ],
+        "human_approver": "Human Project Owner"
+    }
+}
+exit_code=0
+capture_end=2026-08-14T00:14:41.4524626+08:00

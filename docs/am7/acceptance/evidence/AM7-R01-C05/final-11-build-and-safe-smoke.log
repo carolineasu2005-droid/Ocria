@@ -1,0 +1,31 @@
+AM7-R01 C05 final automated acceptance — build and safe executable smoke
+TID: 0.7 / Approved §14.6
+Repository baseline: a7c941989a038d7a998ccee707e14b4fd9125cda
+Sanitization: no window titles, browser content, OCR body, generated run identifier, local machine paths, or credential data retained.
+
+first_preflight_command: TID §14.6 frozen win32 window predicate
+first_preflight_start_time: 2026-08-14T21:31:35.0948043+08:00
+first_preflight_end_time: 2026-08-14T21:31:35.5905073+08:00
+first_preflight_exit_code: 0
+first_matching_boss_browser_windows: 0
+first_preflight_result: PASS
+
+build_command: cmd /c build-windows.bat
+build_exit_code: 0
+build_result: INCOMPLETE — PyInstaller completed and dist/Ocria was produced, but the script emitted archive-stage access/read errors and did not create release/Ocria-Am7-Windows-x64.zip.
+build_timestamp_status: execution wrapper completed successfully but its start/end marker was truncated from the live tool transcript; no timestamp is inferred.
+build_stdout_sanitized_summary: dependency installation was already satisfied; PyInstaller completed; archive stage reported errors; no package archive resulted.
+
+second_preflight_command: TID §14.6 frozen win32 window predicate
+second_preflight_start_time: 2026-08-14T21:33:03.3580909+08:00
+second_preflight_end_time: 2026-08-14T21:33:03.8541570+08:00
+second_preflight_exit_code: 0
+second_matching_boss_browser_windows: 0
+second_preflight_result: PASS
+
+external_smoke_command: .\\dist\\Ocria\\Ocria.exe --no-forward --auto --duration-seconds 0
+external_smoke_start_time: 2026-08-14T21:33:10.4975588+08:00
+external_smoke_end_time: 2026-08-14T21:33:10.8883668+08:00
+external_smoke_exit_code: 0
+external_smoke_result: PASS — no matching BOSS browser window; application returned before candidate, OCR, or action work.
+real_page_interaction: none

@@ -1,0 +1,11 @@
+change_id=AM7-R01-C04
+scope=R04 benchmark and TID 0.6 §14.1.1 output contract
+repository_relative_cwd=.
+command=.\venv\Scripts\python.exe -m tests.benchmark_r04_normalization
+start=2026-08-14T00:38:47.5144432+08:00
+end=2026-08-14T00:38:49.8825578+08:00
+process_exit_code=0
+scenario_count=8
+output_contract=PASS
+result=PASS
+raw_json=r04-benchmark.json

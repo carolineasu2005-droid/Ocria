@@ -1,0 +1,20 @@
+AM7-R01 C05 final automated acceptance — Full Legacy Regression
+TID: 0.7 / Approved
+Scope: all discovered legacy and AM7 tests matching test_*.py
+Repository baseline: a7c941989a038d7a998ccee707e14b4fd9125cda
+Execution environment: .\\venv\\Scripts\\python.exe (environment inventory: ../../AM7-R01-C01/environment.log)
+Sanitization: local machine paths and dependency diagnostic paths omitted; no candidate, OCR-body, credential, screenshot, or private asset content retained.
+
+command: .\\venv\\Scripts\\python.exe -m unittest discover -s tests -p 'test_*.py' -v
+start_time: 2026-08-14T21:20:42.2063062+08:00
+completion_observed: 2026-08-14T21:21:03.8063062+08:00 (runner-reported elapsed duration applied to recorded start)
+exit_code: 0
+stdout_summary:
+  Ran 783 tests in 21.600s
+  OK
+stderr_summary: test-controlled diagnostic output was emitted; private local filesystem paths were not retained in repository evidence.
+test_count: 783
+failures: 0
+errors: 0
+skips: 0
+result: PASS

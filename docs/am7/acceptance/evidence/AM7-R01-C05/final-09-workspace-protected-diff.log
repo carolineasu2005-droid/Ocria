@@ -1,0 +1,25 @@
+AM7-R01 C05 final automated acceptance — protected/workspace diff guard
+TID: 0.7 / Approved §14.4
+Repository baseline: a7c941989a038d7a998ccee707e14b4fd9125cda
+Scope: frozen production modules, frozen benchmark modules, existing tests, approved Startup Menu exception, whitespace, and C03 migration hunks.
+Sanitization: host-global Git configuration warnings and line-ending advisory text are excluded; no private paths retained.
+
+command: TID §14.4 protected diff guard and C03 scoped-hunk manifest
+start_time: 2026-08-14T21:30:12.3048848+08:00
+end_time: 2026-08-14T21:30:13.6175884+08:00
+exit_code: 0
+frozen_production_and_benchmark_diff: PASS
+frozen_existing_test_diff: PASS
+startup_menu_removed_expectation_count: 1
+startup_menu_added_expectation_count: 1
+startup_menu_other_change_count: 0
+unstaged_whitespace: PASS
+staged_whitespace: PASS
+baseline_whitespace: PASS
+c03_scoped_hunks: produced for 8 authorized migration files
+tracked_change_count: 9
+untracked_count: 106
+deleted_tracked_count: 0
+ignored_entry_count: 9283
+manifest_decision: tracked changes are the accepted C03 migration set plus the single TID-authorized Startup Menu expectation; untracked content is confined to the approved C01–C05 documents, AM7 fixtures/tests, README, and evidence; ignored content is venv/cache output at this stage.
+result: PASS

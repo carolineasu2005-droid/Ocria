@@ -1,0 +1,24 @@
+change_id=AM7-R01-C05
+scope=TID 0.6 §14.3 AM7-R01 metadata, brand, and Golden tests
+repository_relative_cwd=.
+commit=a7c941989a038d7a998ccee707e14b4fd9125cda
+tree=b3ddfa62cf1673ffc59887b06517baacf9c79cd7
+operator=automated_night_batch
+command=.\venv\Scripts\python.exe -m unittest -v tests.test_am7_r01_baseline_metadata tests.test_am7_r01_brand_contract tests.test_am7_r01_golden_replay
+timestamp_capture=not_captured_at_command_start; execution preceded Critical 52 and completed before its recorded start timestamp.
+exit_code=0
+tests=7
+failures=0
+errors=0
+skips=0
+stdout_stderr:
+test_c01_absent_origin_state_is_preserved_as_historical_evidence ... ok
+test_c01_confirmation_and_c02_boundary_are_independent ... ok
+test_source_identity_and_history_preserving_relation_are_frozen ... ok
+test_active_identity_surfaces_are_ocria_am7 ... ok
+test_retained_legacy_identifiers_and_release_notes_contract_are_unchanged ... ok
+test_fixture_text_is_explicitly_limited_to_the_human_approved_pool ... ok
+test_strict_load_and_frozen_expected_replay_are_exactly_equivalent ... ok
+Ran 7 tests in 0.048s
+OK
+result=PASS

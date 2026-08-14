@@ -1,0 +1,15 @@
+change_id=AM7-R01-C05
+scope=TID 0.6 §14.2 exact Critical Legacy Regression Suite
+repository_relative_cwd=.
+commit=a7c941989a038d7a998ccee707e14b4fd9125cda
+tree=b3ddfa62cf1673ffc59887b06517baacf9c79cd7
+operator=automated_night_batch
+command=.\venv\Scripts\python.exe -m unittest -v <52 fixed qualified tests from TID 0.6 §14.2>
+timestamp_capture=not_captured_at_command_start; execution preceded Full Regression and followed the AM7 new-tests command.
+exit_code=0
+tests=52
+failures=0
+errors=0
+skips=0
+stdout_stderr=Sanitized actual unit-test output: all 52 fixed tests passed. Runtime/mock diagnostics and local package paths were omitted because repository evidence must not include local absolute paths or OCR/action log body.
+result=PASS

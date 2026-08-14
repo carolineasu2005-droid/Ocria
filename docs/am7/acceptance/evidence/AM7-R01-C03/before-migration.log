@@ -1,0 +1,92 @@
+change_id=AM7-R01-C03
+phase=before_migration
+repo_relative_cwd=.
+baseline_commit=a7c941989a038d7a998ccee707e14b4fd9125cda
+capture_start=2026-08-13T23:48:22.9499297+08:00
+---
+timestamp=2026-08-13T23:48:22.9559664+08:00
+label=c02_boundary_precondition
+command=git remote get-url origin; git remote get-url bossocr-upstream; git remote get-url --push bossocr-upstream
+https://github.com/carolineasu2005-droid/Ocria.git
+https://github.com/carolineasu2005-droid/Boss-OCR.git
+no_push://bossocr-upstream
+exit_code=0
+---
+timestamp=2026-08-13T23:48:23.1124942+08:00
+label=worktree_before
+command=git status --short --branch; git diff --stat; git diff --name-only
+## main...bossocr-upstream/main
+ M .gitignore
+?? docs/RPD-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+?? docs/TID-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+?? docs/am7/
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+ .gitignore | 6 ++++++
+ 1 file changed, 6 insertions(+)
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+.gitignore
+exit_code=0
+---
+timestamp=2026-08-13T23:48:23.2886767+08:00
+label=active_brand_surface_before
+command=Select-String active brand files for Ocria, BossOCR, BOSS, release notes, dist, archive, and tags
+F:\Ocria\simple_brush.py:3:BOSS ç´èæ¨èçäººèªå¨å·ç®å v4 ââ é®çç¿»é¡µ + æºè½é®ä»¶è½¬åç
+F:\Ocria\simple_brush.py:535:_CONSOLE_HANDLER_MARKER = '_bossocr_console_handler'
+F:\Ocria\simple_brush.py:1234:    """Prompt an interactive user to run BossOCR, calibrate, or exit."""
+F:\Ocria\simple_brush.py:1238:            '1. å¼å§è¿è¡ BossOCR\n'
+F:\Ocria\simple_brush.py:1737:    """å° BOSS ç´èæµè§å¨çªå£ç½®é¡¶ï¼ä¼å Chromeï¼å¶æ¬¡ Edgeã"""
+F:\Ocria\simple_brush.py:1761:        logger.error('â æ¾ä¸å° BOSS ç´è Chrome / Edge çªå£')
+F:\Ocria\simple_brush.py:3710:    logger.info('BOSS ç´èæç®å·ç®å v4 å¯å¨')
+F:\Ocria\setup.bat:9:echo  BOSS ç´èèªå¨å·ç®å - ç¯å¢åå§å
+F:\Ocria\start.bat:16:echo  BOSS ç´èèªå¨å·ç®å
+F:\Ocria\start.bat:19:echo 1. æå¼ Edgeï¼è¿å¥ BOSS ç´è"æ¨èçäºº"é¡µé¢
+F:\Ocria\build-windows.bat:19:"venv\Scripts\python.exe" -m PyInstaller --clean --noconfirm BossOCR.spec
+F:\Ocria\build-windows.bat:23:"dist\BossOCR\BossOCR.exe" --no-forward --auto --duration-seconds 0
+F:\Ocria\build-windows.bat:27:if exist "release\BossOCR-Windows-x64.zip" del /q "release\BossOCR-Windows-x64.zip"
+F:\Ocria\build-windows.bat:28:powershell -NoProfile -Command "Compress-Archive -Path 'dist\BossOCR\*' -DestinationPath 'release\BossOCR-Windows-x64.zip' -CompressionLevel Optimal"
+F:\Ocria\build-windows.bat:31:certutil -hashfile "release\BossOCR-Windows-x64.zip" SHA256
+F:\Ocria\build-windows.bat:33:echo Build completed: release\BossOCR-Windows-x64.zip
+F:\Ocria\BossOCR.spec:56:    name="BossOCR",
+F:\Ocria\BossOCR.spec:75:    name="BossOCR",
+F:\Ocria\.github\workflows\windows-release.yml:7:      - "issue-*-v*"
+F:\Ocria\.github\workflows\windows-release.yml:37:        run: python -m PyInstaller --clean --noconfirm BossOCR.spec
+F:\Ocria\.github\workflows\windows-release.yml:41:        run: .\dist\BossOCR\BossOCR.exe --no-forward --auto --duration-seconds 0
+F:\Ocria\.github\workflows\windows-release.yml:47:          Compress-Archive -Path dist\BossOCR\* -DestinationPath release\BossOCR-Windows-x64.zip -CompressionLevel Optimal
+F:\Ocria\.github\workflows\windows-release.yml:48:          (Get-FileHash release\BossOCR-Windows-x64.zip -Algorithm SHA256).Hash | Out-File release\BossOCR-Windows-x64.zip.sha256 -Encoding ascii
+F:\Ocria\.github\workflows\windows-release.yml:53:          name: BossOCR-Windows-x64
+F:\Ocria\.github\workflows\windows-release.yml:55:            release/BossOCR-Windows-x64.zip
+F:\Ocria\.github\workflows\windows-release.yml:56:            release/BossOCR-Windows-x64.zip.sha256
+F:\Ocria\.github\workflows\windows-release.yml:65:          gh release create "${{ github.ref_name }}" release\BossOCR-Windows-x64.zip release\BossOCR-Windows-x64.zip.sha256 --title "Issue #1 BossOCR minimal changes v1.0" --notes-file release-notes\Issue-1-BossOCR-release-notes.md
+F:\Ocria\docs\README.md:1:# BossOCR
+F:\Ocria\docs\README.md:3:BossOCR æ¯ä¸ä¸ªé¢å Windows ç BOSS ç´èåéäººç®åè¾å©æµè§å·¥å·ãå®ä½¿ç¨é¼ æ åé®çæ¨¡æå®æåéäººåæ¢ï¼éè¿æ¬å° RapidOCR è¯å«å±å¹ä¸å½ååéäººçå¯è§ç®ååå®¹ï¼åªæå³é®è¯ç»è¿ä¸¤æ¬¡ OCR ç²¾ç¡®ç¡®è®¤åï¼ç¨åºæåè®¸è¿å¥åéäººå¤çå¨ä½ãåéäººå¤çæ¯ææ¶èæ¨¡å¼åè½¬åæ¨¡å¼ï¼æ¶èæ¨¡å¼åªç¹å»æ¶èæé®ï¼è½¬åæ¨¡å¼æ²¿ç¨å·²æé®ä»¶è½¬åæµç¨ã
+F:\Ocria\docs\README.md:5:å½å Windows æ­£å¼çæ¬ä¸º `v1.2`ãæ¬çæ¬æ°å¢å¯ä¿å­ãå¤ç¨çéç¨æ ¡åæ¨¡æ¿ï¼å¹¶å°æ¨¡æ¿åå»º/æ´æ°å¥å£éæå¨ `BossOCR.exe` åã
+F:\Ocria\docs\README.md:9:> ä½¿ç¨åè¯·ç¡®è®¤ä½ çæä½ç¬¦å BOSS ç´èæå¡æ¡æ¬¾ãæèåè§è¦æ±åä¸ªäººä¿¡æ¯ä¿æ¤è§å®ãç¨åºåå«çå®é¼ æ /é®çèªå¨åï¼å¿é¡»åå¨ `--no-forward` å®å¨æ¨¡å¼ä¸éªè¯ã
+F:\Ocria\docs\README.md:13:æ¨èä» [GitHub Releases](https://github.com/carolineasu2005-droid/Boss-OCR/releases/latest) ä¸è½½ `BossOCR-Windows-x64.zip`ã
+F:\Ocria\docs\README.md:15:1. è§£åæ´ä¸ª ZIPï¼ä¸è½åªå¤å¶ `BossOCR.exe`ã
+F:\Ocria\docs\README.md:16:2. å¨ Microsoft Edge ç»å½ BOSS ç´èå¹¶æå¼âæ¨èçäººâé¡µé¢ã
+F:\Ocria\docs\README.md:73:BossOCR æ¯æé¢åæ ¡åå¹¶ä¿å­ç¹å»åºåï¼åç»­è¿è¡å¯ä»¥ç´æ¥è°ç¨æ¨¡æ¿ï¼åå°éå¤æ ¡åãæ¨¡æ¿åæ¶åå«æ¶èãè½¬åãç­éåæ¢å¤ç¦ç¹æéçéç¨åºåï¼æ¶èæ¨¡å¼åè½¬åæ¨¡å¼å±ç¨åä¸ä»½éç¨æ¨¡æ¿ã
+F:\Ocria\docs\README.md:78:å¯å¨ BossOCR.exe
+F:\Ocria\docs\README.md:111:å¯å¨ BossOCR.exe
+F:\Ocria\docs\README.md:112:â éæ©âå¼å§è¿è¡ BossOCRâ
+F:\Ocria\docs\README.md:127:BossOCR.exe --calibration-profile <æ¨¡æ¿åç§°>
+F:\Ocria\docs\README.md:327:BossOCR.exe --keywords '"Python"; "ç­å§"' --no-forward --auto
+F:\Ocria\docs\README.md:333:BossOCR.exe --keywords '"Python"; "ç­å§"' --action-mode favorite --auto
+F:\Ocria\docs\README.md:345:BossOCR.exe --keywords 'any("Python","åªæ ") and not any("éå®","ææ¾")' --email "backup@example.com" --auto
+F:\Ocria\docs\README.md:418:èæ¬ä¼å®è£æå»ºä¾èµãè¿è¡å¨éæµè¯ãä½¿ç¨ `BossOCR.spec` çææ§å¶å°ç one-dir åºç¨ï¼å¹¶ä»¥ `--no-forward --auto` åå®å¨åçæµè¯ãæåååå¸åç¼©åä½äºï¼
+F:\Ocria\docs\README.md:421:release\BossOCR-Windows-x64.zip
+F:\Ocria\docs\README.md:424:åå¸åä¿æ Windows one-dir å½¢å¼ï¼è§£ååä» `BossOCR.exe` å¯å¨ï¼ä¸éè¦ä¹ä¸ä¼åç¬çæ `CalibrationTemplate.exe`ï¼æ¨¡æ¿åå»ºå¥å£å·²ç»éæå¨ `BossOCR.exe` çå¯å¨èåä¸­ãåå¸åä¼åå« `calibration_profiles.py`ã`calibration_steps.py` å `calibration_template.py` æéçå»ç»æ¨¡åã
+exit_code=0
+---
+timestamp=2026-08-13T23:48:23.3090922+08:00
+label=root_readme_before
+command=Test-Path README.md; if present, Get-Content README.md
+False
+exit_code=0
+---
+timestamp=2026-08-13T23:48:23.3121654+08:00
+label=release_notes_contract_before
+command=Test-Path release-notes/Issue-1-BossOCR-release-notes.md; Test-Path docs/Issue-1-BossOCR-release-notes.md; git status --porcelain --untracked-files=all -- release-notes docs/Issue-1-BossOCR-release-notes.md
+False
+True
+exit_code=0
+capture_end=2026-08-13T23:48:23.3654338+08:00

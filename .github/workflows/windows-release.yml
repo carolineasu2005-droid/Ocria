@@ -1,10 +1,10 @@
-name: Windows Release
+name: Ocria Am7 Windows Release
 
 on:
   workflow_dispatch:
   push:
     tags:
-      - "issue-*-v*"
+      - "ocria-am7-v*"
 
 permissions:
   contents: write
@@ -38,22 +38,22 @@ jobs:
 
       - name: Run safe executable smoke test
         shell: powershell
-        run: .\dist\BossOCR\BossOCR.exe --no-forward --auto --duration-seconds 0
+        run: .\dist\Ocria\Ocria.exe --no-forward --auto --duration-seconds 0
 
       - name: Create release archive and checksum
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          Compress-Archive -Path dist\BossOCR\* -DestinationPath release\BossOCR-Windows-x64.zip -CompressionLevel Optimal
-          (Get-FileHash release\BossOCR-Windows-x64.zip -Algorithm SHA256).Hash | Out-File release\BossOCR-Windows-x64.zip.sha256 -Encoding ascii
+          Compress-Archive -Path dist\Ocria\* -DestinationPath release\Ocria-Am7-Windows-x64.zip -CompressionLevel Optimal
+          (Get-FileHash release\Ocria-Am7-Windows-x64.zip -Algorithm SHA256).Hash | Out-File release\Ocria-Am7-Windows-x64.zip.sha256 -Encoding ascii
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BossOCR-Windows-x64
+          name: Ocria-Am7-Windows-x64
           path: |
-            release/BossOCR-Windows-x64.zip
-            release/BossOCR-Windows-x64.zip.sha256
+            release/Ocria-Am7-Windows-x64.zip
+            release/Ocria-Am7-Windows-x64.zip.sha256
           if-no-files-found: error
 
       - name: Create GitHub Release
@@ -62,4 +62,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" release\BossOCR-Windows-x64.zip release\BossOCR-Windows-x64.zip.sha256 --title "Issue #1 BossOCR minimal changes v1.0" --notes-file release-notes\Issue-1-BossOCR-release-notes.md
+          gh release create "${{ github.ref_name }}" release\Ocria-Am7-Windows-x64.zip release\Ocria-Am7-Windows-x64.zip.sha256 --title "Ocria Am7 ${{ github.ref_name }}" --notes-file release-notes\Issue-1-BossOCR-release-notes.md

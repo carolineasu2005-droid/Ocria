@@ -1,8 +1,8 @@
-# BossOCR
+# Ocria Am7
 
-BossOCR 是一个面向 Windows 的 BOSS 直聘候选人简历辅助浏览工具。它使用鼠标和键盘模拟完成候选人切换，通过本地 RapidOCR 识别屏幕上当前候选人的可见简历内容；只有关键词经过两次 OCR 精确确认后，程序才允许进入候选人处理动作。候选人处理支持收藏模式和转发模式：收藏模式只点击收藏按钮，转发模式沿用已有邮件转发流程。
+Ocria Am7 是一个面向 Windows 的 BOSS 直聘候选人简历辅助浏览工具。它使用鼠标和键盘模拟完成候选人切换，通过本地 RapidOCR 识别屏幕上当前候选人的可见简历内容；只有关键词经过两次 OCR 精确确认后，程序才允许进入候选人处理动作。候选人处理支持收藏模式和转发模式：收藏模式只点击收藏按钮，转发模式沿用已有邮件转发流程。
 
-当前 Windows 正式版本为 `v1.2`。本版本新增可保存、复用的通用校准模板，并将模板创建/更新入口集成在 `BossOCR.exe` 内。
+Ocria Am7 的 source baseline、独立 repository boundary 和人工 fallback 关系见 [`am7/PROVENANCE.md`](am7/PROVENANCE.md)。AM7-R01 C03 只迁移活跃产品身份，不把 BossOCR historical release 伪装为 Ocria release。
 
 项目不读取网页 DOM，不调用 BOSS 接口，也不使用 Selenium、Playwright、WebDriver、浏览器调试端口或 JavaScript 注入。OCR 和关键词匹配全部在本机完成。
 
@@ -10,9 +10,9 @@ BossOCR 是一个面向 Windows 的 BOSS 直聘候选人简历辅助浏览工具
 
 ## 下载与运行
 
-推荐从 [GitHub Releases](https://github.com/carolineasu2005-droid/Boss-OCR/releases/latest) 下载 `BossOCR-Windows-x64.zip`。
+在 C05 本地构建后，Ocria Windows one-dir 包为 `Ocria-Am7-Windows-x64.zip`；C03 不创建或发布 release。
 
-1. 解压整个 ZIP，不能只复制 `BossOCR.exe`。
+1. 解压整个 ZIP，不能只复制 `Ocria.exe`。
 2. 在 Microsoft Edge 登录 BOSS 直聘并打开“推荐牛人”页面。
 3. 把 Edge 放在主显示器上，不要最小化。
 4. 首次测试双击 `安全测试_只检测不转发.bat`。
@@ -70,12 +70,12 @@ WindMouse 完成后，程序仍会强制校准到已经选定的目标整数坐�
 
 #### 通用校准模板（可选）
 
-BossOCR 支持预先校准并保存点击区域，后续运行可以直接调用模板，减少重复校准。模板同时包含收藏、转发、筛选和恢复焦点所需的通用区域；收藏模式和转发模式共用同一份通用模板。
+Ocria Am7 支持预先校准并保存点击区域，后续运行可以直接调用模板，减少重复校准。模板同时包含收藏、转发、筛选和恢复焦点所需的通用区域；收藏模式和转发模式共用同一份通用模板。
 
 Windows EXE 中的创建流程如下：
 
 ```text
-启动 BossOCR.exe
+启动 Ocria.exe
 → 选择“创建或更新校准模板”
 → 输入模板名称
 → 按提示依次框选所有区域
@@ -108,8 +108,8 @@ calibration_profiles/<模板名称>.json
 调用已有模板：
 
 ```text
-启动 BossOCR.exe
-→ 选择“开始运行 BossOCR”
+启动 Ocria.exe
+→ 选择“开始运行 Ocria Am7”
 → 在模板选择阶段选择已有模板
 → 确认当前窗口环境
 → 进入正常流程
@@ -124,7 +124,7 @@ calibration_profiles/<模板名称>.json
 非交互模式不会自动猜测模板；如需显式使用模板，可传入：
 
 ```powershell
-BossOCR.exe --calibration-profile <模板名称>
+Ocria.exe --calibration-profile <模板名称>
 ```
 
 指定的模板不存在、损坏或环境不匹配时会安全失败；未指定模板时保持旧行为。详细验收清单见 [calibration-template-smoke-test.md](calibration-template-smoke-test.md)。
@@ -324,13 +324,13 @@ OCR 扫描耗时计入原有每位候选人 12–18 秒停留预算；扫描结�
 安全检测，不发送邮件：
 
 ```powershell
-BossOCR.exe --keywords '"Python"; "短剧"' --no-forward --auto
+Ocria.exe --keywords '"Python"; "短剧"' --no-forward --auto
 ```
 
 收藏模式示例：
 
 ```powershell
-BossOCR.exe --keywords '"Python"; "短剧"' --action-mode favorite --auto
+Ocria.exe --keywords '"Python"; "短剧"' --action-mode favorite --auto
 ```
 
 源码环境：
@@ -342,7 +342,7 @@ venv\Scripts\python.exe simple_brush.py --keywords '"Python"; "短剧"' --no-for
 正式模式示例：
 
 ```powershell
-BossOCR.exe --keywords 'any("Python","剪映") and not any("销售","投放")' --email "backup@example.com" --auto
+Ocria.exe --keywords 'any("Python","剪映") and not any("销售","投放")' --email "backup@example.com" --auto
 ```
 
 | 参数 | 作用 |
@@ -415,13 +415,13 @@ venv\Scripts\python.exe -m unittest discover -s tests -v
 build-windows.bat
 ```
 
-脚本会安装构建依赖、运行全量测试、使用 `BossOCR.spec` 生成控制台版 one-dir 应用，并以 `--no-forward --auto` 做安全冒烟测试。成功后发布压缩包位于：
+脚本会安装构建依赖、运行全量测试、使用 `BossOCR.spec` 生成控制台版 one-dir 应用，并以 `--no-forward --auto` 做安全冒烟测试。成功后本地压缩包位于：
 
 ```text
-release\BossOCR-Windows-x64.zip
+release\Ocria-Am7-Windows-x64.zip
 ```
 
-发布包保持 Windows one-dir 形式，解压后从 `BossOCR.exe` 启动；不需要也不会单独生成 `CalibrationTemplate.exe`，模板创建入口已经集成在 `BossOCR.exe` 的启动菜单中。发布包会包含 `calibration_profiles.py`、`calibration_steps.py` 和 `calibration_template.py` 所需的冻结模块。
+本地包保持 Windows one-dir 形式，解压后从 `Ocria.exe` 启动；不需要也不会单独生成 `CalibrationTemplate.exe`，模板创建入口已经集成在 `Ocria.exe` 的启动菜单中。本地包会包含 `calibration_profiles.py`、`calibration_steps.py` 和 `calibration_template.py` 所需的冻结模块。
 
 `build/`、`dist/`、`release/`、虚拟环境、日志和缓存均为本地产物，不应提交到 Git。
 

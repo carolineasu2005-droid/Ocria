@@ -1,0 +1,68 @@
+change_id=AM7-R01-C03
+gate=active_brand_audit_final_retest
+repo_relative_cwd=.
+command_start=2026-08-14T00:12:23.1889536+08:00
+command=TID 0.6 Â§14.5 active brand audit
+target_exists simple_brush.py=true
+target_exists setup.bat=true
+target_exists start.bat=true
+target_exists build-windows.bat=true
+target_exists BossOCR.spec=true
+target_exists .github/workflows/windows-release.yml=true
+target_exists docs/README.md=true
+target_exists README.md=true
+expected_present setup.bat :: Ocria Am7 - ç¯å¢åå§å
+expected_present .github/workflows/windows-release.yml :: name: Ocria Am7 Windows Release
+expected_present .github/workflows/windows-release.yml :: ocria-am7-v*
+expected_present .github/workflows/windows-release.yml :: dist\Ocria\Ocria.exe
+expected_present .github/workflows/windows-release.yml :: release\Ocria-Am7-Windows-x64.zip
+expected_present .github/workflows/windows-release.yml :: name: Ocria-Am7-Windows-x64
+expected_present .github/workflows/windows-release.yml :: BossOCR.spec
+expected_present .github/workflows/windows-release.yml :: --notes-file release-notes\Issue-1-BossOCR-release-notes.md
+expected_present README.md :: # Ocria Am7
+expected_present start.bat :: Ocria Am7
+expected_present start.bat :: Chrome
+expected_present start.bat :: Edge
+expected_present docs/README.md :: # Ocria Am7
+expected_present docs/README.md :: Ocria.exe
+expected_present docs/README.md :: Ocria-Am7-Windows-x64.zip
+expected_present build-windows.bat :: dist\Ocria\Ocria.exe
+expected_present build-windows.bat :: release\Ocria-Am7-Windows-x64.zip
+expected_present build-windows.bat :: BossOCR.spec
+expected_present simple_brush.py :: Prompt an interactive user to run Ocria Am7, calibrate, or exit.
+expected_present simple_brush.py :: 1. å¼å§è¿è¡ Ocria Am7
+expected_present simple_brush.py :: Ocria Am7 å¯å¨
+forbidden_absent setup.bat :: BOSS ç´èèªå¨å·ç®å - ç¯å¢åå§å
+forbidden_absent .github/workflows/windows-release.yml :: issue-*-v*
+forbidden_absent .github/workflows/windows-release.yml :: dist\BossOCR\BossOCR.exe
+forbidden_absent .github/workflows/windows-release.yml :: release\BossOCR-Windows-x64.zip
+forbidden_absent .github/workflows/windows-release.yml :: name: BossOCR-Windows-x64
+forbidden_absent .github/workflows/windows-release.yml :: Issue #1 BossOCR minimal changes v1.0
+forbidden_absent .github/workflows/windows-release.yml :: --generate-notes
+forbidden_absent README.md :: # BossOCR
+forbidden_absent README.md :: BossOCR.exe
+forbidden_absent README.md :: BossOCR-Windows-x64.zip
+forbidden_absent start.bat :: BOSS ç´èèªå¨å·ç®å
+forbidden_absent docs/README.md :: # BossOCR
+forbidden_absent docs/README.md :: BossOCR.exe
+forbidden_absent docs/README.md :: BossOCR-Windows-x64.zip
+forbidden_absent build-windows.bat :: dist\BossOCR\BossOCR.exe
+forbidden_absent build-windows.bat :: release\BossOCR-Windows-x64.zip
+forbidden_absent simple_brush.py :: Prompt an interactive user to run BossOCR, calibrate, or exit.
+forbidden_absent simple_brush.py :: 1. å¼å§è¿è¡ BossOCR
+forbidden_absent simple_brush.py :: BOSS ç´èæç®å·ç®å v4 å¯å¨
+spec_name_assignment_count=2
+spec_ocria_assignment_count=2
+workflow_notes_file_contract_match_count=1
+bossocr_residual file=build-windows.bat; line=19; classification=allowed; text="venv\Scripts\python.exe" -m PyInstaller --clean --noconfirm BossOCR.spec
+bossocr_residual file=.github/workflows/windows-release.yml; line=37; classification=allowed; text=run: python -m PyInstaller --clean --noconfirm BossOCR.spec
+bossocr_residual file=.github/workflows/windows-release.yml; line=65; classification=allowed; text=gh release create "${{ github.ref_name }}" release\Ocria-Am7-Windows-x64.zip release\Ocria-Am7-Windows-x64.zip.sha256 --title "Ocria Am7 ${{ github.ref_name }}" --notes-file release-notes\Issue-1-BossOCR-release-notes.md
+bossocr_residual file=docs/README.md; line=5; classification=allowed; text=Ocria Am7 ç source baselineãç¬ç« repository boundary åäººå·¥ fallback å³ç³»è§ [`am7/PROVENANCE.md`](am7/PROVENANCE.md)ãAM7-R01 C03 åªè¿ç§»æ´»è·äº§åèº«ä»½ï¼ä¸æ BossOCR historical release ä¼ªè£ä¸º Ocria releaseã
+bossocr_residual file=docs/README.md; line=418; classification=allowed; text=èæ¬ä¼å®è£æå»ºä¾èµãè¿è¡å¨éæµè¯ãä½¿ç¨ `BossOCR.spec` çææ§å¶å°ç one-dir åºç¨ï¼å¹¶ä»¥ `--no-forward --auto` åå®å¨åçæµè¯ãæååæ¬å°åç¼©åä½äºï¼
+bossocr_residual file=README.md; line=4; classification=allowed; text=candidate review using local OCR. It preserves the confirmed BossOCR Legacy
+bossocr_residual file=README.md; line=12; classification=allowed; text=Ocria has a history-preserving provenance relationship with BossOCR. BossOCR remains
+bossocr_residual_count=7
+residual_violation_count=0
+command_end=2026-08-14T00:12:23.2253458+08:00
+exit_code=0
+result=PASS

@@ -1,0 +1,15 @@
+change_id=AM7-R01-C03
+gate=Full_Legacy_Regression
+repo_relative_cwd=.
+command_start=2026-08-13T23:56:43.0132278+08:00
+command=.\\venv\\Scripts\\python.exe -m unittest discover -s tests -p 'test_*.py' -v
+command_end=2026-08-13T23:57:03.0518046+08:00
+exit_code=1
+test_count=776
+failures=reported_in_raw_capture
+errors=reported_in_raw_capture
+skips=0
+raw_capture=full-legacy-regression.raw.log.gz.base64
+raw_capture_encoding=base64(gzip(utf-8 stdout/stderr capture))
+path_redaction=repository_absolute_paths_replaced_with_<repo>
+result=FAIL

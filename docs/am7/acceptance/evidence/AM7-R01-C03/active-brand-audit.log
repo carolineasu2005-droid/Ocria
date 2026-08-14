@@ -1,0 +1,57 @@
+change_id=AM7-R01-C03
+gate=active_brand_audit
+repo_relative_cwd=.
+command_start=2026-08-14T00:07:26.6510164+08:00
+command=TID 0.6 Â§14.5 active brand audit
+target_exists simple_brush.py=true
+target_exists setup.bat=true
+target_exists start.bat=true
+target_exists build-windows.bat=true
+target_exists BossOCR.spec=true
+target_exists .github/workflows/windows-release.yml=true
+target_exists docs/README.md=true
+target_exists README.md=true
+expected_present setup.bat :: Ocria Am7 - ç¯å¢åå§å
+expected_present .github/workflows/windows-release.yml :: name: Ocria Am7 Windows Release
+expected_present .github/workflows/windows-release.yml :: ocria-am7-v*
+expected_present .github/workflows/windows-release.yml :: dist\Ocria\Ocria.exe
+expected_present .github/workflows/windows-release.yml :: release\Ocria-Am7-Windows-x64.zip
+expected_present .github/workflows/windows-release.yml :: name: Ocria-Am7-Windows-x64
+expected_present .github/workflows/windows-release.yml :: BossOCR.spec
+expected_present .github/workflows/windows-release.yml :: --notes-file release-notes\Issue-1-BossOCR-release-notes.md
+expected_present README.md :: # Ocria Am7
+expected_present start.bat :: Ocria Am7
+expected_present start.bat :: Chrome
+expected_present start.bat :: Edge
+expected_present docs/README.md :: # Ocria Am7
+expected_present docs/README.md :: Ocria.exe
+expected_present docs/README.md :: Ocria-Am7-Windows-x64.zip
+expected_present build-windows.bat :: dist\Ocria\Ocria.exe
+expected_present build-windows.bat :: release\Ocria-Am7-Windows-x64.zip
+expected_present build-windows.bat :: BossOCR.spec
+expected_present simple_brush.py :: Prompt an interactive user to run Ocria Am7, calibrate, or exit.
+expected_present simple_brush.py :: 1. å¼å§è¿è¡ Ocria Am7
+expected_present simple_brush.py :: Ocria Am7 å¯å¨
+forbidden_absent setup.bat :: BOSS ç´èèªå¨å·ç®å - ç¯å¢åå§å
+forbidden_absent .github/workflows/windows-release.yml :: issue-*-v*
+forbidden_absent .github/workflows/windows-release.yml :: dist\BossOCR\BossOCR.exe
+forbidden_absent .github/workflows/windows-release.yml :: release\BossOCR-Windows-x64.zip
+forbidden_absent .github/workflows/windows-release.yml :: name: BossOCR-Windows-x64
+forbidden_absent .github/workflows/windows-release.yml :: Issue #1 BossOCR minimal changes v1.0
+forbidden_absent .github/workflows/windows-release.yml :: --generate-notes
+forbidden_absent README.md :: # BossOCR
+forbidden_absent README.md :: BossOCR.exe
+forbidden_absent README.md :: BossOCR-Windows-x64.zip
+forbidden_absent start.bat :: BOSS ç´èèªå¨å·ç®å
+forbidden_absent docs/README.md :: # BossOCR
+forbidden_absent docs/README.md :: BossOCR.exe
+forbidden_absent docs/README.md :: BossOCR-Windows-x64.zip
+forbidden_absent build-windows.bat :: dist\BossOCR\BossOCR.exe
+forbidden_absent build-windows.bat :: release\BossOCR-Windows-x64.zip
+forbidden_absent simple_brush.py :: Prompt an interactive user to run BossOCR, calibrate, or exit.
+forbidden_absent simple_brush.py :: 1. å¼å§è¿è¡ BossOCR
+forbidden_absent simple_brush.py :: BOSS ç´èæç®å·ç®å v4 å¯å¨
+audit_error=spec active name assignments failed
+command_end=2026-08-14T00:07:26.6769823+08:00
+exit_code=1
+result=FAIL

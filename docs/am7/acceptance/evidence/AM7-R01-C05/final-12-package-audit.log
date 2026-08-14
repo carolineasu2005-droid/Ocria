@@ -1,0 +1,9 @@
+AM7-R01 C05 final automated acceptance — ZIP / one-dir / local SHA-256 audit
+TID: 0.7 / Approved §14.7
+Repository baseline: a7c941989a038d7a998ccee707e14b4fd9125cda
+
+command: TID §14.7 ZIP, one-dir, stale-artifact, inventory, and SHA-256 contract
+exit_code: 1
+failure: release/Ocria-Am7-Windows-x64.zip was absent before digest, inventory, duplicate/path-traversal, and one-dir-equivalence assertions could run.
+sidecar_cleanup: a zero-byte sidecar created by the failed attempt was verified as generated output and removed; no checksum artifact remains.
+result: FAIL — build/package artifact contract unmet; no retry performed.

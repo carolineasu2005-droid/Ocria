@@ -1,0 +1,54 @@
+AM7-R01 Final Automated Remediation — formal build, safe smoke, and package audit
+TID: 0.7 / Approved §§14.6–14.7
+Repository baseline: a7c941989a038d7a998ccee707e14b4fd9125cda
+Sanitization: no local absolute paths, browser-window titles, page content, OCR body, credential values, or generated run identifiers retained.
+
+first_preflight_command: TID §14.6 frozen window predicate
+first_preflight_start_time: 2026-08-14T21:48:53.8883403+08:00
+first_preflight_end_time: 2026-08-14T21:48:54.3910112+08:00
+first_preflight_exit_code: 0
+first_matching_boss_browser_windows: 0
+first_preflight_result: PASS
+
+formal_build_command: cmd /c build-windows.bat
+build_start_time: 2026-08-14T21:49:02.9144773+08:00
+build_end_time: 2026-08-14T21:50:06.6378890+08:00
+build_exit_code: 0
+build_raw_transcript: ignored build/AM7-R01-C05-final-remediation-build.raw.log
+build_raw_transcript_status: retained locally as generated build output; not copied into repository evidence because it includes machine-specific paths.
+archive_error_match_count: 0
+build_completed_message_count: 1
+build_result: PASS
+
+second_preflight_command: TID §14.6 frozen window predicate
+second_preflight_start_time: 2026-08-14T21:50:20.3830176+08:00
+second_preflight_end_time: 2026-08-14T21:50:20.8873772+08:00
+second_preflight_exit_code: 0
+second_matching_boss_browser_windows: 0
+second_preflight_result: PASS
+
+external_smoke_command: .\\dist\\Ocria\\Ocria.exe --no-forward --auto --duration-seconds 0
+external_smoke_start_time: 2026-08-14T21:50:27.7341586+08:00
+external_smoke_end_time: 2026-08-14T21:50:28.1422616+08:00
+external_smoke_exit_code: 0
+external_smoke_result: PASS — no matching BOSS browser window; no candidate, OCR, favorite, or forward action was reached.
+
+package_audit_command: TID §14.7 ZIP, one-dir, duplicate/path traversal, stale artifact, and SHA-256 assertions
+package_audit_start_time: 2026-08-14T21:50:52.3698470+08:00
+package_audit_end_time: 2026-08-14T21:50:52.8124335+08:00
+package_audit_exit_code: 0
+executable: dist/Ocria/Ocria.exe
+archive: release/Ocria-Am7-Windows-x64.zip
+archive_sha256: 2B10840E8B7B58B05262A2851C6BEDC04BBD23261E68E2C88638C0DE82F513B0
+local_sidecar: release/Ocria-Am7-Windows-x64.zip.sha256
+sidecar_sha256_matches_archive: true
+dist_file_count: 807
+zip_file_count: 807
+one_dir_file_set_difference_count: 0
+duplicate_entries: 0
+absolute_or_parent_traversal_entries: 0
+stale_BossOCR_distribution_or_archive: absent
+package_result: PASS
+
+inventory_evidence_status: COMPLETE AUDIT ASSERTIONS / SUMMARY ONLY
+inventory_note: the formal audit enumerated all 807 ZIP entries and compared them exactly with dist. A separate full-text inventory export was not persisted because the evidence extraction channel returned an incomplete 782-line capture; no incomplete inventory is represented as complete.

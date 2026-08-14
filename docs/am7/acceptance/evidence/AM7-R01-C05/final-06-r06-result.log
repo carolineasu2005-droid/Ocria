@@ -1,0 +1,18 @@
+AM7-R01 C05 final automated acceptance — R06 similarity benchmark result
+TID: 0.7 / Approved §14.1.3
+Repository baseline: a7c941989a038d7a998ccee707e14b4fd9125cda
+Execution environment: .\\venv\\Scripts\\python.exe
+Sanitization: raw JSON contains only deterministic synthetic benchmark identifiers and metrics.
+
+formal_command: .\\venv\\Scripts\\python.exe -m tests.benchmark_r06_similarity
+process_start_time: 2026-08-14T21:24:36.5631462+08:00
+process_end_time: 2026-08-14T21:24:42.4760908+08:00
+process_exit_code: 0
+raw_json: final-06-r06-benchmark.json
+contract_command: TID 0.7 §14.1.3 assertions against saved formal-command JSON
+contract_start_time: 2026-08-14T21:28:16.7323430+08:00
+contract_end_time: 2026-08-14T21:28:16.8265239+08:00
+contract_exit_code: 0
+scenario_count: 15
+output_contract: PASS
+result: PASS — process exit 0 AND output contract PASS

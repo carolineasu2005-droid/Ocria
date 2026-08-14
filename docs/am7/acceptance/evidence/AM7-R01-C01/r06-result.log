@@ -1,0 +1,14 @@
+evidence_recovery=true
+reason=raw execution evidence recovery
+change_id=AM7-R01-C01
+repo_relative_cwd=.
+baseline_commit=a7c941989a038d7a998ccee707e14b4fd9125cda
+baseline_tree=b3ddfa62cf1673ffc59887b06517baacf9c79cd7
+command_start=2026-08-13T23:19:21.5837332+08:00
+command=.\\venv\\Scripts\\python.exe -m tests.benchmark_r06_similarity
+command_end=2026-08-13T23:19:27.8082232+08:00
+exit_code=0
+raw_json=r06-benchmark.json
+output_contract=TID 0.6 §14.1.3 PASS
+scenario_count=15
+result=PASS

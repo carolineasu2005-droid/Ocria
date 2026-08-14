@@ -1,0 +1,17 @@
+AM7-R01 C05 final automated acceptance — final Git state
+TID: 0.7 / Approved
+
+command: git status --short --branch; git diff --check; git diff --stat; git diff --name-only; git ls-files --others --exclude-standard
+start_time: 2026-08-14T21:36:36.6573866+08:00
+end_time: 2026-08-14T21:36:37.6951067+08:00
+exit_code: 0
+branch: main...bossocr-upstream/main
+whitespace: PASS
+tracked_diff_file_count: 9
+untracked_file_count_before_this_log: 111
+final_c05_evidence_file_count_before_this_log: 16
+deleted_tracked_files: 0
+tracked_diff_manifest: authorized C03 identity migration files and the one TID-authorized Startup Menu expectation only.
+untracked_manifest: approved C01–C05 documents/evidence, C04 synthetic fixtures and AM7 tests, and the root README.
+ignored_manifest: venv, build, and dist generated output only; no release package or checksum sidecar remains after the failed package audit cleanup.
+result: PASS — no out-of-scope tracked diff or whitespace violation observed.

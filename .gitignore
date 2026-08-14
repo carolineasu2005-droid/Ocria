@@ -33,6 +33,12 @@ data/ocr_runs/
 !release-notes/
 !release-notes/*.md
 
+# Ocria Am7 governed design and acceptance documents
+!docs/RPD-AM7-*.md
+!docs/TID-AM7-*.md
+!docs/am7/
+!docs/am7/**/*.md
+
 # Local packaging artifacts
 /build/
 /dist/

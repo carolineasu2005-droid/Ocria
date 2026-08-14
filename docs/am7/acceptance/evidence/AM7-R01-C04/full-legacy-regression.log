@@ -1,0 +1,15 @@
+change_id=AM7-R01-C04
+scope=Full Legacy Regression after C04 additive fixture/test changes
+repository_relative_cwd=.
+command=.\\venv\\Scripts\\python.exe -m unittest discover -s tests -p 'test_*.py' -v
+raw_output=not_retained; full raw test output may include runtime/log material prohibited from repository evidence
+start=2026-08-14T00:37:35.6451914+08:00
+end=2026-08-14T00:37:56.8931682+08:00
+exit_code=1
+test_count=783
+failures=1
+errors=0
+skips=0
+failure_test=tests.test_simple_brush_ocr.StartupMenuTests.test_interactive_menu_shows_and_run_delegates_to_existing_flow
+failure_assertion=existing test expects menu text '开始运行 BossOCR'; active C03 surface displays '开始运行 Ocria Am7'
+result=FAIL — existing C03 menu-display assertion conflict; no C04/Legacy remediation performed

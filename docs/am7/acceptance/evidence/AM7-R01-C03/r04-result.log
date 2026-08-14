@@ -1,0 +1,17 @@
+change_id=AM7-R01-C03
+gate=R04
+repo_relative_cwd=.
+command_start=
+2026-08-13T23:57:50.5002713+08:00
+command=.\\venv\\Scripts\\python.exe -m tests.benchmark_r04_normalization
+command_end=
+2026-08-13T23:57:52.9079203+08:00
+exit_code=
+0
+raw_json=r04-benchmark.json
+output_contract=
+TID 0.6 Â§14.1.1 PASS
+scenario_count=8
+unique_100_p95_ms=3.6843
+max_500_box_p95_ms=23.3275
+result=PASS

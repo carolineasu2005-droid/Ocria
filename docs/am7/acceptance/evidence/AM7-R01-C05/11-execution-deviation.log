@@ -1,0 +1,8 @@
+change_id=AM7-R01-C05
+scope=Execution-transcript integrity note
+repository_relative_cwd=.
+timestamp_capture=not_captured_at_command_start; recorded after the accidental invocations were observed.
+deviation=After the completed C05 R04/R06 contract executions, an erroneous helper command invoked R04 and R06 a second time while attempting to retrieve raw output for repository evidence.
+impact=No threshold, source, fixture, expected value, benchmark module, or result was changed. The original R04/R06 C05 gates had already passed. This additional invocation violates the TID instruction to run each benchmark once per barrier and must not be treated as a retry or evidence of a new pass.
+action_taken=No further benchmark execution will occur. The deviation is surfaced for Human/Sol review.
+result=FAIL — C05 benchmark execution-protocol compliance

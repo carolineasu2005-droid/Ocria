@@ -1,0 +1,114 @@
+change_id=AM7-R01-C03
+gate=Critical_52
+repo_relative_cwd=.
+command_start=2026-08-13T23:55:06.1446647+08:00
+command=.\\venv\\Scripts\\python.exe -m unittest -v <52 fixed TID test IDs>
+expected_test_count=52
+test_profile_dict_roundtrip_validates_schema_and_areas (tests.test_calibration_profiles.CalibrationProfileTests.test_profile_dict_roundtrip_validates_schema_and_areas) ... ok
+test_order_keeps_candidate_forward_filter_stage_sequence (tests.test_calibration_steps.CalibrationStepsTests.test_order_keeps_candidate_forward_filter_stage_sequence) ... ok
+test_successful_generation_saves_all_registered_areas (tests.test_calibration_template.CalibrationTemplateTests.test_successful_generation_saves_all_registered_areas) ... ok
+test_default_mode_uses_windmouse_branch (tests.test_mouse_motion.HumanMouseMotionTests.test_default_mode_uses_windmouse_branch) ... ok
+test_human_click_does_not_press_when_movement_fails (tests.test_mouse_motion.HumanMouseMotionTests.test_human_click_does_not_press_when_movement_fails) ... ok
+test_exact_match_accepts_keyword_split_across_ocr_lines (tests.test_ocr_text.OCRTextTests.test_exact_match_accepts_keyword_split_across_ocr_lines) ... ok
+test_exact_match_does_not_use_fuzzy_similarity (tests.test_ocr_text.OCRTextTests.test_exact_match_does_not_use_fuzzy_similarity) ... ok
+test_five_boxes_thirty_characters_is_loaded (tests.test_ocr_detector.DetailPageLoadHelperTests.test_five_boxes_thirty_characters_is_loaded) ... ok
+test_items_below_confidence_are_excluded (tests.test_ocr_detector.DetailPageLoadHelperTests.test_items_below_confidence_are_excluded) ... ok
+test_hash_is_lowercase_sha256_of_utf8_normalized_text (tests.test_ocr_detector.ScreenFingerprintTests.test_hash_is_lowercase_sha256_of_utf8_normalized_text) ... ok
+test_keyword_on_later_screen_is_confirmed (tests.test_ocr_detector.DetectorTests.test_keyword_on_later_screen_is_confirmed) ... event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=1 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=2 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=2 error_type=FingerprintBuildError
+ok
+test_backend_failure_is_fail_closed (tests.test_ocr_detector.DetectorTests.test_backend_failure_is_fail_closed) ... OCR keyword detection failed error_type=RuntimeError
+ok
+test_safe_never_ends_for_no_new_but_full_requires_two_slots (tests.test_ocr_detector.SafeFullReturnTests.test_safe_never_ends_for_no_new_but_full_requires_two_slots) ... event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=1 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=2 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=3 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=1 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=2 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=3 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=1 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=2 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=3 error_type=FingerprintBuildError
+ok
+test_full_callback_exception_aborts_before_scroll_or_normal_end (tests.test_ocr_detector.SafeFullStorePriorityTests.test_full_callback_exception_aborts_before_scroll_or_normal_end) ... event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=1 error_type=FingerprintBuildError
+event=ocr_observation_callback_failed error_type=ValueError
+ok
+test_changed_confirmation_is_single_record_no_double_save (tests.test_ocr_detector.ConfirmationCaptureTypeTests.test_changed_confirmation_is_single_record_no_double_save)
+G3: changed confirmation does not trigger a second save. ... event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=1 error_type=FingerprintBuildError
+event=ocr_fingerprint_generation_failed fingerprint_version=r03-v1 scan_number=1 error_type=FingerprintBuildError
+ok
+test_invalid_bbox_shapes_have_sanitized_error_codes (tests.test_ocr_normalization.OcrGeometryAdapterTests.test_invalid_bbox_shapes_have_sanitized_error_codes) ... ok
+test_shuffled_input_is_stable_when_original_indexes_are_stable (tests.test_ocr_normalization.OcrReadingOrderTests.test_shuffled_input_is_stable_when_original_indexes_are_stable) ... ok
+test_engine_screen_raw_text_is_retained_character_for_character (tests.test_ocr_normalization.OcrTextNormalizationTests.test_engine_screen_raw_text_is_retained_character_for_character) ... ok
+test_r04_contract_remains_stable_after_r05_schema_activation (tests.test_ocr_normalization.OcrComparisonTextTests.test_r04_contract_remains_stable_after_r05_schema_activation) ... ok
+test_normalized_result_suppresses_only_derived_duplicate (tests.test_ocr_normalization.OcrDuplicateDetectionTests.test_normalized_result_suppresses_only_derived_duplicate) ... ok
+test_default_snapshot_restore_and_digest_are_stable (tests.test_ocr_aggregation.AggregationConfigTests.test_default_snapshot_restore_and_digest_are_stable) ... ok
+test_partial_large_and_complete_screen_overlap_are_longest_first (tests.test_ocr_aggregation.ExactBoundaryOverlapTests.test_partial_large_and_complete_screen_overlap_are_longest_first) ... ok
+test_1_to_2_and_2_to_1_preserve_group_source_mapping (tests.test_ocr_aggregation.FuzzyBoundaryOverlapTests.test_1_to_2_and_2_to_1_preserve_group_source_mapping) ... ok
+test_aggregator_preserves_uncertain_for_out_of_order_and_empty_completed (tests.test_ocr_aggregation.HistoricalAndAggregatorTests.test_aggregator_preserves_uncertain_for_out_of_order_and_empty_completed) ... ok
+test_snapshot_round_trip_and_digest_are_stable (tests.test_ocr_similarity.SimilarityConfigTests.test_snapshot_round_trip_and_digest_are_stable) ... ok
+test_simhash_hamming_golden_and_empty_contract (tests.test_ocr_similarity.NgramAndSimHashTests.test_simhash_hamming_golden_and_empty_contract) ... ok
+test_recomputes_r05_partition_counts_and_ratios_without_mutation (tests.test_ocr_similarity.R05AccountingTests.test_recomputes_r05_partition_counts_and_ratios_without_mutation) ... ok
+test_uncertain_and_illegal_evidence_are_fail_open (tests.test_ocr_similarity.EffectiveNewTests.test_uncertain_and_illegal_evidence_are_fail_open) ... ok
+test_record_mode_evaluates_once_after_r05_and_summarizes_saved_results (tests.test_ocr_similarity.OnlineR06IntegrationTests.test_record_mode_evaluates_once_after_r05_and_summarizes_saved_results) ... ok
+test_screen_round_trip_preserves_raw_text_bbox_enum_and_nulls (tests.test_ocr_records.OcrRecordModelTests.test_screen_round_trip_preserves_raw_text_bbox_enum_and_nulls) ... ok
+test_r07_screen_fields_round_trip_and_r06_reader_defaults_unknown (tests.test_ocr_records.OcrRecordModelTests.test_r07_screen_fields_round_trip_and_r06_reader_defaults_unknown) ... ok
+test_candidate_document_round_trip_has_no_fake_aggregation (tests.test_ocr_records.OcrRecordModelTests.test_candidate_document_round_trip_has_no_fake_aggregation) ... ok
+test_deferred_screen_state_commits_only_after_store_success (tests.test_ocr_candidate.CandidateOcrBuilderTests.test_deferred_screen_state_commits_only_after_store_success) ... ok
+test_r06_projection_failure_does_not_half_commit_context (tests.test_ocr_candidate.CandidateOcrBuilderTests.test_r06_projection_failure_does_not_half_commit_context) ... ok
+test_eight_formal_screens_report_completed_with_limit (tests.test_ocr_candidate.CandidateOcrBuilderTests.test_eight_formal_screens_report_completed_with_limit) ... ok
+test_record_mode_persists_manifest_and_final_r05_screen_before_candidate (tests.test_ocr_store.JsonlOcrRecordStoreTests.test_record_mode_persists_manifest_and_final_r05_screen_before_candidate) ... ok
+test_repeated_disk_failures_disable_store_without_infinite_retry (tests.test_ocr_store.JsonlOcrRecordStoreTests.test_repeated_disk_failures_disable_store_without_infinite_retry) ... event=ocr_store_write_failed operation=save_screen error_type=PermissionError consecutive_failures=1
+event=ocr_store_write_failed operation=save_screen error_type=PermissionError consecutive_failures=2
+event=ocr_store_disabled consecutive_failures=2
+ok
+test_error_context_discards_unapproved_text_fields (tests.test_ocr_store.JsonlOcrRecordStoreTests.test_error_context_discards_unapproved_text_fields) ... ok
+test_online_record_and_offline_replay_have_identical_r04_fields (tests.test_ocr_replay.OcrRunReaderTests.test_online_record_and_offline_replay_have_identical_r04_fields) ... ok
+test_r06_online_store_replay_and_sidecar_are_identical_for_synthetic_records (tests.test_ocr_replay.OcrRunReaderTests.test_r06_online_store_replay_and_sidecar_are_identical_for_synthetic_records) ... ok
+test_dynamic_end_replay_replays_no_new_and_never_confirms_bottom (tests.test_ocr_replay.OcrRunReaderTests.test_dynamic_end_replay_replays_no_new_and_never_confirms_bottom) ... ok
+23:55:06 event=ocr_rule_detection_started rule_count=1
+23:55:06   OCR æ«æ: å±=1 èæ¶=0.000s æå­æ¡=1 å½ä¸­=True è§ååºå·=0
+23:55:06   OCR äºæ¬¡ç¡®è®¤: å±=1 èæ¶=0.000s æå­æ¡=1 å½ä¸­=True è§ååºå·=0
+23:55:06 event=ocr_rule_confirmed matched=true
+test_detector_callback_saves_formal_and_confirmation_without_extra_ocr (tests.test_ocr_stage0_integration.Stage0MainFlowIntegrationTests.test_detector_callback_saves_formal_and_confirmation_without_extra_ocr) ... ok
+test_shadow_detector_never_enters_upper_action_finalize_next_or_refresh_flow (tests.test_ocr_stage0_integration.Stage0MainFlowIntegrationTests.test_shadow_detector_never_enters_upper_action_finalize_next_or_refresh_flow) ... ok
+test_full_two_healthy_changed_no_new_screens_finalize_candidate (tests.test_ocr_stage0_integration.Stage0MainFlowIntegrationTests.test_full_two_healthy_changed_no_new_screens_finalize_candidate) ... ok
+23:55:06 ð¡ --no-forward å·²å¯ç¨ï¼ä¿ç OCR å½ä¸­è®°å½ï¼ç¦æ­¢çå®é®ä»¶è½¬å
+23:55:06 ð ç¬¬ 1/100 ä½ï¼ç®æ åç 0.0 ç§ï¼OCR/å¤çå·²ç¨ 0.0 ç§ï¼å©ä½ 0.0 ç§...
+test_no_forward_mode_never_calls_real_forward (tests.test_simple_brush_ocr.SimpleBrushOCRTests.test_no_forward_mode_never_calls_real_forward) ... ok
+23:55:06 ð ç¬¬ 1/100 ä½ï¼ç®æ åç 0.0 ç§ï¼OCR/å¤çå·²ç¨ 0.0 ç§ï¼å©ä½ 0.0 ç§...
+test_favorite_mode_keyword_hit_calls_favorite_action_only (tests.test_simple_brush_ocr.SimpleBrushOCRTests.test_favorite_mode_keyword_hit_calls_favorite_action_only) ... ok
+23:55:06 ð¤ ç¬¬ 1/100 ä½ï¼ç®æ åç 0.0 ç§ï¼OCR/å¤çå·²ç¨ 0.0 ç§ï¼å©ä½ 0.0 ç§...
+test_ocr_failure_never_calls_real_forward (tests.test_simple_brush_ocr.SimpleBrushOCRTests.test_ocr_failure_never_calls_real_forward) ... ok
+test_legacy_focus_restore_entry_uses_safe_region_not_ocr_body (tests.test_simple_brush_ocr.SimpleBrushOCRTests.test_legacy_focus_restore_entry_uses_safe_region_not_ocr_body) ... ok
+test_r07_detector_receives_shared_safe_focus_restore_callback (tests.test_simple_brush_ocr.SimpleBrushOCRTests.test_r07_detector_receives_shared_safe_focus_restore_callback) ... [32m[INFO] 2026-08-13 23:55:07,206 [RapidOCR] base.py:23: Using engine_name: onnxruntime[0m
+[32m[INFO] 2026-08-13 23:55:07,291 [RapidOCR] download_file.py:60: File exists and is valid: <repo>\venv\Lib\site-packages\rapidocr\models\PP-OCRv6_det_small.onnx[0m
+[32m[INFO] 2026-08-13 23:55:07,291 [RapidOCR] main.py:63: Using <repo>\venv\Lib\site-packages\rapidocr\models\PP-OCRv6_det_small.onnx[0m
+[32m[INFO] 2026-08-13 23:55:07,359 [RapidOCR] base.py:23: Using engine_name: onnxruntime[0m
+[32m[INFO] 2026-08-13 23:55:07,361 [RapidOCR] download_file.py:60: File exists and is valid: <repo>\venv\Lib\site-packages\rapidocr\models\ch_ppocr_mobile_v2.0_cls_mobile.onnx[0m
+[32m[INFO] 2026-08-13 23:55:07,361 [RapidOCR] main.py:63: Using <repo>\venv\Lib\site-packages\rapidocr\models\ch_ppocr_mobile_v2.0_cls_mobile.onnx[0m
+[32m[INFO] 2026-08-13 23:55:07,415 [RapidOCR] base.py:23: Using engine_name: onnxruntime[0m
+[32m[INFO] 2026-08-13 23:55:07,432 [RapidOCR] download_file.py:60: File exists and is valid: <repo>\venv\Lib\site-packages\rapidocr\models\PP-OCRv6_rec_small.onnx[0m
+[32m[INFO] 2026-08-13 23:55:07,432 [RapidOCR] main.py:63: Using <repo>\venv\Lib\site-packages\rapidocr\models\PP-OCRv6_rec_small.onnx[0m
+23:55:07 â OCR åå§åæå (RapidOCR + ONNX Runtime, DPI=per-monitor-v2)
+23:55:07 è¯·æ¡éä¸»æ¾ç¤ºå¨ä¸çåéäººè¯¦ææ­£æåºåï¼æ Esc åæ¶æ ¡åã
+23:55:07 â OCR æ ¡åå®æ: left=1000 top=500 width=400 height=500
+23:55:07 æ ¡åé¢è§å·²ä¿å­: <MagicMock name='save_region_preview()' id='2646356010576'>
+ok
+test_perform_favorite_action_restores_focus_after_favorite_click (tests.test_simple_brush_ocr.SimpleBrushOCRTests.test_perform_favorite_action_restores_focus_after_favorite_click) ... ok
+test_stop_prevents_new_navigation_actions (tests.test_simple_brush_ocr.SimpleBrushOCRTests.test_stop_prevents_new_navigation_actions) ... ok
+23:55:07 â BOSS Chrome å·²ç½®é¡¶: BOSSç´è - Google Chrome
+test_bring_boss_foreground_prefers_chrome_over_edge_regardless_of_enum_order (tests.test_simple_brush_ocr.BossBrowserWindowTests.test_bring_boss_foreground_prefers_chrome_over_edge_regardless_of_enum_order) ... ok
+System.Management.Automation.RemoteException
+----------------------------------------------------------------------
+Ran 52 tests in 0.962s
+System.Management.Automation.RemoteException
+OK
+command_end=2026-08-13T23:55:07.6660687+08:00
+exit_code=0
+test_count=52
+failures=0
+errors=0
+skips=0
+path_redaction=repository_absolute_paths_replaced_with_<repo>
+result=PASS

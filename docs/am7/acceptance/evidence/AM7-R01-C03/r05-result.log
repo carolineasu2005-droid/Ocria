@@ -1,0 +1,19 @@
+change_id=AM7-R01-C03
+gate=R05
+repo_relative_cwd=.
+command_start=
+2026-08-14T00:00:57.2194490+08:00
+command=.\\venv\\Scripts\\python.exe -m tests.benchmark_r05_aggregation
+command_end=
+2026-08-14T00:01:18.0703384+08:00
+exit_code=
+0
+raw_json=r05-benchmark.json
+output_contract=
+TID 0.6 Â§14.1.2 PASS
+scenario_count=
+18
+contract_blockers=
+0
+result=
+PASS

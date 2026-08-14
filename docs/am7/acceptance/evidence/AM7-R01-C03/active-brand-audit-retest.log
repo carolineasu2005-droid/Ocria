@@ -1,0 +1,19 @@
+change_id=AM7-R01-C03
+gate=active_brand_audit_retest
+repo_relative_cwd=.
+command_start=2026-08-14T00:09:47.8225200+08:00
+command=TID 0.6 Â§14.5 active brand audit
+spec_name_assignment_count=2
+spec_ocria_assignment_count=2
+workflow_notes_file_contract_match_count=1
+bossocr_residual file=build-windows.bat; line=19; classification=allowed; text="venv\Scripts\python.exe" -m PyInstaller --clean --noconfirm BossOCR.spec
+bossocr_residual file=.github/workflows/windows-release.yml; line=37; classification=allowed; text=run: python -m PyInstaller --clean --noconfirm BossOCR.spec
+bossocr_residual file=.github/workflows/windows-release.yml; line=65; classification=allowed; text=gh release create "${{ github.ref_name }}" release\Ocria-Am7-Windows-x64.zip release\Ocria-Am7-Windows-x64.zip.sha256 --title "Ocria Am7 ${{ github.ref_name }}" --notes-file release-notes\Issue-1-BossOCR-release-notes.md
+bossocr_residual file=docs/README.md; line=5; classification=allowed; text=Ocria Am7 ç source baselineãç¬ç« repository boundary åäººå·¥ fallback å³ç³»è§ [`am7/PROVENANCE.md`](am7/PROVENANCE.md)ãAM7-R01 C03 åªè¿ç§»æ´»è·äº§åèº«ä»½ï¼ä¸æ BossOCR historical release ä¼ªè£ä¸º Ocria releaseã
+bossocr_residual file=docs/README.md; line=418; classification=allowed; text=èæ¬ä¼å®è£æå»ºä¾èµãè¿è¡å¨éæµè¯ãä½¿ç¨ `BossOCR.spec` çææ§å¶å°ç one-dir åºç¨ï¼å¹¶ä»¥ `--no-forward --auto` åå®å¨åçæµè¯ãæååæ¬å°åç¼©åä½äºï¼
+bossocr_residual file=README.md; line=4; classification=allowed; text=candidate review using local OCR. It preserves the confirmed BossOCR Legacy
+bossocr_residual file=README.md; line=12; classification=violation; text=Ocria has a history-preserving source relationship with BossOCR. BossOCR remains
+audit_error=unclassified BossOCR residual in active surface
+command_end=2026-08-14T00:09:47.8644151+08:00
+exit_code=1
+result=FAIL

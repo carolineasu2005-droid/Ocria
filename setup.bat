@@ -6,7 +6,7 @@ set "PROJECT_DIR=%~dp0"
 cd /d "%PROJECT_DIR%"
 
 echo ========================================
-echo  BOSS 直聘自动刷简历 - 环境初始化
+echo  Ocria Am7 - 环境初始化
 echo ========================================
 echo.
 

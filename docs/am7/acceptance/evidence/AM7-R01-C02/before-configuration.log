@@ -1,0 +1,107 @@
+change_id=AM7-R01-C02
+phase=before_configuration
+repo_relative_cwd=.
+approved_origin_url=https://github.com/carolineasu2005-droid/Ocria.git
+capture_start=2026-08-13T23:41:31.9169770+08:00
+---
+timestamp=2026-08-13T23:41:31.9224498+08:00
+label=git_status_short_branch
+command=git status --short --branch
+## main...bossocr-upstream/main
+ M .gitignore
+?? docs/RPD-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+?? docs/TID-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+?? docs/am7/
+exit_code=0
+---
+timestamp=2026-08-13T23:41:31.9812406+08:00
+label=git_status_porcelain
+command=git status --porcelain --untracked-files=all
+ M .gitignore
+?? docs/RPD-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+?? docs/TID-AM7-R01-ocria-baseline-migration-and-legacy-core-freeze.md
+?? docs/am7/README.md
+?? docs/am7/acceptance/evidence/AM7-R01-C01/README.md
+?? docs/am7/acceptance/evidence/AM7-R01-C01/compileall.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/environment.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/evidence-recovery-manifest.md
+?? docs/am7/acceptance/evidence/AM7-R01-C01/full-legacy-regression.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/full-legacy-regression.raw.log.gz.base64
+?? docs/am7/acceptance/evidence/AM7-R01-C01/gate-summary.md
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r04-benchmark.json
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r04-result.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r05-benchmark.json
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r05-result.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r06-benchmark.json
+?? docs/am7/acceptance/evidence/AM7-R01-C01/r06-result.log
+?? docs/am7/acceptance/evidence/AM7-R01-C01/workspace-guards.log
+?? docs/am7/acceptance/evidence/AM7-R01-C02/command-manifest.md
+?? docs/am7/baselines/AM7-R01-source-baseline.json
+?? docs/am7/baselines/AM7-R01-source-baseline.md
+exit_code=0
+---
+timestamp=2026-08-13T23:41:32.0374836+08:00
+label=git_diff_stat
+command=git diff --stat
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+ .gitignore | 6 ++++++
+ 1 file changed, 6 insertions(+)
+exit_code=0
+---
+timestamp=2026-08-13T23:41:32.0932508+08:00
+label=git_diff_name_only
+command=git diff --name-only
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+.gitignore
+exit_code=0
+---
+timestamp=2026-08-13T23:41:32.1471481+08:00
+label=remote_verbose
+command=git remote -v
+bossocr-upstream	https://github.com/carolineasu2005-droid/Boss-OCR.git (fetch)
+bossocr-upstream	https://github.com/carolineasu2005-droid/Boss-OCR.git (push)
+exit_code=0
+---
+timestamp=2026-08-13T23:41:32.2055904+08:00
+label=remote_names
+command=git remote
+bossocr-upstream
+exit_code=0
+---
+timestamp=2026-08-13T23:41:32.2561192+08:00
+label=origin_fetch
+command=git remote get-url origin
+error: No such remote 'origin'
+exit_code=2
+---
+timestamp=2026-08-13T23:41:32.3044528+08:00
+label=origin_push
+command=git remote get-url --push origin
+error: No such remote 'origin'
+exit_code=2
+---
+timestamp=2026-08-13T23:41:32.3572985+08:00
+label=bossocr_upstream_fetch
+command=git remote get-url bossocr-upstream
+https://github.com/carolineasu2005-droid/Boss-OCR.git
+exit_code=0
+---
+timestamp=2026-08-13T23:41:32.4092360+08:00
+label=bossocr_upstream_push
+command=git remote get-url --push bossocr-upstream
+https://github.com/carolineasu2005-droid/Boss-OCR.git
+exit_code=0
+---
+timestamp=2026-08-13T23:41:32.4607615+08:00
+label=url_rewrite_audit
+command=git config --show-origin --get-regexp '^url\\..*\\.(insteadOf|pushInsteadOf)$'
+stdout_stderr=<empty>
+exit_code=1
+---
+timestamp=2026-08-13T23:41:32.5129989+08:00
+label=baseline_identity
+command=git rev-parse HEAD; git rev-parse <baseline>; git merge-base --is-ancestor <baseline> HEAD
+a7c941989a038d7a998ccee707e14b4fd9125cda
+a7c941989a038d7a998ccee707e14b4fd9125cda
+exit_code=0
+capture_end=2026-08-13T23:41:32.6668934+08:00

@@ -1,0 +1,22 @@
+AM7-R01 Final Automated Remediation — archive failure diagnosis
+TID: 0.7 / Approved §§14.6–14.7
+Repository baseline: a7c941989a038d7a998ccee707e14b4fd9125cda
+
+previous_build_command: powershell -NoProfile -Command "Compress-Archive -Path 'dist\Ocria\*' -DestinationPath 'release\Ocria-Am7-Windows-x64.zip' -CompressionLevel Optimal"
+previous_source_path: dist/Ocria/_internal/base_library.zip
+previous_destination_path: release/Ocria-Am7-Windows-x64.zip
+previous_windows_exception: ZipArchiveHelper reported that the source file could not be accessed because another process was using it; the subsequent archive reader reported that its stream was not readable.
+previous_failure_type: transient file-in-use during PowerShell Compress-Archive source enumeration; not access denied, stale destination, or release-directory permission failure.
+
+current_diagnosis_command: inspect only dist/Ocria, release, target archive/sidecar, relevant running processes, exclusive source read, and release write/cleanup
+diagnosis_result:
+  dist_root_exists: true
+  source_base_library_exists: true
+  source_base_library_size_bytes: 1443565
+  target_zip_exists: false
+  target_sidecar_exists: false
+  relevant_ocria_python_pyinstaller_process_count: 0
+  source_exclusive_read: PASS
+  release_write_and_cleanup: PASS
+environment_remediation: no stale ZIP or sidecar existed; no ACL/owner/config/source change was needed. The transient source lock was absent at diagnosis time.
+build_script_remediation_required: no — the current issue is recoverable by re-running the prescribed build flow after the lock cleared; no build-script change was made.

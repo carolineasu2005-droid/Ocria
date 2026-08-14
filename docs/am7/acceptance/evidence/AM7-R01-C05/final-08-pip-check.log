@@ -1,0 +1,11 @@
+AM7-R01 C05 final automated acceptance — pip dependency check
+TID: 0.7 / Approved
+Repository baseline: a7c941989a038d7a998ccee707e14b4fd9125cda
+Execution environment: .\\venv\\Scripts\\python.exe
+
+command: .\\venv\\Scripts\\python.exe -m pip check
+start_time: 2026-08-14T21:29:08.5820868+08:00
+end_time: 2026-08-14T21:29:10.8086986+08:00
+exit_code: 0
+stdout: No broken requirements found.
+result: PASS
