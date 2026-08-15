@@ -11,6 +11,10 @@ logs/
 calibration_profiles/*.json
 data/ocr_runs/
 
+# Local AI Provider configuration (contains plaintext API key)
+/config/ai_provider.json
+/config/.ai_provider.*.tmp
+
 # Editors and operating systems
 .idea/
 .vscode/
