@@ -48,6 +48,7 @@ from calibration_profiles import (
     screen_region_from_dict,
 )
 from calibration_template import main as calibration_template_main
+from ai_provider_cli import run_ai_provider_configuration
 from ocr_detector import (
     DYNAMIC_END_DEFAULT_MODE,
     DYNAMIC_END_VERSION,
@@ -1231,21 +1232,24 @@ listener = keyboard.Listener(on_press=on_press)
 
 # ─── 用户交互输入 ───────────────────────────────────
 def choose_startup_action():
-    """Prompt an interactive user to run Ocria Am7, calibrate, or exit."""
+    """Prompt an interactive user to run, calibrate, configure AI, or exit."""
     while True:
         raw = input(
             '\n请选择操作：\n\n'
             '1. 开始运行 Ocria Am7\n'
             '2. 创建或更新校准模板\n'
+            '3. AI Provider Configuration\n'
             '0. 退出\n> '
         ).strip()
         if raw == '1':
             return 'run'
         if raw == '2':
             return 'calibrate'
+        if raw == '3':
+            return 'ai_provider_config'
         if raw == '0':
             return 'exit'
-        print('  输入无效，请输入 1、2 或 0。')
+        print('  输入无效，请输入 1、2、3 或 0。')
 
 
 def launch_calibration_template():
@@ -4087,6 +4091,9 @@ def main():
             return run()
         if action == 'exit':
             return 0
+        if action == 'ai_provider_config':
+            run_ai_provider_configuration()
+            continue
         launch_calibration_template()
 
 

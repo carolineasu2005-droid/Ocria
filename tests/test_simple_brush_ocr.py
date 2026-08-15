@@ -7249,12 +7249,34 @@ class StartupMenuTests(unittest.TestCase):
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
             patch("builtins.input", return_value="1") as user_input,
             patch.object(simple_brush, "run", return_value=0) as run,
+            patch.object(simple_brush, "run_ai_provider_configuration") as run_ai_provider_configuration,
+            patch("llm_provider_runtime.OpenAI") as openai,
         ):
             self.assertEqual(simple_brush.main(), 0)
 
         self.assertIn("开始运行 Ocria Am7", user_input.call_args.args[0])
         self.assertIn("创建或更新校准模板", user_input.call_args.args[0])
+        self.assertIn("AI Provider Configuration", user_input.call_args.args[0])
         run.assert_called_once_with()
+        run_ai_provider_configuration.assert_not_called()
+        openai.assert_not_called()
+
+    def test_ai_provider_configuration_dispatches_then_returns_to_startup_menu(self):
+        with (
+            patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
+            patch("builtins.input", side_effect=["3", "0"]) as user_input,
+            patch.object(simple_brush, "run_ai_provider_configuration") as run_ai_provider_configuration,
+            patch.object(simple_brush, "run") as run,
+            patch("llm_provider_runtime.OpenAI") as openai,
+        ):
+            self.assertEqual(simple_brush.main(), 0)
+
+        run_ai_provider_configuration.assert_called_once_with()
+        run.assert_not_called()
+        openai.assert_not_called()
+        self.assertEqual(user_input.call_count, 2)
+        self.assertIn("AI Provider Configuration", user_input.call_args_list[0].args[0])
+        self.assertIn("AI Provider Configuration", user_input.call_args_list[1].args[0])
 
     def test_template_generator_success_returns_to_startup_menu(self):
         with (
@@ -7262,11 +7284,15 @@ class StartupMenuTests(unittest.TestCase):
             patch("builtins.input", side_effect=["2", "0"]),
             patch.object(simple_brush, "calibration_template_main", return_value=0) as calibrate,
             patch.object(simple_brush, "run") as run,
+            patch.object(simple_brush, "run_ai_provider_configuration") as run_ai_provider_configuration,
+            patch("llm_provider_runtime.OpenAI") as openai,
         ):
             self.assertEqual(simple_brush.main(), 0)
 
         calibrate.assert_called_once_with()
         run.assert_not_called()
+        run_ai_provider_configuration.assert_not_called()
+        openai.assert_not_called()
 
     def test_template_generator_cancel_returns_to_startup_menu(self):
         with (
@@ -7295,9 +7321,13 @@ class StartupMenuTests(unittest.TestCase):
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
             patch("builtins.input", return_value="0"),
             patch.object(simple_brush, "run") as run,
+            patch.object(simple_brush, "run_ai_provider_configuration") as run_ai_provider_configuration,
+            patch("llm_provider_runtime.OpenAI") as openai,
         ):
             self.assertEqual(simple_brush.main(), 0)
         run.assert_not_called()
+        run_ai_provider_configuration.assert_not_called()
+        openai.assert_not_called()
 
     def test_invalid_startup_menu_input_reprompts(self):
         with (
@@ -7306,7 +7336,11 @@ class StartupMenuTests(unittest.TestCase):
         ):
             self.assertEqual(simple_brush.choose_startup_action(), "exit")
         self.assertEqual(user_input.call_count, 2)
-        output.assert_called_once_with("  输入无效，请输入 1、2 或 0。")
+        output.assert_called_once_with("  输入无效，请输入 1、2、3 或 0。")
+
+    def test_ai_provider_configuration_menu_choice_returns_its_public_action(self):
+        with patch("builtins.input", return_value="3"):
+            self.assertEqual(simple_brush.choose_startup_action(), "ai_provider_config")
 
     def test_noninteractive_options_bypass_startup_menu(self):
         cases = (
@@ -7320,10 +7354,14 @@ class StartupMenuTests(unittest.TestCase):
                 patch.object(simple_brush.sys, "argv", argv),
                 patch("builtins.input") as user_input,
                 patch.object(simple_brush, "run", return_value=0) as run,
+                patch.object(simple_brush, "run_ai_provider_configuration") as run_ai_provider_configuration,
+                patch("llm_provider_runtime.OpenAI") as openai,
             ):
                 self.assertEqual(simple_brush.main(), 0)
                 user_input.assert_not_called()
                 run.assert_called_once_with()
+                run_ai_provider_configuration.assert_not_called()
+                openai.assert_not_called()
 
 
 if __name__ == "__main__":
