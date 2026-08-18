@@ -10,6 +10,8 @@ venv/
 logs/
 calibration_profiles/*.json
 data/ocr_runs/
+/data/r04_benchmarks/
+/data/screening_profiles/
 
 # Local AI Provider configuration (contains plaintext API key)
 /config/ai_provider.json

@@ -12,7 +12,14 @@ import simple_brush
 from calibration_profiles import CalibrationProfileError, REQUIRED_AREA_FIELDS
 from ocr_detector import DetectionResult, ScanObservation, ScreenFingerprint
 from ocr_candidate import CandidateOcrBuilder
-from ocr_records import CaptureStatus, CaptureType
+from ocr_records import CaptureStatus, CaptureType, RunStatus
+from screening_profile import (
+    Criterion,
+    ScreeningProfileIOError,
+    ScreeningProfileValidationError,
+    ScreeningProfileVersion,
+    criteria_digest,
+)
 from ocr_text import OCRItem
 
 
@@ -72,6 +79,17 @@ def sample_batch_filter_regions():
         open_filter=simple_brush.ScreenRegion(50, 60, 12, 12),
         unseen_filter=simple_brush.ScreenRegion(70, 80, 12, 12),
         confirm_filter=simple_brush.ScreenRegion(90, 100, 12, 12),
+    )
+
+
+def sample_screening_profile_version():
+    criteria = (Criterion("C001", "Python experience"),)
+    return ScreeningProfileVersion(
+        screening_profile_id="sp_0123456789abcdef0123456789abcdef",
+        profile_version=1,
+        criteria=criteria,
+        criteria_digest=criteria_digest(criteria),
+        created_at="2026-08-18T12:00:00+08:00",
     )
 
 
@@ -961,19 +979,42 @@ class SimpleBrushOCRTests(unittest.TestCase):
         simple_brush.paused = False
         simple_brush.run_duration_seconds = 0
         simple_brush._programmatic_esc = False
-        self.disabled_ocr_store = Mock(
-            enabled=False,
-            run_id="disabled-test-run",
+        self.run_ocr_store = Mock(
+            enabled=True,
+            run_id="run-test-store",
         )
+        self.screening_profile_version = sample_screening_profile_version()
+        self.screening_profile_id = (
+            self.screening_profile_version.screening_profile_id
+        )
+        self.screening_profile_store_patcher = patch.object(
+            simple_brush,
+            "ScreeningProfileStore",
+        )
+        self.screening_profile_store = (
+            self.screening_profile_store_patcher.start()
+        )
+        self.screening_profile_store.return_value.load_latest.return_value = (
+            self.screening_profile_version
+        )
+        self.original_run = simple_brush.run
+
+        def run_with_screening_profile(*args, **kwargs):
+            kwargs.setdefault("screening_profile_id", self.screening_profile_id)
+            return self.original_run(*args, **kwargs)
+
+        simple_brush.run = run_with_screening_profile
         self.ocr_store_factory_patcher = patch.object(
             simple_brush,
             "create_ocr_record_store",
-            return_value=self.disabled_ocr_store,
+            return_value=self.run_ocr_store,
         )
         self.ocr_store_factory_patcher.start()
 
     def tearDown(self):
         self.ocr_store_factory_patcher.stop()
+        simple_brush.run = self.original_run
+        self.screening_profile_store_patcher.stop()
         for name, value in self.saved.items():
             setattr(simple_brush, name, value)
 
@@ -7243,13 +7284,231 @@ class BossBrowserWindowTests(unittest.TestCase):
         bring_boss.assert_called_once_with()
 
 
+class ScreeningProfileRunFreezeTests(unittest.TestCase):
+    def setUp(self):
+        self.profile_version = sample_screening_profile_version()
+        self.profile_id = self.profile_version.screening_profile_id
+        self.saved = {
+            name: getattr(simple_brush, name)
+            for name in (
+                "forward_enabled",
+                "forward_keywords",
+                "batch_filter_enabled",
+                "batch_filter_regions",
+                "ocr_record_store",
+                "paused",
+            )
+        }
+
+    def tearDown(self):
+        for name, value in self.saved.items():
+            setattr(simple_brush, name, value)
+
+    @staticmethod
+    def cli_args():
+        return {
+            "keywords": "",
+            "email": "",
+            "duration_seconds": "",
+            "no_forward": False,
+            "no_batch_filter": False,
+            "simple_mouse": False,
+            "auto": False,
+            "action_mode": None,
+            "calibration_profile": "",
+            "screening_profile_id": "",
+        }
+
+    def test_missing_profile_id_stops_before_profile_or_execution(self):
+        with (
+            patch.object(simple_brush, "parse_args", return_value=self.cli_args()),
+            patch.object(simple_brush, "get_user_input"),
+            patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
+            patch.object(simple_brush, "create_ocr_record_store") as create_store,
+            patch.object(simple_brush, "initialize_ocr") as initialize_ocr,
+            patch.object(simple_brush.listener, "start") as listener_start,
+            patch.object(simple_brush, "bring_edge_foreground") as foreground,
+        ):
+            self.assertNotEqual(simple_brush.run(), 0)
+
+        profile_store.assert_not_called()
+        create_store.assert_not_called()
+        initialize_ocr.assert_not_called()
+        listener_start.assert_not_called()
+        foreground.assert_not_called()
+
+    def test_profile_load_or_digest_failure_stops_before_execution(self):
+        bad_digest_version = Mock(
+            screening_profile_id=self.profile_id,
+            profile_version=1,
+            criteria=self.profile_version.criteria,
+            criteria_digest="sha256:" + "0" * 64,
+        )
+        cases = (
+            ScreeningProfileIOError("missing"),
+            ScreeningProfileValidationError("invalid"),
+            bad_digest_version,
+        )
+        for outcome in cases:
+            with (
+                self.subTest(outcome=type(outcome).__name__),
+                patch.object(simple_brush, "parse_args", return_value=self.cli_args()),
+                patch.object(simple_brush, "get_user_input"),
+                patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
+                patch.object(simple_brush, "create_ocr_record_store") as create_store,
+                patch.object(simple_brush, "initialize_ocr") as initialize_ocr,
+                patch.object(simple_brush.listener, "start") as listener_start,
+                patch.object(simple_brush, "bring_edge_foreground") as foreground,
+                patch.object(simple_brush, "view_candidate") as view,
+                patch.object(
+                    simple_brush,
+                    "run_screening_profile_configuration",
+                ) as configure_profile,
+            ):
+                profile_store.return_value.load_latest.side_effect = (
+                    outcome
+                    if isinstance(outcome, Exception)
+                    else None
+                )
+                if not isinstance(outcome, Exception):
+                    profile_store.return_value.load_latest.return_value = outcome
+                self.assertNotEqual(
+                    simple_brush.run(screening_profile_id=self.profile_id),
+                    0,
+                )
+
+                create_store.assert_not_called()
+                initialize_ocr.assert_not_called()
+                listener_start.assert_not_called()
+                foreground.assert_not_called()
+                view.assert_not_called()
+                configure_profile.assert_not_called()
+
+    def test_binding_store_creation_precedes_ocr_listener_and_browser(self):
+        events = []
+        store = Mock(enabled=True, run_id="bound-run")
+
+        def configure_input(**_kwargs):
+            simple_brush.forward_enabled = True
+            simple_brush.forward_keywords = simple_brush.parse_keyword_rules(
+                '"Python"'
+            )
+            simple_brush.batch_filter_enabled = False
+            simple_brush.batch_filter_regions = None
+
+        def load_latest(profile_id):
+            self.assertEqual(profile_id, self.profile_id)
+            events.append("profile")
+            return self.profile_version
+
+        def create_store(binding):
+            events.append("store")
+            self.assertEqual(
+                binding.screening_profile_id,
+                self.profile_id,
+            )
+            self.assertEqual(binding.profile_version, 1)
+            self.assertEqual(
+                binding.criteria_digest,
+                self.profile_version.criteria_digest,
+            )
+            return store
+
+        with (
+            patch.object(simple_brush, "parse_args", return_value=self.cli_args()),
+            patch.object(simple_brush, "get_user_input", side_effect=configure_input),
+            patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
+            patch.object(
+                simple_brush,
+                "create_ocr_record_store",
+                side_effect=create_store,
+            ),
+            patch.object(
+                simple_brush,
+                "initialize_ocr",
+                side_effect=lambda: events.append("ocr"),
+            ),
+            patch.object(
+                simple_brush.listener,
+                "start",
+                side_effect=lambda: events.append("listener"),
+            ),
+            patch.object(
+                simple_brush,
+                "bring_edge_foreground",
+                side_effect=lambda: events.append("browser") or False,
+            ),
+            patch.object(
+                simple_brush,
+                "run_screening_profile_configuration",
+            ) as configure_profile,
+            patch.object(simple_brush, "view_candidate") as view,
+        ):
+            profile_store.return_value.load_latest.side_effect = load_latest
+            self.assertEqual(
+                simple_brush.run(screening_profile_id=self.profile_id),
+                0,
+            )
+
+        self.assertEqual(events, ["profile", "store", "ocr", "listener", "browser"])
+        store.close.assert_called_once_with(RunStatus.COMPLETED)
+        configure_profile.assert_not_called()
+        view.assert_not_called()
+
+    def test_initial_store_failure_stops_before_ocr_listener_browser_and_view(self):
+        for store_result in (None, Mock(enabled=False, run_id="disabled")):
+            with (
+                self.subTest(store_result=store_result),
+                patch.object(simple_brush, "parse_args", return_value=self.cli_args()),
+                patch.object(simple_brush, "get_user_input"),
+                patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
+                patch.object(
+                    simple_brush,
+                    "create_ocr_record_store",
+                    return_value=store_result,
+                ),
+                patch.object(simple_brush, "initialize_ocr") as initialize_ocr,
+                patch.object(simple_brush.listener, "start") as listener_start,
+                patch.object(simple_brush, "bring_edge_foreground") as foreground,
+                patch.object(simple_brush, "view_candidate") as view,
+            ):
+                profile_store.return_value.load_latest.return_value = (
+                    self.profile_version
+                )
+                self.assertNotEqual(
+                    simple_brush.run(screening_profile_id=self.profile_id),
+                    0,
+                )
+                initialize_ocr.assert_not_called()
+                listener_start.assert_not_called()
+                foreground.assert_not_called()
+                view.assert_not_called()
+
+    def test_pause_toggle_does_not_enter_profile_configuration(self):
+        simple_brush.paused = False
+        with patch.object(
+            simple_brush,
+            "run_screening_profile_configuration",
+        ) as configure_profile:
+            simple_brush.on_press(simple_brush.keyboard.Key.space)
+
+        self.assertTrue(simple_brush.paused)
+        configure_profile.assert_not_called()
+
+
 class StartupMenuTests(unittest.TestCase):
-    def test_interactive_menu_shows_and_run_delegates_to_existing_flow(self):
+    def test_prepared_profile_config_dispatches_and_run_receives_prepared_id(self):
+        prepared_profile_id = "sp_0123456789abcdef0123456789abcdef"
         with (
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
-            patch("builtins.input", return_value="1") as user_input,
+            patch("builtins.input", side_effect=["4", "1"]) as user_input,
             patch.object(simple_brush, "run", return_value=0) as run,
             patch.object(simple_brush, "run_ai_provider_configuration") as run_ai_provider_configuration,
+            patch.object(
+                simple_brush,
+                "run_screening_profile_configuration",
+                return_value=prepared_profile_id,
+            ) as configure_profile,
             patch("llm_provider_runtime.OpenAI") as openai,
         ):
             self.assertEqual(simple_brush.main(), 0)
@@ -7257,9 +7516,49 @@ class StartupMenuTests(unittest.TestCase):
         self.assertIn("开始运行 Ocria Am7", user_input.call_args.args[0])
         self.assertIn("创建或更新校准模板", user_input.call_args.args[0])
         self.assertIn("AI Provider Configuration", user_input.call_args.args[0])
-        run.assert_called_once_with()
+        self.assertIn(
+            "ScreeningProfile Configuration",
+            user_input.call_args.args[0],
+        )
+        configure_profile.assert_called_once_with()
+        run.assert_called_once_with(screening_profile_id=prepared_profile_id)
         run_ai_provider_configuration.assert_not_called()
         openai.assert_not_called()
+
+    def test_start_without_prepared_profile_returns_to_menu_without_running(self):
+        with (
+            patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
+            patch("builtins.input", side_effect=["1", "0"]),
+            patch.object(simple_brush, "run") as run,
+            patch("builtins.print") as output,
+        ):
+            self.assertEqual(simple_brush.main(), 0)
+
+        run.assert_not_called()
+        self.assertTrue(
+            any(
+                "先在 ScreeningProfile Configuration 中准备" in str(call.args)
+                for call in output.call_args_list
+            )
+        )
+
+    def test_terminal_run_then_new_startup_exposes_profile_configuration(self):
+        prepared_profile_id = "sp_0123456789abcdef0123456789abcdef"
+        with (
+            patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
+            patch("builtins.input", side_effect=["4", "1", "4", "0"]),
+            patch.object(simple_brush, "run", return_value=0) as run,
+            patch.object(
+                simple_brush,
+                "run_screening_profile_configuration",
+                side_effect=[prepared_profile_id, None],
+            ) as configure_profile,
+        ):
+            self.assertEqual(simple_brush.main(), 0)
+            self.assertEqual(simple_brush.main(), 0)
+
+        run.assert_called_once_with(screening_profile_id=prepared_profile_id)
+        self.assertEqual(configure_profile.call_count, 2)
 
     def test_ai_provider_configuration_dispatches_then_returns_to_startup_menu(self):
         with (
@@ -7336,17 +7635,24 @@ class StartupMenuTests(unittest.TestCase):
         ):
             self.assertEqual(simple_brush.choose_startup_action(), "exit")
         self.assertEqual(user_input.call_count, 2)
-        output.assert_called_once_with("  输入无效，请输入 1、2、3 或 0。")
+        output.assert_called_once_with("  输入无效，请输入 1、2、3、4 或 0。")
 
     def test_ai_provider_configuration_menu_choice_returns_its_public_action(self):
         with patch("builtins.input", return_value="3"):
             self.assertEqual(simple_brush.choose_startup_action(), "ai_provider_config")
 
+    def test_screening_profile_configuration_menu_choice_returns_its_public_action(self):
+        with patch("builtins.input", return_value="4"):
+            self.assertEqual(
+                simple_brush.choose_startup_action(),
+                "screening_profile_config",
+            )
+
     def test_noninteractive_options_bypass_startup_menu(self):
         cases = (
-            ["simple_brush.py", "--auto"],
-            ["simple_brush.py", "--keywords", '"Python"'],
-            ["simple_brush.py", "--calibration-profile", "main"],
+            ["simple_brush.py", "--auto", "--screening-profile-id", "sp_0123456789abcdef0123456789abcdef"],
+            ["simple_brush.py", "--keywords", '"Python"', "--screening-profile-id", "sp_0123456789abcdef0123456789abcdef"],
+            ["simple_brush.py", "--calibration-profile", "main", "--screening-profile-id", "sp_0123456789abcdef0123456789abcdef"],
         )
         for argv in cases:
             with (
@@ -7359,9 +7665,32 @@ class StartupMenuTests(unittest.TestCase):
             ):
                 self.assertEqual(simple_brush.main(), 0)
                 user_input.assert_not_called()
-                run.assert_called_once_with()
+                run.assert_called_once_with(
+                    screening_profile_id="sp_0123456789abcdef0123456789abcdef"
+                )
                 run_ai_provider_configuration.assert_not_called()
                 openai.assert_not_called()
+
+    def test_noninteractive_options_without_profile_id_do_not_start_run(self):
+        for argv in (
+            ["simple_brush.py", "--auto"],
+            ["simple_brush.py", "--keywords", '"Python"'],
+            ["simple_brush.py", "--calibration-profile", "main"],
+        ):
+            with (
+                self.subTest(argv=argv),
+                patch.object(simple_brush.sys, "argv", argv),
+                patch.object(simple_brush, "run") as run,
+                patch("builtins.print") as output,
+            ):
+                self.assertNotEqual(simple_brush.main(), 0)
+                run.assert_not_called()
+                self.assertTrue(
+                    any(
+                        "--screening-profile-id" in str(call.args)
+                        for call in output.call_args_list
+                    )
+                )
 
 
 if __name__ == "__main__":

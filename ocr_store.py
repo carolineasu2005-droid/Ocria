@@ -41,6 +41,7 @@ from ocr_records import (
     OcrScreenRecord,
     RunManifest,
     RunStatus,
+    ScreeningProfileBinding,
     STORAGE_SCHEMA_VERSION,
     json_dumps,
     timezone_iso,
@@ -132,6 +133,7 @@ class JsonlOcrRecordStore:
         dynamic_end_version: Optional[str] = None,
         dynamic_end_mode: Optional[str] = None,
         dynamic_end_config: Optional[Mapping[str, Any]] = None,
+        screening_profile_binding: Optional[ScreeningProfileBinding] = None,
         fsync: bool = False,
         run_id: Optional[str] = None,
         started_at: Optional[datetime] = None,
@@ -283,6 +285,7 @@ class JsonlOcrRecordStore:
                 dict(dynamic_end_config)
                 if dynamic_end_config is not None else None
             ),
+            screening_profile_binding=screening_profile_binding,
             data_files={
                 "manifest": RUN_MANIFEST_NAME,
                 "screens": SCREENS_NAME,

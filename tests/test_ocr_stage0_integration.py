@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -5,7 +8,15 @@ import simple_brush
 import ocr_normalization
 from ocr_detector import DynamicEndConfig, OCRKeywordDetector, ScanObservation
 from ocr_normalization import NormalizationBox, normalize_ocr_text
-from ocr_records import CandidateOcrDocument, CaptureStatus, CaptureType, RunStatus
+from ocr_records import (
+    CandidateOcrDocument,
+    CaptureStatus,
+    CaptureType,
+    RunStatus,
+    ScreeningProfileBinding,
+)
+from ocr_store import JsonlOcrRecordStore
+from screening_profile import Criterion, ScreeningProfileVersion, criteria_digest
 from ocr_text import OCRItem
 
 
@@ -88,6 +99,17 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         simple_brush.recorded_observation_ids = {}
         simple_brush.stop_event = False
         simple_brush.stop_reason = None
+        criteria = (Criterion("C001", "Python experience"),)
+        self.screening_profile_version = ScreeningProfileVersion(
+            screening_profile_id="sp_0123456789abcdef0123456789abcdef",
+            profile_version=1,
+            criteria=criteria,
+            criteria_digest=criteria_digest(criteria),
+            created_at="2026-08-18T12:00:00+08:00",
+        )
+        self.screening_profile_id = (
+            self.screening_profile_version.screening_profile_id
+        )
 
     def tearDown(self):
         for name, value in self.saved.items():
@@ -125,6 +147,40 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
     def start_builder(self, store):
         simple_brush.ocr_record_store = store
         return simple_brush.start_candidate_ocr_recording(1, 0)
+
+    def test_bound_store_persists_the_same_binding_after_close(self):
+        binding = ScreeningProfileBinding(
+            screening_profile_id=self.screening_profile_id,
+            profile_version=self.screening_profile_version.profile_version,
+            criteria_digest=self.screening_profile_version.criteria_digest,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root_dir = Path(temporary)
+
+            def construct_store(**kwargs):
+                return JsonlOcrRecordStore(root_dir=root_dir, **kwargs)
+
+            with patch.object(
+                simple_brush,
+                "JsonlOcrRecordStore",
+                side_effect=construct_store,
+            ) as constructor:
+                store = simple_brush.create_ocr_record_store(binding)
+
+            self.assertIs(
+                constructor.call_args.kwargs["screening_profile_binding"],
+                binding,
+            )
+            self.assertTrue(store.enabled)
+            store.close(RunStatus.INTERRUPTED)
+            manifest = json.loads(store.manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["status"], RunStatus.INTERRUPTED.value)
+        self.assertEqual(
+            manifest["screening_profile_binding"],
+            binding.to_dict(),
+        )
 
     def test_detector_callback_saves_formal_and_confirmation_without_extra_ocr(self):
         store = FakeStore()
@@ -942,6 +998,7 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
 
         with (
             patch.object(simple_brush, "create_ocr_record_store", return_value=store),
+            patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
             patch.object(simple_brush, "parse_args", return_value={
                 "keywords": "",
                 "email": "",
@@ -963,7 +1020,12 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             patch.object(simple_brush, "view_candidate", side_effect=view_side_effect) as view,
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
-            result = simple_brush.run()
+            profile_store.return_value.load_latest.return_value = (
+                self.screening_profile_version
+            )
+            result = simple_brush.run(
+                screening_profile_id=self.screening_profile_id
+            )
         return result, view
 
     def run_hard_recovery(
@@ -1044,6 +1106,7 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
 
         with (
             patch.object(simple_brush, "create_ocr_record_store", return_value=store),
+            patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
             patch.object(simple_brush, "parse_args", return_value={
                 "keywords": "",
                 "email": "",
@@ -1100,7 +1163,12 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             patch.object(simple_brush, "ocr_scroll_down") as ocr_scroll,
             patch.object(simple_brush, "human_scroll_once") as human_scroll,
         ):
-            result = simple_brush.run()
+            profile_store.return_value.load_latest.return_value = (
+                self.screening_profile_version
+            )
+            result = simple_brush.run(
+                screening_profile_id=self.screening_profile_id
+            )
 
         return {
             "result": result,
@@ -1309,20 +1377,31 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
                     calls["facts"]["ids_before_new_observation"],
                 )
 
-    def test_disabled_store_does_not_change_hard_recovery_business_calls(self):
-        baseline_calls = self.run_hard_recovery(FakeStore())
+    def test_disabled_initial_store_stops_before_hard_recovery_business_calls(self):
         disabled_store = FakeStore(enabled=False)
 
         calls = self.run_hard_recovery(disabled_store)
 
-        self.assertEqual(calls["result"], 0)
+        self.assertNotEqual(calls["result"], 0)
         self.assertEqual(
             self.recovery_business_call_counts(calls),
-            self.recovery_business_call_counts(baseline_calls),
+            {
+                "gate": 0,
+                "open_first": 0,
+                "refresh": 0,
+                "reopen": 0,
+                "recover": 0,
+                "view": 0,
+                "wait": 0,
+                "next_candidate": 0,
+                "ocr_scroll": 0,
+                "human_scroll": 0,
+            },
         )
-        self.assertIsNone(calls["facts"]["old_builder"])
-        self.assertIsNone(calls["facts"]["new_builder"])
+        self.assertIsNone(calls["facts"].get("old_builder"))
+        self.assertIsNone(calls["facts"].get("new_builder"))
         self.assertEqual(disabled_store.candidate_attempts, [])
+        self.assertIsNone(disabled_store.closed_status)
 
     def test_recovery_reset_releases_builder_if_store_is_disabled(self):
         store = FakeStore()
@@ -1392,7 +1471,7 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         )
         self.assertTrue(facts["builder"].finalized)
 
-    def test_run_enabled_and_disabled_storage_keep_view_call_count_unchanged(self):
+    def test_disabled_initial_store_stops_before_listener_browser_or_view(self):
         def completed_then_stop(_index):
             simple_brush.stop_event = True
             simple_brush.stop_reason = "esc"
@@ -1407,14 +1486,15 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             disabled, completed_then_stop
         )
 
-        self.assertEqual((enabled_result, disabled_result), (0, 0))
+        self.assertEqual(enabled_result, 0)
+        self.assertNotEqual(disabled_result, 0)
         self.assertEqual(enabled_view.call_count, 1)
-        self.assertEqual(disabled_view.call_count, 1)
+        self.assertEqual(disabled_view.call_count, 0)
         self.assertEqual(len(enabled.candidates), 1)
         self.assertEqual(enabled.candidates[0].capture_status, CaptureStatus.COMPLETED)
         self.assertEqual(len(disabled.candidates), 0)
         self.assertEqual(enabled.closed_status, RunStatus.INTERRUPTED)
-        self.assertEqual(disabled.closed_status, RunStatus.INTERRUPTED)
+        self.assertIsNone(disabled.closed_status)
 
     def test_run_exception_saves_aborted_candidate_and_closes_error(self):
         store = FakeStore(enabled=True)

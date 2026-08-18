@@ -17,6 +17,7 @@ from ocr_records import (
     OcrBox,
     OcrScreenRecord,
     RunStatus,
+    ScreeningProfileBinding,
 )
 from ocr_store import JsonlOcrRecordStore
 from ocr_text import OCRItem
@@ -574,6 +575,38 @@ class JsonlOcrRecordStoreTests(unittest.TestCase):
             first.close()
             second.close()
 
+    def test_profile_binding_is_written_initially_and_preserved_on_close(self):
+        binding = ScreeningProfileBinding(
+            screening_profile_id="sp_" + "a" * 32,
+            profile_version=2,
+            criteria_digest="sha256:" + "b" * 64,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = self.make_store(
+                temporary,
+                screening_profile_binding=binding,
+            )
+            initial = json.loads(store.manifest_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(initial["screening_profile_binding"], binding.to_dict())
+            self.assertTrue(store.close())
+
+            closed = json.loads(store.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(closed["screening_profile_binding"], binding.to_dict())
+            self.assertEqual(
+                set(closed["screening_profile_binding"]),
+                {"screening_profile_id", "profile_version", "criteria_digest"},
+            )
+
+    def test_unbound_technical_store_remains_supported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = self.make_store(temporary)
+
+            self.assertTrue(store.enabled)
+            manifest = json.loads(store.manifest_path.read_text(encoding="utf-8"))
+            self.assertIsNone(manifest["screening_profile_binding"])
+            self.assertTrue(store.close())
+
     def test_utf8_append_produces_independently_parseable_lines(self):
         with tempfile.TemporaryDirectory() as temporary:
             store = self.make_store(temporary)
@@ -739,6 +772,7 @@ class JsonlOcrRecordStoreTests(unittest.TestCase):
             self.assertFalse(store.enabled)
             self.assertEqual(store.manifest.status, RunStatus.DISABLED)
             self.assertEqual(store.manifest.error_count, 1)
+            self.assertIsNone(store.manifest.screening_profile_binding)
             self.assertFalse(store.save_screen(self.make_screen()))
             self.assertFalse(store.close())
 
