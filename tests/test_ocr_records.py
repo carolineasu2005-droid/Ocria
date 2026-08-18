@@ -30,6 +30,7 @@ from ocr_records import (
     R06_STORAGE_SCHEMA_VERSION,
     RunManifest,
     RunStatus,
+    ScreeningProfileBinding,
     SimilarityStatus,
     recompute_similarity_summary,
     json_dumps,
@@ -239,9 +240,8 @@ class OcrRecordModelTests(unittest.TestCase):
             prediction_evidence_complete=None,
         )
 
-        restored = CandidateOcrDocument.from_dict(
-            json.loads(document.to_json())
-        )
+        payload = document.to_dict()
+        restored = CandidateOcrDocument.from_dict(json.loads(document.to_json()))
 
         self.assertEqual(restored, document)
         self.assertIsNone(restored.document_text)
@@ -254,6 +254,16 @@ class OcrRecordModelTests(unittest.TestCase):
         self.assertEqual(restored.dynamic_end_mode, "shadow")
         self.assertIsNone(restored.dynamic_end_reason)
         self.assertIsNone(restored.prediction_would_miss_content)
+        self.assertTrue(
+            {
+                "screening_profile_id",
+                "profile_version",
+                "criteria_digest",
+                "criteria",
+                "criterion_text",
+                "screening_profile_binding",
+            }.isdisjoint(payload)
+        )
 
     def test_unknown_additive_fields_are_ignored_during_restore(self):
         data = self.make_screen().to_dict()
@@ -334,6 +344,11 @@ class OcrRecordModelTests(unittest.TestCase):
     def test_manifest_round_trip_converts_paths_and_enum(self):
         config = DEFAULT_OCR_NORMALIZATION_CONFIG
         snapshot = canonical_normalization_config(config)
+        binding = ScreeningProfileBinding(
+            screening_profile_id="sp_" + "a" * 32,
+            profile_version=3,
+            criteria_digest="sha256:" + "b" * 64,
+        )
         manifest = RunManifest(
             run_id="run-1",
             started_at="2026-07-30T12:00:00+08:00",
@@ -351,6 +366,7 @@ class OcrRecordModelTests(unittest.TestCase):
             dynamic_end_version="r07-v1",
             dynamic_end_mode="shadow",
             dynamic_end_config={"no_new_text_threshold": 2},
+            screening_profile_binding=binding,
             data_files={"screens": Path("screens.jsonl")},
         )
 
@@ -366,6 +382,54 @@ class OcrRecordModelTests(unittest.TestCase):
         self.assertEqual(
             restored.dynamic_end_config, {"no_new_text_threshold": 2}
         )
+        self.assertEqual(restored.screening_profile_binding, binding)
+
+        legacy = manifest.to_dict()
+        legacy.pop("screening_profile_binding")
+        self.assertIsNone(
+            RunManifest.from_dict(legacy).screening_profile_binding
+        )
+
+        partial_binding = manifest.to_dict()
+        partial_binding["screening_profile_binding"] = {
+            "screening_profile_id": binding.screening_profile_id,
+            "profile_version": binding.profile_version,
+        }
+        with self.assertRaisesRegex(ValueError, "binding"):
+            RunManifest.from_dict(partial_binding)
+
+    def test_screening_profile_binding_validation_and_json_round_trip(self):
+        binding = ScreeningProfileBinding(
+            screening_profile_id="sp_" + "c" * 32,
+            profile_version=1,
+            criteria_digest="sha256:" + "d" * 64,
+        )
+
+        self.assertEqual(
+            ScreeningProfileBinding.from_dict(json.loads(binding.to_json())),
+            binding,
+        )
+        cases = (
+            {
+                "screening_profile_id": "sp_" + "C" * 32,
+                "profile_version": 1,
+                "criteria_digest": binding.criteria_digest,
+            },
+            {
+                "screening_profile_id": binding.screening_profile_id,
+                "profile_version": True,
+                "criteria_digest": binding.criteria_digest,
+            },
+            {
+                "screening_profile_id": binding.screening_profile_id,
+                "profile_version": 1,
+                "criteria_digest": "sha256:" + "D" * 64,
+            },
+        )
+        for values in cases:
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    ScreeningProfileBinding(**values)
 
     def test_recursive_conversion_supports_datetime_path_tuple_and_optional(self):
         value = {

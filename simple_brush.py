@@ -49,6 +49,13 @@ from calibration_profiles import (
 )
 from calibration_template import main as calibration_template_main
 from ai_provider_cli import run_ai_provider_configuration
+from screening_profile import (
+    ScreeningProfileIOError,
+    ScreeningProfileStore,
+    ScreeningProfileValidationError,
+    criteria_digest,
+)
+from screening_profile_cli import run_screening_profile_configuration
 from ocr_detector import (
     DYNAMIC_END_DEFAULT_MODE,
     DYNAMIC_END_VERSION,
@@ -76,7 +83,12 @@ from ocr_normalization import (
     config_with_effective_min_confidence,
     normalization_config_digest,
 )
-from ocr_records import CaptureStatus, CaptureType, RunStatus
+from ocr_records import (
+    CaptureStatus,
+    CaptureType,
+    RunStatus,
+    ScreeningProfileBinding,
+)
 from ocr_store import JsonlOcrRecordStore
 from mouse_motion import (
     move_to_observable,
@@ -97,6 +109,7 @@ def parse_args():
         'auto': False,
         'action_mode': None,
         'calibration_profile': '',
+        'screening_profile_id': '',
     }
     i = 1
     while i < len(sys.argv):
@@ -127,6 +140,11 @@ def parse_args():
             if i + 1 >= len(sys.argv):
                 raise ValueError('--calibration-profile 缺少模板名称')
             args['calibration_profile'] = sys.argv[i + 1]
+            i += 2
+        elif sys.argv[i] == '--screening-profile-id':
+            if i + 1 >= len(sys.argv):
+                raise ValueError('--screening-profile-id 缺少 Profile ID')
+            args['screening_profile_id'] = sys.argv[i + 1]
             i += 2
         elif sys.argv[i] == '--action-mode':
             if i + 1 >= len(sys.argv):
@@ -708,8 +726,8 @@ def _safe_recording_error_fields(exc: Exception, failure_stage: str):
     }
 
 
-def create_ocr_record_store():
-    """Create the best-effort stage-0 store for one application run."""
+def create_ocr_record_store(screening_profile_binding):
+    """Create the stage-0 store for one run with its frozen Profile binding."""
 
     config = config_with_effective_min_confidence(
         DEFAULT_OCR_NORMALIZATION_CONFIG,
@@ -732,15 +750,16 @@ def create_ocr_record_store():
         dynamic_end_version=DYNAMIC_END_VERSION,
         dynamic_end_mode=DYNAMIC_END_CONFIG.mode,
         dynamic_end_config=DYNAMIC_END_CONFIG.manifest_config(),
+        screening_profile_binding=screening_profile_binding,
     )
 
 
-def initialize_run_ocr_storage():
-    """Initialize storage without allowing it to block the existing run."""
+def initialize_run_ocr_storage(screening_profile_binding):
+    """Initialize the bound store before any execution side effect."""
 
     global ocr_record_store
     try:
-        ocr_record_store = create_ocr_record_store()
+        ocr_record_store = create_ocr_record_store(screening_profile_binding)
     except Exception as exc:
         ocr_record_store = None
         logger.warning(
@@ -748,7 +767,7 @@ def initialize_run_ocr_storage():
             type(exc).__name__,
         )
         return None
-    if ocr_record_store.enabled:
+    if ocr_record_store is not None and ocr_record_store.enabled:
         logger.info(
             "event=ocr_store_ready run_id=%s",
             ocr_record_store.run_id,
@@ -1232,13 +1251,14 @@ listener = keyboard.Listener(on_press=on_press)
 
 # ─── 用户交互输入 ───────────────────────────────────
 def choose_startup_action():
-    """Prompt an interactive user to run, calibrate, configure AI, or exit."""
+    """Prompt an interactive user to run, configure, calibrate, or exit."""
     while True:
         raw = input(
             '\n请选择操作：\n\n'
             '1. 开始运行 Ocria Am7\n'
             '2. 创建或更新校准模板\n'
             '3. AI Provider Configuration\n'
+            '4. ScreeningProfile Configuration\n'
             '0. 退出\n> '
         ).strip()
         if raw == '1':
@@ -1247,9 +1267,11 @@ def choose_startup_action():
             return 'calibrate'
         if raw == '3':
             return 'ai_provider_config'
+        if raw == '4':
+            return 'screening_profile_config'
         if raw == '0':
             return 'exit'
-        print('  输入无效，请输入 1、2、3 或 0。')
+        print('  输入无效，请输入 1、2、3、4 或 0。')
 
 
 def launch_calibration_template():
@@ -3662,7 +3684,7 @@ def recover_detail_page():
 
 # ─── 主循环 ─────────────────────────────────────────
 
-def run():
+def run(screening_profile_id: Optional[str] = None):
     global stop_event, stop_reason, forward_consecutive, no_forward_mode, simple_mouse_enabled, action_mode
     global ocr_record_store, current_candidate_builder
     global candidate_record_sequence, recorded_observation_ids
@@ -3697,7 +3719,40 @@ def run():
         print(f'[错误] {exc}')
         return 2
 
-    initialize_run_ocr_storage()
+    selected_profile_id = (
+        screening_profile_id
+        if screening_profile_id is not None
+        else cli_args.get('screening_profile_id', '')
+    )
+    if not selected_profile_id:
+        print('[错误] 运行需要 --screening-profile-id 或已准备的 ScreeningProfile。')
+        return 2
+    try:
+        profile_version = ScreeningProfileStore().load_latest(
+            selected_profile_id
+        )
+        actual_digest = criteria_digest(profile_version.criteria)
+        if actual_digest != profile_version.criteria_digest:
+            raise ScreeningProfileValidationError(
+                'criteria_digest does not match the loaded Profile.'
+            )
+        screening_profile_binding = ScreeningProfileBinding(
+            screening_profile_id=profile_version.screening_profile_id,
+            profile_version=profile_version.profile_version,
+            criteria_digest=actual_digest,
+        )
+    except (
+        ScreeningProfileIOError,
+        ScreeningProfileValidationError,
+        ValueError,
+    ) as exc:
+        print(f'[错误] ScreeningProfile 无法用于运行：{exc}')
+        return 2
+
+    initial_store = initialize_run_ocr_storage(screening_profile_binding)
+    if initial_store is None or not initial_store.enabled:
+        print('[错误] OCR 运行记录存储初始化失败，未启动运行。')
+        return 2
 
     # 提前初始化并复用 OCR 引擎；校准仍延迟到第一位详情打开之后。
     if forward_enabled and forward_keywords:
@@ -4083,16 +4138,32 @@ def main():
         return 2
 
     if is_noninteractive_startup(cli_args):
-        return run()
+        screening_profile_id = cli_args.get('screening_profile_id', '')
+        if not screening_profile_id:
+            print('[错误] 非交互运行需要 --screening-profile-id。')
+            return 2
+        return run(screening_profile_id=screening_profile_id)
 
+    prepared_screening_profile_id: Optional[str] = None
     while True:
         action = choose_startup_action()
         if action == 'run':
-            return run()
+            if prepared_screening_profile_id is None:
+                print(
+                    '请先在 ScreeningProfile Configuration 中准备一个 Profile，'
+                    '再开始运行。'
+                )
+                continue
+            return run(screening_profile_id=prepared_screening_profile_id)
         if action == 'exit':
             return 0
         if action == 'ai_provider_config':
             run_ai_provider_configuration()
+            continue
+        if action == 'screening_profile_config':
+            prepared_profile_id = run_screening_profile_configuration()
+            if prepared_profile_id is not None:
+                prepared_screening_profile_id = prepared_profile_id
             continue
         launch_calibration_template()
 

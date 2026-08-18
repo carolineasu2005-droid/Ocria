@@ -53,6 +53,8 @@ R04_NORMALIZATION_CONFIG_VERSION = "r04-config-v1"
 RULE_EVALUATION_MODE_LEGACY_SHADOW = "legacy_shadow"
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _SANITIZED_ERROR_TYPE_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
+_SCREENING_PROFILE_ID_PATTERN = re.compile(r"sp_[0-9a-f]{32}\Z")
+_SCREENING_PROFILE_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 class CaptureType(str, Enum):
@@ -2297,6 +2299,53 @@ class CandidateOcrDocument(JsonRecordMixin):
         return cls(**values)
 
 
+@dataclass(frozen=True)
+class ScreeningProfileBinding(JsonRecordMixin):
+    screening_profile_id: str
+    profile_version: int
+    criteria_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.screening_profile_id, str)
+            or _SCREENING_PROFILE_ID_PATTERN.fullmatch(
+                self.screening_profile_id
+            ) is None
+        ):
+            raise ValueError("screening profile ID is invalid")
+        if (
+            isinstance(self.profile_version, bool)
+            or not isinstance(self.profile_version, int)
+            or self.profile_version <= 0
+        ):
+            raise ValueError("screening profile version is invalid")
+        if (
+            not isinstance(self.criteria_digest, str)
+            or _SCREENING_PROFILE_DIGEST_PATTERN.fullmatch(
+                self.criteria_digest
+            ) is None
+        ):
+            raise ValueError("screening profile criteria digest is invalid")
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: Mapping[str, Any],
+    ) -> "ScreeningProfileBinding":
+        expected_fields = {
+            "screening_profile_id",
+            "profile_version",
+            "criteria_digest",
+        }
+        if not isinstance(data, Mapping) or set(data) != expected_fields:
+            raise ValueError("screening profile binding is incomplete or invalid")
+        return cls(
+            screening_profile_id=data["screening_profile_id"],
+            profile_version=data["profile_version"],
+            criteria_digest=data["criteria_digest"],
+        )
+
+
 @dataclass
 class RunManifest(JsonRecordMixin):
     run_id: str
@@ -2333,6 +2382,7 @@ class RunManifest(JsonRecordMixin):
     dynamic_end_version: Optional[str] = None
     dynamic_end_mode: Optional[str] = None
     dynamic_end_config: Optional[Dict[str, Any]] = None
+    screening_profile_binding: Optional[ScreeningProfileBinding] = None
     error_count: int = 0
     candidate_record_count: int = 0
     screen_record_count: int = 0
@@ -2341,6 +2391,14 @@ class RunManifest(JsonRecordMixin):
         validate_timezone_iso(self.started_at)
         if self.ended_at is not None:
             validate_timezone_iso(self.ended_at)
+        if (
+            self.screening_profile_binding is not None
+            and not isinstance(
+                self.screening_profile_binding,
+                ScreeningProfileBinding,
+            )
+        ):
+            raise ValueError("screening profile binding is invalid")
         validate_record_version(
             {"storage_schema_version": self.storage_schema_version},
             "storage_schema_version",
@@ -2461,6 +2519,13 @@ class RunManifest(JsonRecordMixin):
             SUPPORTED_STORAGE_SCHEMA_VERSIONS,
         )
         values = _known_values(cls, data)
+        binding = values.get("screening_profile_binding")
+        if binding is not None:
+            if not isinstance(binding, Mapping):
+                raise ValueError("screening profile binding must be an object or null")
+            values["screening_profile_binding"] = (
+                ScreeningProfileBinding.from_dict(binding)
+            )
         if storage_version in R05_AND_LATER_STORAGE_SCHEMA_VERSIONS:
             required_aggregation_fields = (
                 "aggregation_mode", "aggregation_version",

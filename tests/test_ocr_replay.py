@@ -19,6 +19,7 @@ from ocr_records import (
     OcrScreenRecord,
     RunManifest,
     RunStatus,
+    ScreeningProfileBinding,
     EffectiveNewStatus,
     SimilarityStatus,
     STORAGE_SCHEMA_VERSION,
@@ -211,6 +212,34 @@ class OcrRunReaderTests(unittest.TestCase):
         self.assertEqual(replay.candidates, [])
         self.assertEqual(replay.errors, [])
         self.assertEqual(replay.issues, [])
+
+    def test_bound_manifest_reads_without_mutating_source_run_json(self):
+        binding = ScreeningProfileBinding(
+            screening_profile_id="sp_" + "a" * 32,
+            profile_version=2,
+            criteria_digest="sha256:" + "b" * 64,
+        )
+        manifest = replace(self.manifest, screening_profile_binding=binding)
+        path = self.run_dir / "run.json"
+        source = manifest.to_json() + "\n"
+        path.write_text(source, encoding="utf-8")
+
+        restored = OcrRunReader(self.run_dir).read_manifest()
+
+        self.assertEqual(restored.screening_profile_binding, binding)
+        self.assertEqual(path.read_text(encoding="utf-8"), source)
+
+    def test_legacy_manifest_missing_binding_reads_none_without_backfill(self):
+        legacy = self.manifest.to_dict()
+        legacy.pop("screening_profile_binding")
+        path = self.run_dir / "run.json"
+        source = json.dumps(legacy, ensure_ascii=False) + "\n"
+        path.write_text(source, encoding="utf-8")
+
+        restored = OcrRunReader(self.run_dir).read_manifest()
+
+        self.assertIsNone(restored.screening_profile_binding)
+        self.assertEqual(path.read_text(encoding="utf-8"), source)
 
     def test_normal_multiline_chinese_records_restore_core_objects(self):
         screens = [self.make_screen("candidate-1", "一"), self.make_screen("candidate-2", "二")]
