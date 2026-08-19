@@ -2894,6 +2894,314 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(len(result.observations), 2)
 
 
+class CompleteCandidateScanTests(unittest.TestCase):
+    def setUp(self):
+        self.region = ScreenRegion(0, 0, 100, 100)
+
+    def _detector(self, pages, *, max_scans=3, callback=None, mode="shadow",
+                  scroll=None, wait=None, restore_focus=None,
+                  interrupt_reason_provider=None):
+        return OCRKeywordDetector(
+            backend=FakeBackend(pages),
+            capture=FakeCapture(),
+            region=self.region,
+            max_scans=max_scans,
+            scroll=Mock() if scroll is None else scroll,
+            wait=Mock() if wait is None else wait,
+            observation_callback=callback,
+            dynamic_end_config=DynamicEndConfig(mode=mode),
+            restore_focus=restore_focus,
+            interrupt_reason_provider=interrupt_reason_provider,
+        )
+
+    @staticmethod
+    def _callback_for_positions(*positions):
+        calls = 0
+
+        def callback(_observation, _capture_type, _formal, _screen_index):
+            nonlocal calls
+            position = positions[min(calls, len(positions) - 1)]
+            calls += 1
+            return SimpleNamespace(
+                record=SimpleNamespace(
+                    screen_id="complete-scan-{0}".format(calls),
+                    exact_hash=("a" if position != "changed" else "b") * 64,
+                ),
+                saved=True,
+                position_decision=PositionDecision(
+                    position,
+                    "initial" if position == "initial" else position,
+                    None if position == "initial" else "complete-scan-1",
+                    "complete-scan-test",
+                ),
+                load_health=True,
+                ocr_health=True,
+                identity_health=True,
+            )
+
+        return callback
+
+    def test_detect_empty_rules_preserves_legacy_zero_scan_fast_return(self):
+        callback = Mock()
+        scroll = Mock()
+        wait = Mock()
+        detector = self._detector(
+            ["Python"], callback=callback, scroll=scroll, wait=wait,
+        )
+
+        with patch.object(
+            detector,
+            "_match_observation",
+            side_effect=AssertionError("empty rules must not match"),
+        ):
+            result = detector.detect([])
+
+        self.assertIsInstance(result, DetectionResult)
+        self.assertTrue(result.success)
+        self.assertFalse(result.confirmed_match)
+        self.assertEqual(result.scans_completed, 0)
+        self.assertEqual(detector.capture.calls, 0)
+        self.assertEqual(detector.backend.calls, 0)
+        callback.assert_not_called()
+        scroll.assert_not_called()
+        wait.assert_not_called()
+
+    def test_scan_candidate_is_separate_rule_free_public_entry(self):
+        detector = self._detector(["complete scan"], max_scans=1)
+
+        result = detector.scan_candidate()
+
+        self.assertIsInstance(result, DetectionResult)
+        self.assertTrue(result.success)
+        self.assertFalse(result.confirmed_match)
+        self.assertIsNone(result.matched_keyword)
+        with self.assertRaises(TypeError):
+            detector.scan_candidate(rules=single_rule("Python"))
+
+    def test_scan_candidate_reuses_rule_neutral_first_observation_without_recapture(self):
+        detector = self._detector(["later evidence"], max_scans=2)
+        first = detector.capture_observation(1)
+        rule = single_rule("Python")[0]
+        first.matched_keyword = rule.source
+        first.matched_rule = rule
+        first.rule_comparison = object()
+        capture_count = detector.capture.calls
+        backend_count = detector.backend.calls
+
+        result = detector.scan_candidate(first)
+
+        self.assertEqual(detector.capture.calls, capture_count + 1)
+        self.assertEqual(detector.backend.calls, backend_count + 1)
+        self.assertIsNot(result.observations[0], first)
+        self.assertEqual(result.observations[0].text, first.text)
+        self.assertIsNone(result.observations[0].matched_keyword)
+        self.assertIsNone(result.observations[0].matched_rule)
+        self.assertIsNone(result.observations[0].rule_comparison)
+        self.assertEqual(first.matched_keyword, rule.source)
+        self.assertIs(first.matched_rule, rule)
+        self.assertIsNotNone(first.rule_comparison)
+        self.assertEqual(len(result.observations), 2)
+
+    def test_scan_candidate_never_calls_matcher_or_rule_confirmation(self):
+        callback_types = []
+
+        def callback(_observation, capture_type, _formal, _screen_index):
+            callback_types.append(capture_type)
+
+        wait = Mock()
+        detector = self._detector(
+            ["Python early evidence", "later evidence", "last evidence"],
+            callback=callback,
+            wait=wait,
+        )
+
+        with patch.object(
+            detector,
+            "_match_observation",
+            side_effect=AssertionError("complete scan must not match"),
+        ) as matcher, patch.object(
+            detector,
+            "_rule_confirmation_result",
+            side_effect=AssertionError("complete scan must not confirm"),
+        ) as confirmation, patch(
+            "ocr_detector.matching_keyword_rule",
+            side_effect=AssertionError("legacy matcher must be unreachable"),
+        ):
+            result = detector.scan_candidate()
+
+        self.assertEqual(matcher.call_count, 0)
+        self.assertEqual(confirmation.call_count, 0)
+        self.assertEqual(len(result.observations), 3)
+        self.assertIn("python", result.observations[0].text)
+        self.assertIn("later", result.observations[1].text)
+        self.assertEqual(callback_types, ["formal_screen"] * 3)
+        self.assertNotIn("rule_confirmation", callback_types)
+        self.assertEqual(wait.call_count, 2)
+        self.assertFalse(result.confirmed_match)
+        self.assertIsNone(result.matched_keyword)
+
+    def test_scan_candidate_rule_independence_for_identical_lifecycle_observations(self):
+        def run(matcher_result):
+            callback_types = []
+
+            def callback(_observation, capture_type, _formal, _screen_index):
+                callback_types.append(capture_type)
+
+            scroll = Mock()
+            detector = self._detector(
+                ["Python evidence", "later evidence"],
+                max_scans=2,
+                callback=callback,
+                scroll=scroll,
+            )
+            with patch(
+                "ocr_detector.matching_keyword_rule",
+                return_value=matcher_result,
+            ) as matcher, patch.object(
+                detector,
+                "_rule_confirmation_result",
+                return_value=DetectionResult(True, True),
+            ) as confirmation:
+                result = detector.scan_candidate()
+            return (
+                [observation.text for observation in result.observations],
+                callback_types,
+                detector.capture.calls,
+                detector.backend.calls,
+                scroll.call_count,
+                result.dynamic_end_reason,
+                result.confirmed_match,
+                result.matched_keyword,
+                matcher.call_count,
+                confirmation.call_count,
+            )
+
+        legacy_match = single_rule("Python")[0]
+        self.assertEqual(run(legacy_match), run(None))
+
+    def test_scan_candidate_uses_existing_dynamic_end_and_safety_limit(self):
+        bottom_scroll = Mock()
+        bottom = self._detector(
+            ["Python evidence"] * 3,
+            max_scans=4,
+            callback=self._callback_for_positions("initial", "same", "same"),
+            mode="safe",
+            scroll=bottom_scroll,
+            restore_focus=Mock(return_value=True),
+        )
+        bottom_result = bottom.scan_candidate()
+
+        self.assertEqual(bottom_result.dynamic_end_reason, "scroll_bottom")
+        self.assertEqual(bottom_result.scans_completed, 2)
+        self.assertEqual(bottom.capture.calls, 3)
+        self.assertEqual(bottom_scroll.call_count, 2)
+        self.assertFalse(bottom_result.confirmed_match)
+
+        limit_scroll = Mock()
+        limited = self._detector(
+            ["Python evidence", "later evidence"],
+            max_scans=2,
+            callback=self._callback_for_positions("initial", "changed"),
+            mode="safe",
+            scroll=limit_scroll,
+        )
+        limit_result = limited.scan_candidate()
+
+        self.assertEqual(limit_result.dynamic_end_reason, "max_screen_limit")
+        self.assertEqual(limit_result.scans_completed, 2)
+        self.assertEqual(limited.capture.calls, 2)
+        self.assertEqual(limit_scroll.call_count, 1)
+        self.assertIsNone(limit_result.abort_reason)
+
+    def test_scan_candidate_recovery_skips_rule_confirmation_and_preserves_focus_scroll_bounds(self):
+        callback_types = []
+
+        position_callback = self._callback_for_positions("initial", "same", "same")
+
+        def callback(observation, capture_type, formal, screen_index):
+            callback_types.append(capture_type)
+            return position_callback(observation, capture_type, formal, screen_index)
+
+        scroll = Mock()
+        wait = Mock()
+        restore_focus = Mock(return_value=True)
+        detector = self._detector(
+            ["Python evidence"] * 3,
+            max_scans=4,
+            callback=callback,
+            mode="safe",
+            scroll=scroll,
+            wait=wait,
+            restore_focus=restore_focus,
+        )
+
+        with patch.object(
+            detector,
+            "_match_observation",
+            side_effect=AssertionError("recovery must remain rule-neutral"),
+        ) as matcher, patch.object(
+            detector,
+            "_rule_confirmation_result",
+            side_effect=AssertionError("recovery must not confirm a rule"),
+        ) as confirmation:
+            result = detector.scan_candidate()
+
+        self.assertEqual(result.dynamic_end_reason, "scroll_bottom")
+        self.assertEqual(matcher.call_count, 0)
+        self.assertEqual(confirmation.call_count, 0)
+        self.assertEqual(callback_types, [
+            "formal_screen", "formal_screen", "position_confirmation",
+        ])
+        self.assertEqual(scroll.call_count, 2)
+        self.assertEqual(wait.call_count, 2)
+        restore_focus.assert_called_once()
+        self.assertEqual(detector.dynamic_end_state.focus_restore_count, 1)
+        self.assertEqual(detector.dynamic_end_state.scroll_retry_count, 1)
+
+    def test_scan_candidate_preserves_interrupt_abort_and_error_projection(self):
+        interrupted = self._detector(
+            ["Python evidence"],
+            max_scans=2,
+            callback=self._callback_for_positions("initial"),
+            mode="safe",
+            interrupt_reason_provider=lambda: "user_interrupted",
+        ).scan_candidate()
+        self.assertEqual(interrupted.interrupt_reason, "user_interrupted")
+        self.assertIsNone(interrupted.dynamic_end_reason)
+
+        aborted = self._detector(
+            ["Python evidence"],
+            max_scans=2,
+            callback=lambda *_args: SimpleNamespace(
+                record=None,
+                saved=False,
+                position_decision=None,
+                load_health=None,
+                ocr_health=None,
+                identity_health=None,
+            ),
+            mode="safe",
+        ).scan_candidate()
+        self.assertEqual(aborted.abort_reason, "store_failed")
+        self.assertIsNone(aborted.dynamic_end_reason)
+
+        class BrokenBackend:
+            def recognize(self, _image):
+                raise RuntimeError("complete scan OCR failure")
+
+        failed_detector = OCRKeywordDetector(
+            backend=BrokenBackend(),
+            capture=FakeCapture(),
+            region=self.region,
+            max_scans=1,
+            wait=lambda _seconds: None,
+        )
+        failed = failed_detector.scan_candidate()
+        self.assertFalse(failed.success)
+        self.assertIn("complete scan OCR failure", failed.error)
+        self.assertIsNone(failed.dynamic_end_reason)
+
+
 class RapidOCRAdapterTests(unittest.TestCase):
     def test_modern_result_object(self):
         class Result:

@@ -1496,7 +1496,7 @@ class OCRKeywordDetector:
 
     def _attempt_position_confirmation(
         self,
-        rules: Iterable[KeywordRule],
+        legacy_rules: Optional[Tuple[KeywordRule, ...]],
         observations: List[ScanObservation],
     ) -> Tuple[PositionConfirmationResult, Optional[DetectionResult]]:
         """Run the single safe/full recovery sequence without ending the scan."""
@@ -1555,10 +1555,11 @@ class OCRKeywordDetector:
         interrupt_reason = self._interrupt_reason()
         if interrupt_reason is not None:
             return PositionConfirmationResult(True, False, interrupt_reason), None
-        try:
-            confirmation = self._match_observation(confirmation, rules)
-        except Exception:
-            return PositionConfirmationResult(True, False, "ocr_failed"), None
+        if legacy_rules is not None:
+            try:
+                confirmation = self._match_observation(confirmation, legacy_rules)
+            except Exception:
+                return PositionConfirmationResult(True, False, "ocr_failed"), None
         observations.append(confirmation)
         pre_capture_type, pre_is_formal, pre_screen_index = (
             self._position_confirmation_capture_type(confirmation)
@@ -1587,7 +1588,10 @@ class OCRKeywordDetector:
         if is_formal_screen:
             self._consume_shadow_formal_callback(callback_result)
 
-        if confirmation.matched_rule is not None:
+        if (
+            legacy_rules is not None
+            and confirmation.matched_rule is not None
+        ):
             recovery = PositionConfirmationResult(
                 True, False, "rule_match",
                 record=getattr(callback_result, "record", None),
@@ -1739,9 +1743,40 @@ class OCRKeywordDetector:
         rules: Iterable[KeywordRule],
         first_observation: Optional[ScanObservation] = None,
     ) -> DetectionResult:
-        rules = list(rules)
-        if not rules:
+        legacy_rules = tuple(rules)
+        if not legacy_rules:
             return DetectionResult(success=True, confirmed_match=False)
+
+        return self._run_scan_lifecycle(
+            legacy_rules=legacy_rules,
+            first_observation=first_observation,
+        )
+
+    def scan_candidate(
+        self,
+        first_observation: Optional[ScanObservation] = None,
+    ) -> DetectionResult:
+        """Collect complete Candidate evidence without Legacy rule control."""
+
+        if first_observation is not None:
+            first_observation = replace(
+                first_observation,
+                matched_keyword=None,
+                matched_rule=None,
+                rule_comparison=None,
+            )
+        return self._run_scan_lifecycle(
+            legacy_rules=None,
+            first_observation=first_observation,
+        )
+
+    def _run_scan_lifecycle(
+        self,
+        *,
+        legacy_rules: Optional[Tuple[KeywordRule, ...]],
+        first_observation: Optional[ScanObservation],
+    ) -> DetectionResult:
+        """Run the existing scan lifecycle with optional Legacy rule control."""
 
         observations = []
         self.dynamic_end_state = DynamicEndState(mode=self.dynamic_end_config.mode)
@@ -1769,7 +1804,8 @@ class OCRKeywordDetector:
                 else:
                     first = self.capture_observation(scan_number)
                 bind_fingerprint_screen_index(first, scan_number)
-                first = self._match_observation(first, rules)
+                if legacy_rules is not None:
+                    first = self._match_observation(first, legacy_rules)
                 observations.append(first)
                 callback_result = self._notify_observation(
                     first,
@@ -1791,87 +1827,86 @@ class OCRKeywordDetector:
                         first.elapsed_seconds,
                         first.matched_keyword,
                     )
-                if first.matched_rule is None:
-                    control_result = self._safe_full_control_result(
+                if legacy_rules is not None and first.matched_rule is not None:
+                    # G5: In safe/full, check Store failure BEFORE entering rule
+                    # confirmation.  The frozen priority is: interrupt → Store/tech
+                    # failure → confirmed rule → slot limit → bottom → no-new → continue.
+                    # off/shadow keep legacy rule-early-stop behaviour unchanged.
+                    pre_rule_control = self._safe_full_control_result(
                         callback_result,
                         observations,
-                        allow_no_new=True,
+                        allow_no_new=False,
                     )
-                    if control_result is not None:
-                        return control_result
-                    if self._recovery_is_allowed(callback_result, scan_number):
-                        recovery, rule_result = self._attempt_position_confirmation(
-                            rules, observations,
-                        )
-                        self.last_position_confirmation = recovery
-                        self.saw_scroll_bottom_candidate = (
-                            self.saw_scroll_bottom_candidate
-                            or recovery.bottom_candidate
-                        )
-                        if rule_result is not None:
-                            return replace(
-                                rule_result,
-                                scroll_bottom_candidate=recovery.bottom_candidate,
-                                recovery_reason=recovery.reason,
-                            )
-                        if recovery.reason in (
-                            "user_interrupted", "runtime_expired",
-                        ):
-                            return DetectionResult(
-                                success=True,
-                                confirmed_match=False,
-                                scans_completed=self.dynamic_end_state.scan_slot_count,
-                                observations=observations,
-                                interrupt_reason=recovery.reason,
-                                recovery_reason=recovery.reason,
-                                **{
-                                    key: value
-                                    for key, value in self._dynamic_result_fields(
-                                        normal_completion=False,
-                                    ).items()
-                                    if key != "interrupt_reason"
-                                },
-                            )
-                        if recovery.reason not in (
-                            None, "scroll_bottom_candidate", "position_changed",
-                        ):
-                            return DetectionResult(
-                                success=True,
-                                confirmed_match=False,
-                                scans_completed=self.dynamic_end_state.scan_slot_count,
-                                observations=observations,
-                                abort_reason=recovery.reason,
-                                recovery_reason=recovery.reason,
-                                **self._dynamic_result_fields(normal_completion=False),
-                            )
-                        recovery_control = self._safe_full_control_result(
-                            self.last_observation_result,
-                            observations,
-                            allow_no_new=recovery.promoted_slot,
-                            scroll_bottom_confirmed=recovery.bottom_candidate,
-                            recovery_reason=recovery.reason,
-                        )
-                        if recovery_control is not None:
-                            return recovery_control
-                        if recovery.promoted_slot:
-                            promoted_slot_to_skip = scan_number + 1
-                    continue
+                    if pre_rule_control is not None:
+                        return pre_rule_control
 
-                # G5: In safe/full, check Store failure BEFORE entering rule
-                # confirmation.  The frozen priority is: interrupt → Store/tech
-                # failure → confirmed rule → slot limit → bottom → no-new → continue.
-                # off/shadow keep legacy rule-early-stop behaviour unchanged.
-                pre_rule_control = self._safe_full_control_result(
+                    return self._rule_confirmation_result(
+                        first, scan_number, observations,
+                    )
+
+                control_result = self._safe_full_control_result(
                     callback_result,
                     observations,
-                    allow_no_new=False,
+                    allow_no_new=True,
                 )
-                if pre_rule_control is not None:
-                    return pre_rule_control
-
-                return self._rule_confirmation_result(
-                    first, scan_number, observations,
-                )
+                if control_result is not None:
+                    return control_result
+                if self._recovery_is_allowed(callback_result, scan_number):
+                    recovery, rule_result = self._attempt_position_confirmation(
+                        legacy_rules, observations,
+                    )
+                    self.last_position_confirmation = recovery
+                    self.saw_scroll_bottom_candidate = (
+                        self.saw_scroll_bottom_candidate
+                        or recovery.bottom_candidate
+                    )
+                    if rule_result is not None:
+                        return replace(
+                            rule_result,
+                            scroll_bottom_candidate=recovery.bottom_candidate,
+                            recovery_reason=recovery.reason,
+                        )
+                    if recovery.reason in (
+                        "user_interrupted", "runtime_expired",
+                    ):
+                        return DetectionResult(
+                            success=True,
+                            confirmed_match=False,
+                            scans_completed=self.dynamic_end_state.scan_slot_count,
+                            observations=observations,
+                            interrupt_reason=recovery.reason,
+                            recovery_reason=recovery.reason,
+                            **{
+                                key: value
+                                for key, value in self._dynamic_result_fields(
+                                    normal_completion=False,
+                                ).items()
+                                if key != "interrupt_reason"
+                            },
+                        )
+                    if recovery.reason not in (
+                        None, "scroll_bottom_candidate", "position_changed",
+                    ):
+                        return DetectionResult(
+                            success=True,
+                            confirmed_match=False,
+                            scans_completed=self.dynamic_end_state.scan_slot_count,
+                            observations=observations,
+                            abort_reason=recovery.reason,
+                            recovery_reason=recovery.reason,
+                            **self._dynamic_result_fields(normal_completion=False),
+                        )
+                    recovery_control = self._safe_full_control_result(
+                        self.last_observation_result,
+                        observations,
+                        allow_no_new=recovery.promoted_slot,
+                        scroll_bottom_confirmed=recovery.bottom_candidate,
+                        recovery_reason=recovery.reason,
+                    )
+                    if recovery_control is not None:
+                        return recovery_control
+                    if recovery.promoted_slot:
+                        promoted_slot_to_skip = scan_number + 1
 
             return DetectionResult(
                 success=True,

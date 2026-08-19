@@ -492,6 +492,47 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         result = detector.detect(simple_brush.parse_keyword_rules('"不存在"'))
         return store, capture, scroll, wait, restore_focus, detector, result
 
+    def _run_complete_scan_detector(self, *, mode, texts, max_scans):
+        store = FakeStore()
+        self.start_builder(store)
+        capture = FakeCapture()
+        backend = Mock()
+        backend.recognize.side_effect = [
+            [self._recovery_item(text)] for text in texts
+        ]
+        scroll = Mock()
+        wait = Mock()
+        restore_focus = Mock(return_value=True)
+        detector = OCRKeywordDetector(
+            backend=backend,
+            capture=capture,
+            region=Mock(),
+            max_scans=max_scans,
+            scroll=scroll,
+            wait=wait,
+            observation_callback=simple_brush.record_detection_observation,
+            dynamic_end_config=DynamicEndConfig(mode=mode),
+            restore_focus=restore_focus,
+        )
+        simple_brush.ocr_detector = detector
+        result = detector.scan_candidate()
+        status, end_reason = simple_brush.candidate_capture_status(result)
+        document = simple_brush.finalize_current_candidate_recording(
+            status,
+            end_reason,
+            detection_result=result,
+        )
+        return (
+            store,
+            capture,
+            scroll,
+            wait,
+            restore_focus,
+            detector,
+            result,
+            document,
+        )
+
     def test_shadow_and_off_keep_first_same_recovery_side_effect_free(self):
         for mode in ("off", "shadow"):
             with self.subTest(mode=mode):
@@ -625,6 +666,106 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             simple_brush.candidate_capture_status(result),
             (CaptureStatus.COMPLETED_WITH_LIMIT, "scroll_bottom"),
         )
+
+    def test_complete_scan_collects_later_screens_into_existing_candidate_document(self):
+        same_text = "Python 命中样式文本仍应作为完整候选人证据继续采集" * 2
+        (
+            store,
+            capture,
+            scroll,
+            wait,
+            restore,
+            detector,
+            result,
+            document,
+        ) = self._run_complete_scan_detector(
+            mode="safe",
+            texts=(same_text,) * 3,
+            max_scans=3,
+        )
+
+        self.assertFalse(result.confirmed_match)
+        self.assertIsNone(result.matched_keyword)
+        self.assertEqual(result.dynamic_end_reason, "scroll_bottom")
+        self.assertEqual(capture.calls, 3)
+        self.assertEqual(scroll.call_count, 2)
+        self.assertEqual(wait.call_count, 2)
+        restore.assert_called_once()
+        self.assertEqual([record.capture_type for record in store.screens], [
+            CaptureType.FORMAL_SCREEN,
+            CaptureType.FORMAL_SCREEN,
+            CaptureType.POSITION_CONFIRMATION,
+        ])
+        self.assertNotIn(
+            "rule_confirmation",
+            [record.capture_type.value for record in store.screens],
+        )
+        self.assertIsInstance(document, CandidateOcrDocument)
+        self.assertEqual(document.screens, tuple(store.screens))
+        self.assertEqual(document.capture_status, CaptureStatus.COMPLETED_WITH_LIMIT)
+        self.assertEqual(document.capture_summary.end_reason, "scroll_bottom")
+        self.assertEqual(document.dynamic_end_reason, "scroll_bottom")
+        self.assertTrue(all(
+            observation.matched_rule is None
+            and observation.rule_comparison is None
+            for observation in result.observations
+        ))
+        self.assertEqual(detector.dynamic_end_state.ocr_attempt_count, 3)
+
+    def test_complete_scan_preserves_existing_completion_reason_projection(self):
+        normal_text = "Python 形式的普通完整证据不会触发业务提前结束" * 2
+        (
+            _normal_store,
+            _normal_capture,
+            _normal_scroll,
+            _normal_wait,
+            _normal_restore,
+            _normal_detector,
+            normal_result,
+            normal_document,
+        ) = self._run_complete_scan_detector(
+            mode="safe",
+            texts=(normal_text,) * 3,
+            max_scans=3,
+        )
+        limit_texts = tuple(
+            "第{0}个不同的完整候选人页面证据".format(index) * 3
+            for index in range(1, 3)
+        )
+        (
+            _limit_store,
+            limit_capture,
+            limit_scroll,
+            _limit_wait,
+            limit_restore,
+            _limit_detector,
+            limit_result,
+            limit_document,
+        ) = self._run_complete_scan_detector(
+            mode="safe",
+            texts=limit_texts,
+            max_scans=2,
+        )
+
+        self.assertEqual(normal_result.dynamic_end_reason, "scroll_bottom")
+        self.assertEqual(
+            normal_document.capture_summary.end_reason,
+            "scroll_bottom",
+        )
+        self.assertEqual(normal_document.dynamic_end_reason, "scroll_bottom")
+        self.assertEqual(limit_result.dynamic_end_reason, "max_screen_limit")
+        self.assertEqual(
+            limit_document.capture_summary.end_reason,
+            "max_screen_limit",
+        )
+        self.assertEqual(limit_document.dynamic_end_reason, "max_screen_limit")
+        self.assertNotEqual(
+            normal_document.capture_summary.end_reason,
+            limit_document.capture_summary.end_reason,
+        )
+        self.assertEqual(limit_capture.calls, 2)
+        limit_scroll.assert_called_once()
+        limit_restore.assert_not_called()
 
     def test_full_scroll_bottom_finalizes_completed_with_limit_candidate(self):
         same_text = "Full 配置滚动到底的合成候选人内容" * 3
