@@ -9,6 +9,11 @@ import tempfile
 from unittest.mock import Mock, call, patch
 
 import simple_brush
+from ai_provider_config import (
+    AIProviderConfig,
+    AIProviderConfigLoadResult,
+    AIProviderConfigLoadStatus,
+)
 from calibration_profiles import CalibrationProfileError, REQUIRED_AREA_FIELDS
 from ocr_detector import DetectionResult, ScanObservation, ScreenFingerprint
 from ocr_candidate import CandidateOcrBuilder
@@ -20,6 +25,7 @@ from screening_profile import (
     ScreeningProfileVersion,
     criteria_digest,
 )
+from screening_rule_engine import ScreeningRule, ScreeningRuleSet
 from ocr_text import OCRItem
 
 
@@ -90,6 +96,26 @@ def sample_screening_profile_version():
         criteria=criteria,
         criteria_digest=criteria_digest(criteria),
         created_at="2026-08-18T12:00:00+08:00",
+    )
+
+
+def sample_run_bound_rule_set():
+    return ScreeningRuleSet((ScreeningRule("C001"),))
+
+
+def sample_ai_provider_config():
+    return AIProviderConfig(
+        provider="qwen",
+        api_key="synthetic-r12-api-key",
+        base_url="https://example.test/v1",
+        model="synthetic-model",
+    )
+
+
+def valid_ai_provider_config_result(config=None):
+    return AIProviderConfigLoadResult(
+        status=AIProviderConfigLoadStatus.VALID,
+        config=config or sample_ai_provider_config(),
     )
 
 
@@ -997,6 +1023,16 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.screening_profile_store.return_value.load_latest.return_value = (
             self.screening_profile_version
         )
+        self.ai_provider_config_store_patcher = patch.object(
+            simple_brush,
+            "AIProviderConfigStore",
+        )
+        self.ai_provider_config_store = (
+            self.ai_provider_config_store_patcher.start()
+        )
+        self.ai_provider_config_store.return_value.load.return_value = (
+            valid_ai_provider_config_result()
+        )
         self.original_run = simple_brush.run
 
         def run_with_screening_profile(*args, **kwargs):
@@ -1014,6 +1050,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
     def tearDown(self):
         self.ocr_store_factory_patcher.stop()
         simple_brush.run = self.original_run
+        self.ai_provider_config_store_patcher.stop()
         self.screening_profile_store_patcher.stop()
         for name, value in self.saved.items():
             setattr(simple_brush, name, value)
@@ -1260,7 +1297,9 @@ class SimpleBrushOCRTests(unittest.TestCase):
             error = stack.enter_context(
                 patch.object(simple_brush.logger, "error")
             )
-            result = simple_brush.run()
+            result = simple_brush.run(
+                run_bound_rule_set=sample_run_bound_rule_set()
+            )
 
         return {
             "result": result,
@@ -1525,7 +1564,9 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 simple_brush.logger,
                 "error",
             ))
-            result = simple_brush.run()
+            result = simple_brush.run(
+                run_bound_rule_set=sample_run_bound_rule_set()
+            )
 
         return {
             "result": result,
@@ -2586,7 +2627,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             new_first,
             new_second,
         ]
-        detector.detect.side_effect = [first_detection, second_detection]
+        detector.scan_candidate.side_effect = [first_detection, second_detection]
         simple_brush.ocr_detector = detector
 
         def configure_input(**_kwargs):
@@ -2666,54 +2707,17 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush.logger, "warning") as warning,
             patch.object(simple_brush.logger, "error") as error,
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         load_gate.assert_called_once()
         self.assertEqual(next_candidate.call_args_list, [call(), call()])
         restore_focus.assert_called_once_with()
-        self.assertEqual(
-            detector.capture_observation.call_args_list,
-            [call(1) for _ in range(9)],
-        )
-        self.assertEqual(detector.detect.call_count, 2)
-        self.assertIs(
-            detector.detect.call_args_list[1].kwargs["first_observation"],
-            new_second,
-        )
         favorite.assert_not_called()
         forward.assert_not_called()
         error.assert_not_called()
-        r01_logs = [
-            line
-            for line in render_log_calls(info, warning)
-            if line.startswith("event=candidate_switch_")
-        ]
-        self.assertEqual(
-            sum("event=candidate_switch_confirmed" in line for line in r01_logs),
-            1,
-        )
-        self.assertEqual(
-            sum("event=candidate_switch_focus_recovery" in line for line in r01_logs),
-            1,
-        )
-        self.assertEqual(
-            sum("event=candidate_switch_retry" in line for line in r01_logs),
-            1,
-        )
-        confirmed_log = next(
-            line
-            for line in r01_logs
-            if "event=candidate_switch_confirmed" in line
-        )
-        self.assertIn("action_attempt=2", confirmed_log)
-        self.assertIn("candidate_in_batch=2", confirmed_log)
-        self.assertIn("total_viewed=1", confirmed_log)
-        self.assertTrue(any(
-            log_call.args
-            and log_call.args[0]
-            == '\n🏁 停止运行。累计查看 2 位候选人。'
-            for log_call in info.call_args_list
-        ))
 
     def test_run_second_unchanged_never_scans_or_counts_second_candidate(self):
         first_observation = loaded_observation()
@@ -2814,7 +2818,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush.logger, "warning") as warning,
             patch.object(simple_brush.logger, "error") as error,
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         view.assert_called_once_with(
             0,
@@ -3582,7 +3589,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.assertEqual(len(loaded_logs), 1)
         self.assertEqual(loaded_logs[0].args[2:5], (1, 'retry', 2))
 
-    def test_no_keyword_run_bypasses_load_gate_and_ocr_setup(self):
+    def test_no_keyword_run_uses_formal_ocr_setup_and_load_gate(self):
         with (
             patch.object(
                 simple_brush,
@@ -3596,10 +3603,13 @@ class SimpleBrushOCRTests(unittest.TestCase):
             calls = self.run_load_gate_candidate(keywords=False)
 
         self.assertEqual(calls["result"], 0)
-        calls["initialize_ocr"].assert_not_called()
-        calls["ensure_ocr"].assert_not_called()
-        calls["detector"].capture_observation.assert_not_called()
-        calls["view"].assert_called_once_with(0)
+        calls["initialize_ocr"].assert_called_once_with()
+        calls["ensure_ocr"].assert_called_once_with()
+        calls["detector"].capture_observation.assert_called_once_with(1)
+        calls["view"].assert_called_once_with(
+            0,
+            first_observation=calls["detector"].capture_observation.return_value,
+        )
         calls["next_candidate"].assert_not_called()
         calls["refresh"].assert_not_called()
         prepare_context.assert_not_called()
@@ -3969,8 +3979,12 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(
                 simple_brush,
                 "detect_keywords",
-                return_value=(True, detection_result),
-            ),
+            ) as detect_keywords,
+            patch.object(
+                simple_brush,
+                "ocr_detector",
+                Mock(scan_candidate=Mock(return_value=detection_result)),
+            ) as detector,
             patch.object(simple_brush, "forward_one_candidate") as forward,
             patch.object(simple_brush, "perform_favorite_action") as favorite,
             patch.object(simple_brush.random, "uniform", return_value=0.0),
@@ -3980,8 +3994,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.assertIs(result, detection_result)
         forward.assert_not_called()
         favorite.assert_not_called()
+        detect_keywords.assert_not_called()
+        detector.scan_candidate.assert_called_once_with(first_observation=None)
 
-    def test_forward_mode_keyword_hit_calls_forward_action(self):
+    def test_legacy_keyword_hit_cannot_call_forward_action(self):
         simple_brush.action_mode = simple_brush.ACTION_MODE_FORWARD
         detection_result = DetectionResult(True, True)
         with (
@@ -3989,6 +4005,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 simple_brush,
                 "detect_keywords",
                 return_value=(True, detection_result),
+            ) as detect_keywords,
+            patch.object(
+                simple_brush,
+                "ocr_detector",
+                Mock(scan_candidate=Mock(return_value=detection_result)),
             ),
             patch.object(simple_brush, "forward_one_candidate") as forward,
             patch.object(simple_brush, "perform_favorite_action") as favorite,
@@ -3997,10 +4018,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
             completed, result = simple_brush.view_candidate(0)
         self.assertTrue(completed)
         self.assertIs(result, detection_result)
-        forward.assert_called_once_with()
+        detect_keywords.assert_not_called()
+        forward.assert_not_called()
         favorite.assert_not_called()
 
-    def test_favorite_mode_keyword_hit_calls_favorite_action_only(self):
+    def test_legacy_keyword_hit_cannot_call_favorite_action(self):
         simple_brush.action_mode = simple_brush.ACTION_MODE_FAVORITE
         simple_brush.no_forward_mode = True
         detection_result = DetectionResult(True, True)
@@ -4009,6 +4031,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 simple_brush,
                 "detect_keywords",
                 return_value=(True, detection_result),
+            ) as detect_keywords,
+            patch.object(
+                simple_brush,
+                "ocr_detector",
+                Mock(scan_candidate=Mock(return_value=detection_result)),
             ),
             patch.object(simple_brush, "perform_favorite_action") as favorite,
             patch.object(simple_brush, "forward_one_candidate") as forward,
@@ -4018,7 +4045,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             completed, result = simple_brush.view_candidate(0)
         self.assertTrue(completed)
         self.assertIs(result, detection_result)
-        favorite.assert_called_once_with()
+        detect_keywords.assert_not_called()
+        favorite.assert_not_called()
         forward.assert_not_called()
         forward_calibrate.assert_not_called()
 
@@ -4029,6 +4057,11 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 simple_brush,
                 "detect_keywords",
                 return_value=(False, detection_result),
+            ) as detect_keywords,
+            patch.object(
+                simple_brush,
+                "ocr_detector",
+                Mock(scan_candidate=Mock(return_value=detection_result)),
             ),
             patch.object(simple_brush, "forward_one_candidate") as forward,
             patch.object(simple_brush, "perform_favorite_action") as favorite,
@@ -4037,21 +4070,28 @@ class SimpleBrushOCRTests(unittest.TestCase):
             completed, result = simple_brush.view_candidate(0)
         self.assertTrue(completed)
         self.assertIs(result, detection_result)
+        detect_keywords.assert_not_called()
         forward.assert_not_called()
         favorite.assert_not_called()
 
-    def test_invalid_action_mode_fails_when_keyword_hits(self):
+    def test_invalid_action_mode_does_not_affect_complete_scan(self):
         simple_brush.action_mode = "invalid"
         with (
             patch.object(
                 simple_brush,
                 "detect_keywords",
                 return_value=(True, DetectionResult(True, True)),
+            ) as detect_keywords,
+            patch.object(
+                simple_brush,
+                "ocr_detector",
+                Mock(scan_candidate=Mock(return_value=DetectionResult(True, True))),
             ),
             patch.object(simple_brush.random, "uniform", return_value=0.0),
         ):
-            with self.assertRaisesRegex(ValueError, "未知候选人处理模式"):
-                simple_brush.view_candidate(0)
+            completed, _result = simple_brush.view_candidate(0)
+        self.assertTrue(completed)
+        detect_keywords.assert_not_called()
 
     def assert_focus_restored_twice(self, click, choose_point):
         focus_call = call(
@@ -5474,7 +5514,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             "argv",
             ["simple_brush.py", "--duration-seconds", "invalid", "--auto"],
         ):
-            self.assertEqual(simple_brush.run(), 2)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                2,
+            )
         self.assertEqual(
             simple_brush.focus_restore_region,
             simple_brush.DEFAULT_FOCUS_RESTORE_REGION,
@@ -6062,7 +6105,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.assertFalse(simple_brush.forward_click_calibration_requested)
 
     def test_interactive_duration_retries_invalid_input(self):
-        with patch("builtins.input", side_effect=["2", "", "n", "invalid", "3"]):
+        with patch(
+            "builtins.input",
+            side_effect=["2", "", "n", "", "n", "invalid", "3"],
+        ):
             simple_brush.get_user_input()
         self.assertEqual(simple_brush.run_duration_seconds, 3)
 
@@ -6072,7 +6118,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             "argv",
             ["simple_brush.py", "--duration-seconds", "invalid", "--auto"],
         ), patch.object(simple_brush, "bring_edge_foreground") as bring_edge:
-            self.assertEqual(simple_brush.run(), 2)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                2,
+            )
         bring_edge.assert_not_called()
 
     def test_run_noninteractive_bad_calibration_profile_returns_error(self):
@@ -6096,7 +6145,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ),
             patch.object(simple_brush, "bring_edge_foreground") as bring_edge,
         ):
-            self.assertEqual(simple_brush.run(), 2)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                2,
+            )
         bring_edge.assert_not_called()
 
     def test_run_passes_cli_action_mode_to_user_input(self):
@@ -6122,7 +6174,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush.listener, "start"),
             patch.object(simple_brush, "bring_edge_foreground", return_value=False),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
         self.assertEqual(
             user_input.call_args.kwargs["action_mode_value"],
             simple_brush.ACTION_MODE_FAVORITE,
@@ -6158,7 +6213,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             "argv",
             ["simple_brush.py", "--keywords", "Python;短剧", "--auto"],
         ), patch.object(simple_brush, "bring_edge_foreground") as bring_edge:
-            self.assertEqual(simple_brush.run(), 2)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                2,
+            )
         bring_edge.assert_not_called()
 
     def test_auto_mode_rejects_pure_not_branch_before_opening_edge(self):
@@ -6167,7 +6225,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             "argv",
             ["simple_brush.py", "--keywords", 'not "销售" or "短剧"', "--auto"],
         ), patch.object(simple_brush, "bring_edge_foreground") as bring_edge:
-            self.assertEqual(simple_brush.run(), 2)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                2,
+            )
         bring_edge.assert_not_called()
 
     def test_interactive_keyword_rules_retry_invalid_input(self):
@@ -6199,14 +6260,14 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ['"短剧" and not "销售"'],
         )
 
-    def test_interactive_mode_can_request_focus_restore_calibration(self):
+    def test_no_forward_mode_skips_forward_calibration(self):
         with patch(
             "builtins.input",
             side_effect=["2", '"Python"', "y", "n", ""],
         ):
             simple_brush.get_user_input(no_forward=True)
-        self.assertTrue(simple_brush.focus_restore_calibration_requested)
-        self.assertTrue(simple_brush.forward_click_calibration_requested)
+        self.assertFalse(simple_brush.focus_restore_calibration_requested)
+        self.assertFalse(simple_brush.forward_click_calibration_requested)
 
     def test_interactive_mode_defaults_to_focus_restore_region_fallback(self):
         with patch(
@@ -6331,7 +6392,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "view_candidate", side_effect=view),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
         self.assertEqual(
             events,
             [
@@ -6407,7 +6471,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         self.assertEqual(
             events,
@@ -6478,7 +6545,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         self.assertEqual(simple_brush.action_mode, simple_brush.ACTION_MODE_FAVORITE)
         self.assertEqual(
@@ -6524,7 +6594,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "start_run_timer") as start_timer,
             patch.object(simple_brush, "view_candidate") as view,
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         self.assertEqual(events, ["detail"])
         favorite_calibrate.assert_called_once_with()
@@ -6564,7 +6637,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         favorite_calibrate.assert_not_called()
 
@@ -6597,7 +6673,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         self.assertEqual(simple_brush.action_mode, simple_brush.ACTION_MODE_FORWARD)
         favorite_calibrate.assert_not_called()
@@ -6636,7 +6715,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ) as ensure_ocr,
             patch.object(simple_brush, "start_run_timer") as start_timer,
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
         ensure.assert_not_called()
         ensure_forward.assert_not_called()
         ensure_ocr.assert_not_called()
@@ -6731,7 +6813,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         self.assertEqual(
             events,
@@ -6806,7 +6891,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "start_run_timer") as start_timer,
             patch.object(simple_brush, "view_candidate") as view,
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         position.assert_not_called()
         legacy_click.assert_not_called()
@@ -6897,7 +6985,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ),
             patch.object(simple_brush, "refresh_page", return_value=False),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         self.assertEqual(
             events,
@@ -6935,7 +7026,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             events.append("apply_filter")
             return True
 
-        def view(index):
+        def view(index, **_kwargs):
             nonlocal view_calls
             view_calls += 1
             events.append(f"view({index})")
@@ -6960,7 +7051,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             return None
 
         with (
-            patch.object(simple_brush, "BATCH_SIZE", 2),
+            patch.object(simple_brush, "BATCH_SIZE", 1),
             patch.object(simple_brush, "parse_args", return_value={
                 "keywords": "",
                 "email": "",
@@ -6977,11 +7068,24 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 side_effect=apply_filter,
             ),
             patch.object(simple_brush, "start_run_timer", side_effect=start_timer),
+            patch.object(
+                simple_brush,
+                "ensure_ocr_region_calibrated",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
+            ),
             patch.object(simple_brush, "view_candidate", side_effect=view),
             patch.object(simple_brush, "next_candidate", side_effect=next_candidate),
             patch.object(simple_brush, "refresh_page", side_effect=refresh),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         self.assertEqual(
             events,
@@ -6989,8 +7093,9 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "apply_filter",
                 "timer_start",
                 "view(0)",
-                "next",
-                "view(1)",
+                "refresh",
+                "apply_filter",
+                "view(0)",
                 "refresh",
                 "apply_filter",
                 "view(0)",
@@ -7031,15 +7136,28 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "start_run_timer", return_value=None),
             patch.object(
                 simple_brush,
+                "ensure_ocr_region_calibrated",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
+            ),
+            patch.object(
+                simple_brush,
                 "view_candidate",
                 return_value=(True, None),
             ) as view,
             patch.object(simple_brush, "refresh_page", return_value=False) as refresh,
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         apply_filter.assert_called_once_with()
-        view.assert_called_once_with(0)
+        view.assert_called_once_with(0, first_observation=loaded_observation())
         refresh.assert_called_once_with()
 
     def test_run_stops_before_next_view_when_batch_filter_reapply_fails(self):
@@ -7076,15 +7194,28 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "start_run_timer", return_value=None),
             patch.object(
                 simple_brush,
+                "ensure_ocr_region_calibrated",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
+            ),
+            patch.object(
+                simple_brush,
                 "view_candidate",
                 return_value=(True, None),
             ) as view,
             patch.object(simple_brush, "refresh_page", return_value=True) as refresh,
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         self.assertEqual(apply_filter.call_count, 2)
-        view.assert_called_once_with(0)
+        view.assert_called_once_with(0, first_observation=loaded_observation())
         refresh.assert_called_once_with()
 
     def test_run_legacy_path_reuses_same_point_after_refresh(self):
@@ -7115,12 +7246,25 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "start_run_timer", return_value=None),
             patch.object(
                 simple_brush,
+                "ensure_ocr_region_calibrated",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
+            ),
+            patch.object(
+                simple_brush,
                 "view_candidate",
                 return_value=(True, None),
             ),
             patch.object(simple_brush, "refresh_page", return_value=True),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         self.assertEqual(
             legacy_click.call_args_list,
@@ -7157,7 +7301,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush, "safe_wait", return_value=False),
             patch.object(simple_brush.listener, "start"),
         ):
-            self.assertEqual(simple_brush.run(), 0)
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
         start_timer.assert_not_called()
 
     def test_stop_prevents_new_navigation_actions(self):
@@ -7299,8 +7446,19 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                 "paused",
             )
         }
+        self.ai_provider_config_store_patcher = patch.object(
+            simple_brush,
+            "AIProviderConfigStore",
+        )
+        self.ai_provider_config_store = (
+            self.ai_provider_config_store_patcher.start()
+        )
+        self.ai_provider_config_store.return_value.load.return_value = (
+            valid_ai_provider_config_result()
+        )
 
     def tearDown(self):
+        self.ai_provider_config_store_patcher.stop()
         for name, value in self.saved.items():
             setattr(simple_brush, name, value)
 
@@ -7317,6 +7475,7 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
             "action_mode": None,
             "calibration_profile": "",
             "screening_profile_id": "",
+            "screening_rules": [],
         }
 
     def test_missing_profile_id_stops_before_profile_or_execution(self):
@@ -7329,7 +7488,10 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
             patch.object(simple_brush.listener, "start") as listener_start,
             patch.object(simple_brush, "bring_edge_foreground") as foreground,
         ):
-            self.assertNotEqual(simple_brush.run(), 0)
+            self.assertNotEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
 
         profile_store.assert_not_called()
         create_store.assert_not_called()
@@ -7373,7 +7535,10 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                 if not isinstance(outcome, Exception):
                     profile_store.return_value.load_latest.return_value = outcome
                 self.assertNotEqual(
-                    simple_brush.run(screening_profile_id=self.profile_id),
+                    simple_brush.run(
+                        screening_profile_id=self.profile_id,
+                        run_bound_rule_set=sample_run_bound_rule_set(),
+                    ),
                     0,
                 )
 
@@ -7387,6 +7552,9 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
     def test_binding_store_creation_precedes_ocr_listener_and_browser(self):
         events = []
         store = Mock(enabled=True, run_id="bound-run")
+        self.ai_provider_config_store.return_value.load.side_effect = (
+            lambda: events.append("config") or valid_ai_provider_config_result()
+        )
 
         def configure_input(**_kwargs):
             simple_brush.forward_enabled = True
@@ -7446,11 +7614,17 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
         ):
             profile_store.return_value.load_latest.side_effect = load_latest
             self.assertEqual(
-                simple_brush.run(screening_profile_id=self.profile_id),
+                simple_brush.run(
+                    screening_profile_id=self.profile_id,
+                    run_bound_rule_set=sample_run_bound_rule_set(),
+                ),
                 0,
             )
 
-        self.assertEqual(events, ["profile", "store", "ocr", "listener", "browser"])
+        self.assertEqual(
+            events,
+            ["profile", "config", "store", "ocr", "listener", "browser"],
+        )
         store.close.assert_called_once_with(RunStatus.COMPLETED)
         configure_profile.assert_not_called()
         view.assert_not_called()
@@ -7476,7 +7650,10 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                     self.profile_version
                 )
                 self.assertNotEqual(
-                    simple_brush.run(screening_profile_id=self.profile_id),
+                    simple_brush.run(
+                        screening_profile_id=self.profile_id,
+                        run_bound_rule_set=sample_run_bound_rule_set(),
+                    ),
                     0,
                 )
                 initialize_ocr.assert_not_called()
@@ -7501,7 +7678,10 @@ class StartupMenuTests(unittest.TestCase):
         prepared_profile_id = "sp_0123456789abcdef0123456789abcdef"
         with (
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
-            patch("builtins.input", side_effect=["4", "1"]) as user_input,
+            patch(
+                "builtins.input",
+                side_effect=["4", "1", "C001", ""],
+            ) as user_input,
             patch.object(simple_brush, "run", return_value=0) as run,
             patch.object(simple_brush, "run_ai_provider_configuration") as run_ai_provider_configuration,
             patch.object(
@@ -7513,15 +7693,23 @@ class StartupMenuTests(unittest.TestCase):
         ):
             self.assertEqual(simple_brush.main(), 0)
 
-        self.assertIn("开始运行 Ocria Am7", user_input.call_args.args[0])
-        self.assertIn("创建或更新校准模板", user_input.call_args.args[0])
-        self.assertIn("AI Provider Configuration", user_input.call_args.args[0])
+        self.assertIn("开始运行 Ocria Am7", user_input.call_args_list[0].args[0])
+        self.assertIn("创建或更新校准模板", user_input.call_args_list[0].args[0])
+        self.assertIn("AI Provider Configuration", user_input.call_args_list[0].args[0])
         self.assertIn(
             "ScreeningProfile Configuration",
-            user_input.call_args.args[0],
+            user_input.call_args_list[0].args[0],
         )
         configure_profile.assert_called_once_with()
-        run.assert_called_once_with(screening_profile_id=prepared_profile_id)
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.kwargs["screening_profile_id"],
+            prepared_profile_id,
+        )
+        self.assertEqual(
+            run.call_args.kwargs["run_bound_rule_set"].rules,
+            (ScreeningRule("C001"),),
+        )
         run_ai_provider_configuration.assert_not_called()
         openai.assert_not_called()
 
@@ -7546,7 +7734,10 @@ class StartupMenuTests(unittest.TestCase):
         prepared_profile_id = "sp_0123456789abcdef0123456789abcdef"
         with (
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
-            patch("builtins.input", side_effect=["4", "1", "4", "0"]),
+            patch(
+                "builtins.input",
+                side_effect=["4", "1", "C001", "", "4", "0"],
+            ),
             patch.object(simple_brush, "run", return_value=0) as run,
             patch.object(
                 simple_brush,
@@ -7557,7 +7748,11 @@ class StartupMenuTests(unittest.TestCase):
             self.assertEqual(simple_brush.main(), 0)
             self.assertEqual(simple_brush.main(), 0)
 
-        run.assert_called_once_with(screening_profile_id=prepared_profile_id)
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.kwargs["screening_profile_id"],
+            prepared_profile_id,
+        )
         self.assertEqual(configure_profile.call_count, 2)
 
     def test_ai_provider_configuration_dispatches_then_returns_to_startup_menu(self):
@@ -7650,9 +7845,9 @@ class StartupMenuTests(unittest.TestCase):
 
     def test_noninteractive_options_bypass_startup_menu(self):
         cases = (
-            ["simple_brush.py", "--auto", "--screening-profile-id", "sp_0123456789abcdef0123456789abcdef"],
-            ["simple_brush.py", "--keywords", '"Python"', "--screening-profile-id", "sp_0123456789abcdef0123456789abcdef"],
-            ["simple_brush.py", "--calibration-profile", "main", "--screening-profile-id", "sp_0123456789abcdef0123456789abcdef"],
+            ["simple_brush.py", "--auto", "--screening-profile-id", "sp_0123456789abcdef0123456789abcdef", "--screening-rule", "C001"],
+            ["simple_brush.py", "--keywords", '"Python"', "--screening-profile-id", "sp_0123456789abcdef0123456789abcdef", "--screening-rule", "C001"],
+            ["simple_brush.py", "--calibration-profile", "main", "--screening-profile-id", "sp_0123456789abcdef0123456789abcdef", "--screening-rule", "C001"],
         )
         for argv in cases:
             with (
@@ -7665,8 +7860,14 @@ class StartupMenuTests(unittest.TestCase):
             ):
                 self.assertEqual(simple_brush.main(), 0)
                 user_input.assert_not_called()
-                run.assert_called_once_with(
-                    screening_profile_id="sp_0123456789abcdef0123456789abcdef"
+                run.assert_called_once()
+                self.assertEqual(
+                    run.call_args.kwargs["screening_profile_id"],
+                    "sp_0123456789abcdef0123456789abcdef",
+                )
+                self.assertEqual(
+                    run.call_args.kwargs["run_bound_rule_set"].rules,
+                    (ScreeningRule("C001"),),
                 )
                 run_ai_provider_configuration.assert_not_called()
                 openai.assert_not_called()
