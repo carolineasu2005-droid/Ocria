@@ -14,10 +14,14 @@ from ai_provider_config import (
     AIProviderConfigLoadResult,
     AIProviderConfigLoadStatus,
 )
+from ai_screening_persistence import (
+    AIPersistenceIntegrityError,
+    AIScreeningRecordStore,
+)
 from calibration_profiles import CalibrationProfileError, REQUIRED_AREA_FIELDS
 from ocr_detector import DetectionResult, ScanObservation, ScreenFingerprint
 from ocr_candidate import CandidateOcrBuilder
-from ocr_records import CaptureStatus, CaptureType, RunStatus
+from ocr_records import CandidateOcrDocument, CaptureStatus, CaptureType, RunStatus
 from screening_profile import (
     Criterion,
     ScreeningProfileIOError,
@@ -1008,7 +1012,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.run_ocr_store = Mock(
             enabled=True,
             run_id="run-test-store",
+            run_dir=Path("synthetic-test-run"),
         )
+        self.r13_store = Mock(spec=AIScreeningRecordStore)
+        self.r13_store.run_id = self.run_ocr_store.run_id
         self.screening_profile_version = sample_screening_profile_version()
         self.screening_profile_id = (
             self.screening_profile_version.screening_profile_id
@@ -1046,8 +1053,15 @@ class SimpleBrushOCRTests(unittest.TestCase):
             return_value=self.run_ocr_store,
         )
         self.ocr_store_factory_patcher.start()
+        self.r13_store_factory_patcher = patch.object(
+            simple_brush,
+            "AIScreeningRecordStore",
+            return_value=self.r13_store,
+        )
+        self.r13_store_factory_patcher.start()
 
     def tearDown(self):
+        self.r13_store_factory_patcher.stop()
         self.ocr_store_factory_patcher.stop()
         simple_brush.run = self.original_run
         self.ai_provider_config_store_patcher.stop()
@@ -7551,7 +7565,12 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
 
     def test_binding_store_creation_precedes_ocr_listener_and_browser(self):
         events = []
-        store = Mock(enabled=True, run_id="bound-run")
+        store = Mock(
+            enabled=True,
+            run_id="bound-run",
+            run_dir=Path("synthetic-r13-run"),
+        )
+        r13_store = Mock(spec=AIScreeningRecordStore)
         self.ai_provider_config_store.return_value.load.side_effect = (
             lambda: events.append("config") or valid_ai_provider_config_result()
         )
@@ -7582,6 +7601,12 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
             )
             return store
 
+        def create_r13_store(*, run_dir, run_id):
+            events.append("r13_store")
+            self.assertEqual(run_dir, store.run_dir)
+            self.assertEqual(run_id, store.run_id)
+            return r13_store
+
         with (
             patch.object(simple_brush, "parse_args", return_value=self.cli_args()),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
@@ -7591,6 +7616,11 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                 "create_ocr_record_store",
                 side_effect=create_store,
             ),
+            patch.object(
+                simple_brush,
+                "AIScreeningRecordStore",
+                side_effect=create_r13_store,
+            ) as create_r13,
             patch.object(
                 simple_brush,
                 "initialize_ocr",
@@ -7623,7 +7653,19 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["profile", "config", "store", "ocr", "listener", "browser"],
+            [
+                "profile",
+                "config",
+                "store",
+                "r13_store",
+                "ocr",
+                "listener",
+                "browser",
+            ],
+        )
+        create_r13.assert_called_once_with(
+            run_dir=store.run_dir,
+            run_id=store.run_id,
         )
         store.close.assert_called_once_with(RunStatus.COMPLETED)
         configure_profile.assert_not_called()
@@ -7660,6 +7702,122 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                 listener_start.assert_not_called()
                 foreground.assert_not_called()
                 view.assert_not_called()
+
+    def test_r13_store_initialization_failure_closes_ocr_run_as_error_before_execution(self):
+        store = Mock(
+            enabled=True,
+            run_id="bound-run",
+            run_dir=Path("synthetic-r13-run"),
+        )
+        with (
+            patch.object(simple_brush, "parse_args", return_value=self.cli_args()),
+            patch.object(simple_brush, "get_user_input"),
+            patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
+            patch.object(simple_brush, "create_ocr_record_store", return_value=store),
+            patch.object(
+                simple_brush,
+                "AIScreeningRecordStore",
+                side_effect=AIPersistenceIntegrityError(
+                    "initialize",
+                    store.run_dir,
+                ),
+            ),
+            patch.object(simple_brush, "initialize_ocr") as initialize_ocr,
+            patch.object(simple_brush.listener, "start") as listener_start,
+            patch.object(simple_brush, "bring_edge_foreground") as foreground,
+            patch.object(simple_brush, "view_candidate") as view,
+        ):
+            profile_store.return_value.load_latest.return_value = self.profile_version
+            self.assertEqual(
+                simple_brush.run(
+                    screening_profile_id=self.profile_id,
+                    run_bound_rule_set=sample_run_bound_rule_set(),
+                ),
+                2,
+            )
+
+        store.close.assert_called_once_with(RunStatus.ERROR)
+        initialize_ocr.assert_not_called()
+        listener_start.assert_not_called()
+        foreground.assert_not_called()
+        view.assert_not_called()
+
+    def test_runtime_r13_persistence_failure_projects_run_error_without_later_candidate(self):
+        store = Mock(
+            enabled=True,
+            run_id="bound-run",
+            run_dir=Path("synthetic-r13-run"),
+        )
+        r13_store = Mock(spec=AIScreeningRecordStore)
+        candidate = Mock(spec=CandidateOcrDocument)
+        candidate.capture_status = CaptureStatus.COMPLETED
+        rule_set = sample_run_bound_rule_set()
+
+        def configure_input(**_kwargs):
+            simple_brush.batch_filter_enabled = False
+            simple_brush.batch_filter_regions = None
+            simple_brush.action_mode = simple_brush.ACTION_MODE_FORWARD
+            simple_brush.no_forward_mode = True
+
+        with (
+            patch.object(simple_brush, "parse_args", return_value=self.cli_args()),
+            patch.object(simple_brush, "get_user_input", side_effect=configure_input),
+            patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
+            patch.object(simple_brush, "create_ocr_record_store", return_value=store),
+            patch.object(simple_brush, "AIScreeningRecordStore", return_value=r13_store),
+            patch.object(simple_brush, "initialize_ocr"),
+            patch.object(simple_brush.listener, "start"),
+            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush, "open_first_candidate_for_batch", return_value=True),
+            patch.object(simple_brush, "ensure_ocr_region_calibrated", return_value=True),
+            patch.object(simple_brush, "start_run_timer", return_value=None),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=("loaded", loaded_observation(), 0, "threshold_passed"),
+            ) as load_gate,
+            patch.object(simple_brush, "view_candidate", return_value=(True, Mock())),
+            patch.object(
+                simple_brush,
+                "prepare_candidate_switch_context",
+                return_value=(Mock(), None),
+            ),
+            patch.object(simple_brush, "start_candidate_ocr_recording"),
+            patch.object(
+                simple_brush,
+                "finalize_current_candidate_recording",
+                return_value=candidate,
+            ) as finalize,
+            patch.object(
+                simple_brush,
+                "_process_finalized_candidate",
+                side_effect=AIPersistenceIntegrityError(
+                    "write_ai_result",
+                    Path("synthetic-r13-run/ai_results.jsonl"),
+                ),
+            ) as process,
+            patch.object(simple_brush, "finalize_active_candidate_for_stop") as finalize_active,
+        ):
+            profile_store.return_value.load_latest.return_value = self.profile_version
+            self.assertEqual(
+                simple_brush.run(
+                    screening_profile_id=self.profile_id,
+                    run_bound_rule_set=rule_set,
+                ),
+                0,
+            )
+
+        process.assert_called_once_with(
+            candidate,
+            self.profile_version,
+            self.ai_provider_config_store.return_value.load.return_value.config,
+            rule_set,
+            r13_store,
+        )
+        self.assertEqual(load_gate.call_count, 1)
+        finalize.assert_called_once()
+        finalize_active.assert_called_once()
+        store.close.assert_called_once_with(RunStatus.ERROR)
 
     def test_pause_toggle_does_not_enter_profile_configuration(self):
         simple_brush.paused = False

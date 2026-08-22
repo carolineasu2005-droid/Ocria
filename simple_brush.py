@@ -55,7 +55,14 @@ from ai_provider_config import (
     AIProviderConfigLoadStatus,
     AIProviderConfigStore,
 )
-from ai_screening_runtime import run_ai_screening
+from ai_screening_runtime import AIScreeningResult, _run_ai_screening_attempt
+from ai_screening_persistence import (
+    AIAttemptErrorRecord,
+    AIFinalOutcomeRecord,
+    AIPersistenceIntegrityError,
+    AIScreeningRecordStore,
+    CandidateDecisionRecord,
+)
 from candidate_decision import CandidateDecision, decide_candidate
 from screening_profile import (
     ScreeningProfileIOError,
@@ -103,6 +110,7 @@ from ocr_records import (
     CaptureType,
     RunStatus,
     ScreeningProfileBinding,
+    timezone_iso,
 )
 from ocr_store import JsonlOcrRecordStore
 from mouse_motion import (
@@ -222,6 +230,7 @@ except Exception:
 # ─── 配置 ───────────────────────────────────────────
 ACTION_MODE_FAVORITE = "favorite"
 ACTION_MODE_FORWARD = "forward"
+R13_MAX_AI_SCREENING_ATTEMPTS = 3
 
 MIN_STAY_SECONDS = 12
 MAX_STAY_SECONDS = 18
@@ -3708,16 +3717,96 @@ def recover_detail_page():
 # ─── 主循环 ─────────────────────────────────────────
 
 
+def _run_r13_ai_screening(
+    candidate: CandidateOcrDocument,
+    profile: ScreeningProfileVersion,
+    config: AIProviderConfig,
+    store: AIScreeningRecordStore,
+) -> AIScreeningResult | None:
+    if candidate.run_id != store.run_id:
+        raise ValueError("candidate.run_id must match store.run_id")
+
+    for attempt_number in range(1, R13_MAX_AI_SCREENING_ATTEMPTS + 1):
+        if stop_event:
+            return None
+        while paused and not stop_event:
+            time.sleep(0.2)
+        if stop_event:
+            return None
+
+        outcome = _run_ai_screening_attempt(candidate, profile, config)
+        if outcome.result.candidate_record_id != candidate.candidate_record_id:
+            raise ValueError(
+                "AIScreeningResult.candidate_record_id must match candidate"
+            )
+        if outcome.result.ai_status == "completed":
+            final_result = outcome.result
+            attempts_used = attempt_number
+            break
+
+        failure = outcome.failure
+        if failure is None:
+            raise ValueError("failed attempt outcome requires failure details")
+        store.append_ai_error(
+            AIAttemptErrorRecord(
+                run_id=store.run_id,
+                candidate_record_id=candidate.candidate_record_id,
+                attempt_number=attempt_number,
+                failure_stage=failure.failure_stage,
+                failure_type=failure.failure_type,
+                occurred_at=timezone_iso(),
+                error_code=failure.error_code,
+                provider=failure.provider,
+                operation=failure.operation,
+                status_code=failure.status_code,
+                request_id=failure.request_id,
+                message=failure.message,
+            )
+        )
+        if attempt_number == R13_MAX_AI_SCREENING_ATTEMPTS:
+            final_result = outcome.result
+            attempts_used = attempt_number
+            break
+
+    store.append_ai_result(
+        AIFinalOutcomeRecord(
+            run_id=store.run_id,
+            candidate_record_id=candidate.candidate_record_id,
+            ai_status=final_result.ai_status,
+            criteria_results=final_result.criteria_results,
+            attempts_used=attempts_used,
+            screening_profile_id=profile.screening_profile_id,
+            profile_version=profile.profile_version,
+            criteria_digest=profile.criteria_digest,
+            provider=config.provider,
+            model=config.model,
+        )
+    )
+    return final_result
+
+
 def _process_finalized_candidate(
     candidate: CandidateOcrDocument,
     profile: ScreeningProfileVersion,
     config: AIProviderConfig,
     rule_set: ScreeningRuleSet,
-) -> CandidateDecision:
+    store: AIScreeningRecordStore,
+) -> CandidateDecision | None:
     global forward_consecutive
 
-    ai_result = run_ai_screening(candidate, profile, config)
+    ai_result = _run_r13_ai_screening(candidate, profile, config, store)
+    if ai_result is None or stop_event:
+        return None
     decision = decide_candidate(ai_result, rule_set)
+    if decision.candidate_record_id != candidate.candidate_record_id:
+        raise ValueError("CandidateDecision.candidate_record_id must match candidate")
+    store.append_decision(
+        CandidateDecisionRecord(
+            run_id=store.run_id,
+            candidate_record_id=decision.candidate_record_id,
+            decision_status=decision.decision_status,
+        )
+    )
     logger.info(
         'event=candidate_decision candidate_record_id=%s decision_status=%s',
         decision.candidate_record_id,
@@ -3828,6 +3917,18 @@ def run(
     initial_store = initialize_run_ocr_storage(screening_profile_binding)
     if initial_store is None or not initial_store.enabled:
         print('[错误] OCR 运行记录存储初始化失败，未启动运行。')
+        return 2
+    try:
+        r13_store = AIScreeningRecordStore(
+            run_dir=initial_store.run_dir,
+            run_id=initial_store.run_id,
+        )
+    except AIPersistenceIntegrityError as exc:
+        logger.error(
+            "event=r13_persistence_store_initialize_failed operation=%s",
+            exc.operation,
+        )
+        close_run_ocr_storage(RunStatus.ERROR)
         return 2
 
     # 提前初始化并复用 OCR 引擎；校准仍延迟到第一位详情打开之后。
@@ -4140,6 +4241,7 @@ def run(
                                 profile_version,
                                 run_ai_provider_config,
                                 run_bound_rule_set,
+                                r13_store,
                             )
                         if previous_candidate_context is None:
                             if context_reason != 'stopped':
@@ -4175,6 +4277,7 @@ def run(
                                 profile_version,
                                 run_ai_provider_config,
                                 run_bound_rule_set,
+                                r13_store,
                             )
             if stop_event:
                 break

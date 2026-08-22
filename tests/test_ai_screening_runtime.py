@@ -418,6 +418,224 @@ class AIScreeningRuntimeTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
 
+    def test_public_signature_and_result_shape_remain_exact_after_attempt_seam(self):
+        signature = inspect.signature(run_ai_screening)
+
+        self.assertEqual(
+            tuple(signature.parameters),
+            ("candidate", "profile", "config"),
+        )
+        self.assertEqual(
+            tuple(
+                parameter.default
+                for parameter in signature.parameters.values()
+            ),
+            (inspect.Parameter.empty,) * 3,
+        )
+        self.assertIs(signature.return_annotation, AIScreeningResult)
+        self.assertEqual(
+            [field.name for field in fields(AIScreeningResult)],
+            ["candidate_record_id", "ai_status", "criteria_results"],
+        )
+
+        candidate = self.make_candidate()
+        profile = self.make_profile()
+        config = self.make_config()
+        projected_result = AIScreeningResult(
+            candidate.candidate_record_id,
+            "failed",
+            None,
+        )
+        outcome = ai_screening_runtime._AIScreeningAttemptOutcome(
+            result=projected_result,
+            failure=ai_screening_runtime._AIScreeningAttemptFailure(
+                failure_stage="candidate_input",
+                failure_type="ValueError",
+                error_code=None,
+                provider=None,
+                operation=None,
+                status_code=None,
+                request_id=None,
+                message=None,
+            ),
+        )
+        with patch(
+            "ai_screening_runtime._run_ai_screening_attempt",
+            return_value=outcome,
+        ) as attempt:
+            result = run_ai_screening(candidate, profile, config)
+
+        self.assertIs(result, projected_result)
+        attempt.assert_called_once_with(candidate, profile, config)
+
+    def test_private_attempt_seam_completed_has_no_failure(self):
+        candidate = self.make_candidate()
+        profile = self.make_profile()
+        completion = self.make_completion(self.raw_response(self.mixed_pairs()))
+
+        with patch(
+            "ai_screening_runtime.complete",
+            return_value=completion,
+        ) as complete_mock:
+            outcome = ai_screening_runtime._run_ai_screening_attempt(
+                candidate,
+                profile,
+                self.make_config(),
+            )
+
+        self.assertEqual(outcome.result.ai_status, "completed")
+        self.assertEqual(
+            outcome.result.criteria_results,
+            {"C001": True, "C002": False, "C003": True},
+        )
+        self.assertIsNone(outcome.failure)
+        complete_mock.assert_called_once()
+
+    def test_private_attempt_seam_maps_r09_value_error(self):
+        candidate = self.make_candidate()
+        failure_message = "x" * 513
+
+        with patch(
+            "ai_screening_runtime.build_ai_candidate_input",
+            side_effect=ValueError(failure_message),
+        ), patch("ai_screening_runtime.complete") as complete_mock:
+            outcome = ai_screening_runtime._run_ai_screening_attempt(
+                candidate,
+                self.make_profile(),
+                self.make_config(),
+            )
+
+        failure = outcome.failure
+        self.assertEqual(outcome.result.ai_status, "failed")
+        self.assertIsNone(outcome.result.criteria_results)
+        self.assertEqual(failure.failure_stage, "candidate_input")
+        self.assertEqual(failure.failure_type, "ValueError")
+        self.assertIsNone(failure.error_code)
+        self.assertIsNone(failure.provider)
+        self.assertIsNone(failure.operation)
+        self.assertIsNone(failure.status_code)
+        self.assertIsNone(failure.request_id)
+        self.assertEqual(failure.message, failure_message[:512])
+        self.assertIsNone(ai_screening_runtime._bounded_failure_message(ValueError("")))
+        complete_mock.assert_not_called()
+
+    def test_private_attempt_seam_maps_llm_runtime_error(self):
+        candidate = self.make_candidate()
+        failure_message = "r" * 513
+        runtime_error = LLMRuntimeError(
+            code=LLMRuntimeErrorCode.RATE_LIMIT,
+            provider="deepseek",
+            operation=LLMOperation.COMPLETE,
+            message=failure_message,
+            status_code=429,
+            request_id="request-r13",
+        )
+
+        with patch(
+            "ai_screening_runtime.complete",
+            side_effect=runtime_error,
+        ):
+            outcome = ai_screening_runtime._run_ai_screening_attempt(
+                candidate,
+                self.make_profile(),
+                self.make_config(),
+            )
+
+        self.assertEqual(outcome.result.ai_status, "failed")
+        self.assertEqual(
+            outcome.failure,
+            ai_screening_runtime._AIScreeningAttemptFailure(
+                failure_stage="provider_runtime",
+                failure_type="LLMRuntimeError",
+                error_code="rate_limit",
+                provider="deepseek",
+                operation="complete",
+                status_code=429,
+                request_id="request-r13",
+                message=failure_message[:512],
+            ),
+        )
+
+    def test_private_attempt_seam_maps_contract_error(self):
+        candidate = self.make_candidate()
+        completion = self.make_completion(self.raw_response(self.mixed_pairs()))
+
+        with patch(
+            "ai_screening_runtime.complete",
+            return_value=completion,
+        ), patch(
+            "ai_screening_runtime.validate_ai_screening_response",
+            side_effect=AIScreeningContractError("invalid response"),
+        ):
+            outcome = ai_screening_runtime._run_ai_screening_attempt(
+                candidate,
+                self.make_profile(),
+                self.make_config(),
+            )
+
+        failure = outcome.failure
+        self.assertEqual(outcome.result.ai_status, "failed")
+        self.assertEqual(failure.failure_stage, "response_contract")
+        self.assertEqual(failure.failure_type, "AIScreeningContractError")
+        self.assertIsNone(failure.error_code)
+        self.assertIsNone(failure.provider)
+        self.assertIsNone(failure.operation)
+        self.assertIsNone(failure.status_code)
+        self.assertIsNone(failure.request_id)
+        self.assertEqual(failure.message, "invalid response")
+
+    def test_private_attempt_seam_propagates_unexpected_exceptions(self):
+        candidate = self.make_candidate()
+        profile = self.make_profile()
+        config = self.make_config()
+
+        with self.assertRaisesRegex(TypeError, "candidate must"):
+            ai_screening_runtime._run_ai_screening_attempt({}, profile, config)
+        with patch(
+            "ai_screening_runtime.build_ai_candidate_input",
+            side_effect=TypeError("candidate projection type error"),
+        ):
+            with self.assertRaisesRegex(TypeError, "candidate projection type error"):
+                ai_screening_runtime._run_ai_screening_attempt(
+                    candidate,
+                    profile,
+                    config,
+                )
+        with patch(
+            "ai_screening_runtime.build_ai_screening_prompt",
+            side_effect=RuntimeError("prompt error"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "prompt error"):
+                ai_screening_runtime._run_ai_screening_attempt(
+                    candidate,
+                    profile,
+                    config,
+                )
+        with patch(
+            "ai_screening_runtime.complete",
+            side_effect=RuntimeError("provider error"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "provider error"):
+                ai_screening_runtime._run_ai_screening_attempt(
+                    candidate,
+                    profile,
+                    config,
+                )
+        completion = self.make_completion(self.raw_response(self.mixed_pairs()))
+        with patch(
+            "ai_screening_runtime.complete",
+            return_value=completion,
+        ), patch(
+            "ai_screening_runtime.validate_ai_screening_response",
+            side_effect=TypeError("validator type error"),
+        ):
+            with self.assertRaisesRegex(TypeError, "validator type error"):
+                ai_screening_runtime._run_ai_screening_attempt(
+                    candidate,
+                    profile,
+                    config,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
