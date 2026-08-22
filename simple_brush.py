@@ -49,11 +49,25 @@ from calibration_profiles import (
 )
 from calibration_template import main as calibration_template_main
 from ai_provider_cli import run_ai_provider_configuration
+from ai_provider_config import (
+    AIProviderConfig,
+    AIProviderConfigIOError,
+    AIProviderConfigLoadStatus,
+    AIProviderConfigStore,
+)
+from ai_screening_runtime import run_ai_screening
+from candidate_decision import CandidateDecision, decide_candidate
 from screening_profile import (
     ScreeningProfileIOError,
     ScreeningProfileStore,
     ScreeningProfileValidationError,
+    ScreeningProfileVersion,
     criteria_digest,
+)
+from screening_rule_engine import (
+    ScreeningRule,
+    ScreeningRuleSet,
+    ScreeningRuleValidationError,
 )
 from screening_profile_cli import run_screening_profile_configuration
 from ocr_detector import (
@@ -84,6 +98,7 @@ from ocr_normalization import (
     normalization_config_digest,
 )
 from ocr_records import (
+    CandidateOcrDocument,
     CaptureStatus,
     CaptureType,
     RunStatus,
@@ -110,6 +125,7 @@ def parse_args():
         'action_mode': None,
         'calibration_profile': '',
         'screening_profile_id': '',
+        'screening_rules': [],
     }
     i = 1
     while i < len(sys.argv):
@@ -146,6 +162,11 @@ def parse_args():
                 raise ValueError('--screening-profile-id 缺少 Profile ID')
             args['screening_profile_id'] = sys.argv[i + 1]
             i += 2
+        elif sys.argv[i] == '--screening-rule':
+            if i + 1 >= len(sys.argv):
+                raise ValueError('--screening-rule 缺少 Rule 表达式')
+            args['screening_rules'].append(sys.argv[i + 1])
+            i += 2
         elif sys.argv[i] == '--action-mode':
             if i + 1 >= len(sys.argv):
                 raise ValueError('--action-mode 缺少 favorite 或 forward')
@@ -166,6 +187,30 @@ def is_noninteractive_startup(cli_args):
         or cli_args.get('keywords')
         or cli_args.get('calibration_profile')
     )
+
+
+def prompt_screening_rule_expressions() -> Tuple[str, ...]:
+    """Collect one or more unmodified formal R06 Rule expressions."""
+    expressions = []
+    print(
+        '请输入正式 Screening Rule（每次一条；支持 Criterion ID、AND、OR 和括号；留空结束）:'
+    )
+    while True:
+        raw = input('> ')
+        if not raw.strip():
+            if expressions:
+                return tuple(expressions)
+            print('至少需要一条正式 Screening Rule。')
+            continue
+        expressions.append(raw)
+
+
+def _build_screening_rule_set(
+    expressions: Tuple[str, ...],
+) -> ScreeningRuleSet:
+    return ScreeningRuleSet(tuple(
+        ScreeningRule(expression) for expression in expressions
+    ))
 
 # 修复 Windows 终端 UTF-8 输出
 try:
@@ -1635,7 +1680,7 @@ def get_user_input(
             print(f'  关键词规则格式错误：{exc}')
             print('  格式示例："Python"; "短剧" and not "销售"')
 
-    if forward_enabled and action_mode == ACTION_MODE_FORWARD and not no_forward:
+    if action_mode == ACTION_MODE_FORWARD and not no_forward:
         backup_email = input('\n请输入备选邮箱（最近联系中无邮箱时兜底）:\n> ').strip()
         print(
             '  备选邮箱已提供: '
@@ -1680,7 +1725,7 @@ def get_user_input(
         focus_restore_calibration_requested = True
         forward_click_calibration_requested = False
         print('  将在第一位候选人详情页打开后校准安全焦点恢复区域')
-    elif forward_enabled and action_mode == ACTION_MODE_FORWARD:
+    elif action_mode == ACTION_MODE_FORWARD and not no_forward:
         calibrate_forward = input(
             '\n是否校准完整邮件转发点击区域（包含焦点恢复区域）？[y/N]\n> '
         ).strip().lower()
@@ -3077,46 +3122,24 @@ def view_candidate(
 ) -> Tuple[bool, Optional[DetectionResult]]:
     """
     浏览当前候选人。
-    流程：检测关键词 → 命中则转发 → 停留 12-18 秒 + 滚动。
+    流程：完成候选人 OCR 扫描 → 停留 12-18 秒 + 滚动。
     """
-    global forward_consecutive
-
     # OCR 扫描耗时计入原有 12-18 秒停留时间。
     stay = random.uniform(MIN_STAY_SECONDS, MAX_STAY_SECONDS)
     stay_started = time.monotonic()
 
-    # ── 关键词检测（在浏览开始前） ──
-    keyword_hit = False
-    detection_result = None
-    if forward_enabled and forward_keywords:
-        keyword_hit, detection_result = detect_keywords(
-            first_observation=first_observation
-        )
-
-        if stop_event:
-            return False, detection_result
-
-        if keyword_hit:
-            if action_mode == ACTION_MODE_FAVORITE:
-                perform_favorite_action()
-            elif action_mode == ACTION_MODE_FORWARD:
-                if no_forward_mode:
-                    logger.info('🛡 --no-forward 已启用：保留 OCR 命中记录，禁止真实邮件转发')
-                else:
-                    forward_one_candidate()
-            else:
-                raise ValueError(f'未知候选人处理模式: {action_mode}')
-        else:
-            # 未命中关键词，重置连续转发计数
-            forward_consecutive = 0
+    detection_result = ocr_detector.scan_candidate(
+        first_observation=first_observation,
+    )
+    if stop_event:
+        return False, detection_result
 
     # ── 停留浏览 ──
-    status = '🔑' if keyword_hit else '👤'
     now = time.monotonic()
     elapsed = now - stay_started
     remaining_stay = remaining_stay_seconds(stay, stay_started, now)
     logger.info(
-        f'{status} 第 {index_in_batch + 1}/{BATCH_SIZE} 位，'
+        f'👤 第 {index_in_batch + 1}/{BATCH_SIZE} 位，'
         f'目标停留 {stay:.1f} 秒，OCR/处理已用 {elapsed:.1f} 秒，'
         f'剩余 {remaining_stay:.1f} 秒...'
     )
@@ -3684,7 +3707,46 @@ def recover_detail_page():
 
 # ─── 主循环 ─────────────────────────────────────────
 
-def run(screening_profile_id: Optional[str] = None):
+
+def _process_finalized_candidate(
+    candidate: CandidateOcrDocument,
+    profile: ScreeningProfileVersion,
+    config: AIProviderConfig,
+    rule_set: ScreeningRuleSet,
+) -> CandidateDecision:
+    global forward_consecutive
+
+    ai_result = run_ai_screening(candidate, profile, config)
+    decision = decide_candidate(ai_result, rule_set)
+    logger.info(
+        'event=candidate_decision candidate_record_id=%s decision_status=%s',
+        decision.candidate_record_id,
+        decision.decision_status,
+    )
+    if stop_event:
+        return decision
+    if decision.decision_status == "qualified":
+        if action_mode == ACTION_MODE_FAVORITE:
+            perform_favorite_action()
+        elif action_mode == ACTION_MODE_FORWARD:
+            if no_forward_mode:
+                logger.info('🛡 --no-forward 已启用：保留 Decision，禁止真实邮件转发')
+            else:
+                forward_one_candidate()
+        else:
+            raise ValueError(f'未知候选人处理模式: {action_mode}')
+    else:
+        forward_consecutive = 0
+    return decision
+
+
+def run(
+    screening_profile_id: Optional[str] = None,
+    *,
+    run_bound_rule_set: ScreeningRuleSet,
+):
+    if not isinstance(run_bound_rule_set, ScreeningRuleSet):
+        raise TypeError("run_bound_rule_set must be a ScreeningRuleSet")
     global stop_event, stop_reason, forward_consecutive, no_forward_mode, simple_mouse_enabled, action_mode
     global ocr_record_store, current_candidate_builder
     global candidate_record_sequence, recorded_observation_ids
@@ -3749,14 +3811,27 @@ def run(screening_profile_id: Optional[str] = None):
         print(f'[错误] ScreeningProfile 无法用于运行：{exc}')
         return 2
 
+    try:
+        config_result = AIProviderConfigStore().load()
+    except AIProviderConfigIOError as exc:
+        print(f'[错误] AI Provider 配置无法读取：{exc}')
+        return 2
+    if (
+        config_result.status is not AIProviderConfigLoadStatus.VALID
+        or config_result.config is None
+    ):
+        detail = config_result.error or config_result.status.value
+        print(f'[错误] AI Provider 配置无法用于运行：{detail}')
+        return 2
+    run_ai_provider_config = config_result.config
+
     initial_store = initialize_run_ocr_storage(screening_profile_binding)
     if initial_store is None or not initial_store.enabled:
         print('[错误] OCR 运行记录存储初始化失败，未启动运行。')
         return 2
 
     # 提前初始化并复用 OCR 引擎；校准仍延迟到第一位详情打开之后。
-    if forward_enabled and forward_keywords:
-        initialize_ocr()
+    initialize_ocr()
 
     # ── 启动键盘监听（必须在交互输入之后，避免 exe 中 input() 冲突） ──
     try:
@@ -3768,10 +3843,10 @@ def run(screening_profile_id: Optional[str] = None):
     logger.info('\n' + '=' * 50)
     logger.info('Ocria Am7 启动')
     logger.info(f'停留: {MIN_STAY_SECONDS}-{MAX_STAY_SECONDS}s | 每 {BATCH_SIZE} 人刷新')
-    if forward_enabled:
-        logger.info('rule_count=%s', len(forward_keywords))
+    if forward_keywords:
+        logger.info('legacy_rule_count=%s', len(forward_keywords))
         if no_forward_mode:
-            logger.info('模式: 只执行 OCR 检测，真实邮件转发已禁用 (--no-forward)')
+            logger.info('模式: Legacy Rule 配置存在；真实邮件转发已禁用 (--no-forward)')
         else:
             logger.info(
                 'alternate_email_provided=%s',
@@ -3779,7 +3854,7 @@ def run(screening_profile_id: Optional[str] = None):
             )
             logger.info(f'连续转发上限: {FORWARD_MAX_CONSEC}')
     else:
-        logger.info('转发: 已禁用')
+        logger.info('Legacy Rule 配置: 未设置')
     logger.info('=' * 50)
 
     try:
@@ -3828,9 +3903,8 @@ def run(screening_profile_id: Optional[str] = None):
         if action_mode == ACTION_MODE_FAVORITE:
             if ensure_favorite_button_region_calibrated() is None:
                 return 0
-        if forward_enabled and forward_keywords:
-            if not ensure_ocr_region_calibrated():
-                return 0
+        if not ensure_ocr_region_calibrated():
+            return 0
 
         if stop_event:
             return 0
@@ -3856,7 +3930,7 @@ def run(screening_profile_id: Optional[str] = None):
                     total_viewed=total_viewed,
                 )
 
-                if forward_enabled and forward_keywords:
+                if not stop_event:
                     if i == 0:
                         recovery_available = (
                             batch_filter_enabled
@@ -4049,11 +4123,24 @@ def run(screening_profile_id: Optional[str] = None):
                             candidate_in_batch=i + 1,
                             total_viewed=total_viewed,
                         )
-                        finalize_current_candidate_recording(
+                        candidate_document = finalize_current_candidate_recording(
                             capture_status,
                             capture_end_reason,
                             detection_result=detection_result,
                         )
+                        if (
+                            candidate_document is not None
+                            and candidate_document.capture_status in (
+                                CaptureStatus.COMPLETED,
+                                CaptureStatus.COMPLETED_WITH_LIMIT,
+                            )
+                        ):
+                            _process_finalized_candidate(
+                                candidate_document,
+                                profile_version,
+                                run_ai_provider_config,
+                                run_bound_rule_set,
+                            )
                         if previous_candidate_context is None:
                             if context_reason != 'stopped':
                                 request_candidate_switch_failed_stop(
@@ -4071,25 +4158,24 @@ def run(screening_profile_id: Optional[str] = None):
                                 )
                             break
                     else:
-                        finalize_current_candidate_recording(
+                        candidate_document = finalize_current_candidate_recording(
                             capture_status,
                             capture_end_reason,
                             detection_result=detection_result,
                         )
-                else:
-                    total_viewed += 1
-                    view_completed, _detection_result = view_candidate(i)
-                    if not view_completed:
-                        finalize_active_candidate_for_stop()
-                        break
-                    finalize_current_candidate_recording(
-                        CaptureStatus.COMPLETED,
-                        "existing_flow_completed",
-                    )
-                    if i < BATCH_SIZE - 1:
-                        if not next_candidate():
-                            break
-
+                        if (
+                            candidate_document is not None
+                            and candidate_document.capture_status in (
+                                CaptureStatus.COMPLETED,
+                                CaptureStatus.COMPLETED_WITH_LIMIT,
+                            )
+                        ):
+                            _process_finalized_candidate(
+                                candidate_document,
+                                profile_version,
+                                run_ai_provider_config,
+                                run_bound_rule_set,
+                            )
             if stop_event:
                 break
             if restart_current_batch:
@@ -4142,7 +4228,20 @@ def main():
         if not screening_profile_id:
             print('[错误] 非交互运行需要 --screening-profile-id。')
             return 2
-        return run(screening_profile_id=screening_profile_id)
+        if not cli_args['screening_rules']:
+            print('[错误] 非交互运行需要至少一条 --screening-rule。')
+            return 2
+        try:
+            run_bound_rule_set = _build_screening_rule_set(
+                tuple(cli_args['screening_rules'])
+            )
+        except ScreeningRuleValidationError as exc:
+            print(f'[错误] Screening Rule 无法用于运行：{exc}')
+            return 2
+        return run(
+            screening_profile_id=screening_profile_id,
+            run_bound_rule_set=run_bound_rule_set,
+        )
 
     prepared_screening_profile_id: Optional[str] = None
     while True:
@@ -4154,7 +4253,18 @@ def main():
                     '再开始运行。'
                 )
                 continue
-            return run(screening_profile_id=prepared_screening_profile_id)
+            raw_rule_expressions = prompt_screening_rule_expressions()
+            try:
+                run_bound_rule_set = _build_screening_rule_set(
+                    raw_rule_expressions
+                )
+            except ScreeningRuleValidationError as exc:
+                print(f'[错误] Screening Rule 无法用于运行：{exc}')
+                continue
+            return run(
+                screening_profile_id=prepared_screening_profile_id,
+                run_bound_rule_set=run_bound_rule_set,
+            )
         if action == 'exit':
             return 0
         if action == 'ai_provider_config':
