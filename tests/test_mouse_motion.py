@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, call, patch
 
 import mouse_motion
 import simple_brush
+from screening_rule_engine import ScreeningRule, ScreeningRuleSet
 
 
 def midpoint(low, high):
@@ -512,13 +513,18 @@ class HumanMouseMotionTests(unittest.TestCase):
 
     def test_run_resets_simple_mouse_state_before_input_failure(self):
         simple_brush.simple_mouse_enabled = True
+        run_bound_rule_set = ScreeningRuleSet(
+            rules=(ScreeningRule("C001"),)
+        )
         with (
             patch.object(simple_brush, "parse_args", side_effect=ValueError("bad args")),
             patch.object(simple_brush, "reset_focus_restore_calibration"),
             patch.object(simple_brush, "reset_forward_click_calibration"),
             patch.object(simple_brush, "reset_batch_filter_calibration"),
         ):
-            result = simple_brush.run()
+            result = simple_brush.run(
+                run_bound_rule_set=run_bound_rule_set,
+            )
 
         self.assertEqual(result, 2)
         self.assertFalse(simple_brush.simple_mouse_enabled)

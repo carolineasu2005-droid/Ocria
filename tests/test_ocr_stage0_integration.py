@@ -6,6 +6,11 @@ from unittest.mock import Mock, patch
 
 import simple_brush
 import ocr_normalization
+from ai_provider_config import (
+    AIProviderConfig,
+    AIProviderConfigLoadResult,
+    AIProviderConfigLoadStatus,
+)
 from ocr_detector import DynamicEndConfig, OCRKeywordDetector, ScanObservation
 from ocr_normalization import NormalizationBox, normalize_ocr_text
 from ocr_records import (
@@ -17,6 +22,7 @@ from ocr_records import (
 )
 from ocr_store import JsonlOcrRecordStore
 from screening_profile import Criterion, ScreeningProfileVersion, criteria_digest
+from screening_rule_engine import ScreeningRule, ScreeningRuleSet
 from ocr_text import OCRItem
 
 
@@ -109,6 +115,18 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         )
         self.screening_profile_id = (
             self.screening_profile_version.screening_profile_id
+        )
+        self.run_bound_rule_set = ScreeningRuleSet(
+            rules=(ScreeningRule("C001"),)
+        )
+        self.ai_provider_config_load_result = AIProviderConfigLoadResult(
+            status=AIProviderConfigLoadStatus.VALID,
+            config=AIProviderConfig(
+                provider="deepseek",
+                api_key="test-api-key",
+                base_url="https://example.invalid",
+                model="test-model",
+            ),
         )
 
     def tearDown(self):
@@ -1131,6 +1149,11 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         self.assertEqual(end_reason, "max_screen_limit")
 
     def run_one_candidate(self, store, view_side_effect):
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        store.run_dir = Path(temporary_directory.name)
+        loaded_observation = self.observation("已加载候选人 OCR")
+
         def configure_input(**_kwargs):
             simple_brush.forward_enabled = False
             simple_brush.forward_keywords = []
@@ -1140,6 +1163,7 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         with (
             patch.object(simple_brush, "create_ocr_record_store", return_value=store),
             patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
+            patch.object(simple_brush, "AIProviderConfigStore") as config_store,
             patch.object(simple_brush, "parse_args", return_value={
                 "keywords": "",
                 "email": "",
@@ -1154,6 +1178,21 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
             patch.object(simple_brush.listener, "start"),
             patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(
+                simple_brush,
+                "ensure_ocr_region_calibrated",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "run_detail_load_gate",
+                return_value=(
+                    "loaded",
+                    loaded_observation,
+                    0,
+                    "detail_ready",
+                ),
+            ),
             patch.object(simple_brush, "safe_wait", return_value=True),
             patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(simple_brush, "open_first_candidate_for_batch", return_value=True),
@@ -1164,8 +1203,12 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             profile_store.return_value.load_latest.return_value = (
                 self.screening_profile_version
             )
+            config_store.return_value.load.return_value = (
+                self.ai_provider_config_load_result
+            )
             result = simple_brush.run(
-                screening_profile_id=self.screening_profile_id
+                screening_profile_id=self.screening_profile_id,
+                run_bound_rule_set=self.run_bound_rule_set,
             )
         return result, view
 
@@ -1176,6 +1219,10 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         recovery_succeeds=True,
         old_finalize_error=None,
     ):
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        store.run_dir = Path(temporary_directory.name)
+
         old_observation = self.observation("恢复前旧 OCR")
         new_load_observation = self.observation("恢复后加载 OCR")
         new_formal_observation = self.observation("恢复后正式 OCR Python")
@@ -1248,6 +1295,7 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
         with (
             patch.object(simple_brush, "create_ocr_record_store", return_value=store),
             patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
+            patch.object(simple_brush, "AIProviderConfigStore") as config_store,
             patch.object(simple_brush, "parse_args", return_value={
                 "keywords": "",
                 "email": "",
@@ -1307,8 +1355,12 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             profile_store.return_value.load_latest.return_value = (
                 self.screening_profile_version
             )
+            config_store.return_value.load.return_value = (
+                self.ai_provider_config_load_result
+            )
             result = simple_brush.run(
-                screening_profile_id=self.screening_profile_id
+                screening_profile_id=self.screening_profile_id,
+                run_bound_rule_set=self.run_bound_rule_set,
             )
 
         return {
