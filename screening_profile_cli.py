@@ -5,6 +5,7 @@ from screening_profile import (
     ScreeningProfileIOError,
     ScreeningProfileStore,
     ScreeningProfileValidationError,
+    ScreeningProfileVersion,
 )
 
 
@@ -187,5 +188,89 @@ def run_screening_profile_configuration(
                     )
                 )
                 return screening_profile_id
+        else:
+            print("Invalid action.")
+
+
+def run_screening_profile_draft_editor(
+    store: ScreeningProfileStore | None = None,
+    *,
+    screening_profile_id: str | None = None,
+) -> ScreeningProfileVersion | None:
+    """Edit one latest-only Draft and return its exact newly saved Version."""
+
+    if store is None:
+        store = ScreeningProfileStore()
+    try:
+        draft = (
+            store.create_draft()
+            if screening_profile_id is None
+            else store.create_draft_from_latest(screening_profile_id)
+        )
+    except (ScreeningProfileValidationError, ScreeningProfileIOError) as exc:
+        print("Cannot start Draft editor: {0}".format(exc))
+        return None
+
+    while True:
+        print("\nScreeningProfile Draft Editor")
+        print("4. Add Criterion")
+        print("5. Edit criterion_text")
+        print("6. Delete Criterion")
+        print("7. Show current Draft")
+        print("8. Human Save")
+        print("0. Return")
+        choice = input("Select action: ").strip()
+
+        if choice == "0":
+            return None
+        if choice == "4":
+            criterion_text = input("Criterion text: ")
+            try:
+                criterion = store.add_criterion(draft, criterion_text)
+            except (ScreeningProfileValidationError, ScreeningProfileIOError) as exc:
+                print("Cannot add Criterion: {0}".format(exc))
+            else:
+                print("Added Criterion {0}.".format(criterion.criterion_id))
+        elif choice == "5":
+            criterion_id = input("Criterion ID to edit: ").strip()
+            criterion_text = input("New criterion_text: ")
+            try:
+                criterion = store.edit_criterion(
+                    draft,
+                    criterion_id,
+                    criterion_text,
+                )
+            except (ScreeningProfileValidationError, ScreeningProfileIOError) as exc:
+                print("Cannot edit Criterion: {0}".format(exc))
+            else:
+                print("Updated Criterion {0}.".format(criterion.criterion_id))
+        elif choice == "6":
+            criterion_id = input("Criterion ID to delete: ").strip()
+            try:
+                store.delete_criterion(draft, criterion_id)
+            except (ScreeningProfileValidationError, ScreeningProfileIOError) as exc:
+                print("Cannot delete Criterion: {0}".format(exc))
+            else:
+                print("Deleted Criterion {0}.".format(criterion_id))
+        elif choice == "7":
+            _show_draft(draft)
+        elif choice == "8":
+            try:
+                version = store.save_draft(draft)
+            except (ScreeningProfileValidationError, ScreeningProfileIOError) as exc:
+                print("Cannot save Draft: {0}".format(exc))
+            else:
+                if version is None:
+                    print("No content changes; no new Version was created.")
+                else:
+                    print(
+                        "Saved Profile {0} v{1} ({2}).".format(
+                            version.screening_profile_id,
+                            version.profile_version,
+                            version.criteria_digest,
+                        )
+                    )
+                    return version
+                return None
         else:
             print("Invalid action.")
