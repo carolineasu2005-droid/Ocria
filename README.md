@@ -40,7 +40,7 @@ Ocria 会移动鼠标、点击 BOSS 页面，并可能执行真实收藏或邮�
 - `--no-forward` 只禁止 **真实邮件转发**；它不会把 `forward` 改成 `favorite`，也不会禁止 `favorite` 模式的真实收藏。
 - 当前没有覆盖所有动作的通用 dry-run。首次验证应选择 `forward` 并启用 `--no-forward`，不要选择 `favorite`。
 - 即使启用 `--no-forward`，程序仍会点击筛选、候选人卡片、滚动和切换候选人；它不是无交互预览模式。
-- 交互界面中的 Legacy 关键词提示仍是历史兼容入口。当前 Am7 的最终动作授权不读取 Legacy 关键词结果；留空关键词 **不能**作为禁止动作的安全措施。
+- Legacy 关键词提示只保留在 Advanced/manual 与非交互兼容路径；R15 正常 Preset 路径不会提示或解析它。当前 Am7 的最终动作授权不读取 Legacy 关键词结果；留空关键词 **不能**作为禁止动作的安全措施。
 - OCR 正文会发送给选定的第三方 AI Provider。运行目录还会保留 OCR 原文和框坐标，可能包含候选人个人信息。请按组织的数据、招聘和隐私规则使用并保护这些文件。
 - `config/ai_provider.json` 中的 API Key 是本地明文。配置界面会遮蔽显示，但文件本身没有加密；不要提交、分享或截图传播它。
 
@@ -120,7 +120,7 @@ BOSS 可见页面
 .\start.bat
 ```
 
-`start.bat` 能正确启动 `simple_brush.py`，但它打印的“三步开始”说明仍是 Legacy 文案；实际启动流程以本文和程序显示的五项菜单为准。
+`start.bat` 能正确启动 `simple_brush.py`，但它打印的“三步开始”说明仍是 Legacy 文案；实际启动流程以本文和程序显示的 R15 七项菜单为准。
 
 ### 手动安装
 
@@ -161,12 +161,12 @@ Python 与可执行文件使用相同参数，例如：
    ```
 
    `--no-forward` 本身不会跳过启动菜单。
-3. 在菜单选择 `3`，配置并保存 AI Provider。可做非推理 Connection Test，但不要把它当成实际模型推理保证。
-4. 在菜单选择 `4`，创建/保存 ScreeningProfile；然后用选项 `9` Prepare 该 Profile。Prepare 只对当前进程的下一次 Run 生效。
-5. 如需复用点击区域，先返回主菜单选择 `2` 创建完整 Calibration Profile；根据屏幕提示手动切换列表页、详情页、转发弹窗和筛选面板。校准流程只框选，不会点击确认转发。
-6. 选择 `1` 开始 Run，输入一条或多条正式 Screening Rule。
-7. 动作模式选择 `2 = forward`。**不要选择 `favorite`**，因为 `--no-forward` 不抑制收藏。
-8. Legacy 关键词提示可留空，但不要依赖它控制 Am7 动作。选择已有 Calibration Profile，或完成本次手动点击区域校准；设置一个较短的运行时间。
+3. 在菜单选择 `4`，配置并保存 AI Provider。可做非推理 Connection Test，但不要把它当成实际模型推理保证。
+4. 在菜单选择 `3` 创建 ScreeningPreset：选择或新建一个精确的 ScreeningProfile Version，选择 ALL、ANY 或 Custom 正式 Rule，并在预览后 Human Save。Preset 只保存名称、精确 Profile Version 和 Rule；不保存 API Key、校准、邮件或 Legacy 关键词。
+5. 如需复用点击区域，返回主菜单选择 `5` 创建完整 Calibration Profile；根据屏幕提示手动切换列表页、详情页、转发弹窗和筛选面板。校准流程只框选，不会点击确认转发。
+6. 选择 `2` 并选中刚保存的 Preset，设置动作、时长、`no_forward` 和批次筛选开关。检查 UUID-free Run Summary 后选择 Confirm。首次成功 Confirm 后，`1. Quick Start` 才可使用。
+7. 动作模式选择 `forward` 并保持 `--no-forward` 生效。**不要选择 `favorite`**，因为 `--no-forward` 不抑制收藏。
+8. Summary Confirm 后才进入既有邮件/校准准备；正常 Preset 路径不再提示 Legacy 关键词。选择已有 Calibration Profile，或完成本次手动点击区域校准。
 9. 程序打开首位候选人详情后，按提示手动框选 OCR 正文区域。该区域不会保存在 Calibration Profile 中，每次进程都需要重新选择。
 10. 观察 `logs/simple_brush.log`、Run 目录和 `decisions.jsonl`。确认 Decision、翻页与筛选行为正确后按 `Esc` 安全停止。
 
@@ -190,20 +190,28 @@ Python 与可执行文件使用相同参数，例如：
 无非交互触发参数时，实际菜单是：
 
 ```text
-1. 开始运行 Ocria Am7
-2. 创建或更新校准模板
-3. AI Provider Configuration
-4. ScreeningProfile Configuration
+1. Quick Start
+2. Choose ScreeningPreset and Run
+3. ScreeningPreset Management
+4. AI Provider Configuration
+5. Calibration
+6. Advanced
 0. 退出
 ```
 
-- `1`：开始当前进程的唯一一次 Run。必须先通过选项 `4` Prepare 一个 Profile；随后程序要求至少一条 Screening Rule。Run 结束后进程退出，不返回菜单。
-- `2`：创建或覆盖一个包含全部 11 个点击区域的 Calibration Profile，完成或取消后回到菜单。
-- `3`：编辑、保存、刷新或测试本地 AI Provider 配置，之后回到菜单。
-- `4`：管理 ScreeningProfile Draft/Version；选项 `9` Prepare 后会把 Profile ID 带回主菜单。
+- `1`：只使用最近一次 Confirm 的 Preset 和五项 Run settings。它重新验证精确 Profile Version、Rule 和当前 Provider，显示 Summary 后仍要求 Confirm；没有状态、状态损坏或引用失效时不会回退到其他 Preset、latest Profile 或 Legacy Run。
+- `2`：按临时编号或名称选择已保存的 ScreeningPreset，设置 Action、duration、`no_forward` 和 batch filter 后显示 Summary。Edit 会丢弃旧的 resolved value 并重新解析；Cancel 不会启动 Run 或写入 last-used state。
+- `3`：列出、创建、编辑、删除或查看 ScreeningPreset。Human Save 前不会写入 Preset。编辑 Criteria 必须基于当前 latest Profile，并需要明确重新绑定和保存 Preset。
+- `4`：编辑、保存、刷新或测试本地 AI Provider 配置，之后回到菜单。
+- `5`：创建或覆盖一个包含全部 11 个点击区域的 Calibration Profile，完成或取消后回到菜单。
+- `6`：进入 Advanced：保留 Existing manual Am7 Run（Legacy Profile Prepare/Rule/关键词兼容路径）以及 Advanced ScreeningProfile Management。
 - `0`：退出，不启动 Run。
 
-只有 `--auto`、非空 `--keywords` 或非空 `--calibration-profile` 会跳过该菜单。仅传 `--screening-profile-id`、`--screening-rule`、`--action-mode`、`--duration-seconds` 或安全开关仍会进入交互菜单，且交互 Profile、Rule、动作和时长提示是本次 Run 的实际输入。
+Preset 保存在 `data/screening_presets.json`。该 JSON 只有 `presets` 和 `last_used_run_settings` 两个顶层键；Preset 绑定精确 Profile ID + Version，而不是 latest。last-used 只在 Summary Confirm 后、进入 Run 前写入；写入失败只会警告，已经确认的 Run 仍可继续。
+
+Run Summary 只显示 Preset 名、Profile Version、Criteria、Rule、Provider/Model、动作、转发抑制、批次开关和时长；不显示 Profile UUID、API Key、校准、邮件、Legacy 关键词或候选人数据。Summary/Resolver 不读取或选择 Calibration；Confirm 后才进入既有 Calibration 流程。
+
+只有 `--auto`、非空 `--keywords` 或非空 `--calibration-profile` 会跳过该菜单。仅传 `--screening-profile-id`、`--screening-rule`、`--action-mode`、`--duration-seconds` 或安全开关仍会进入交互菜单。R15 没有 `--screening-preset` 参数。
 
 ## AI Provider 配置
 
@@ -283,7 +291,7 @@ Prompt 要求 AI 逐项独立判断。只有简历中有充分证据时才返回
 
 ### 创建、保存与选择
 
-主菜单选择 `4. ScreeningProfile Configuration` 后可以：
+从 `3. ScreeningPreset Management` 创建或编辑 Preset 时，可以选择已保存的精确 Profile Version，或创建一个新的 Draft；日常运行不要求输入 Profile UUID。Advanced 子菜单的 `Advanced ScreeningProfile Management` 仍保留原有 Configuration CLI，可用于维护 Draft/Version 和 Legacy manual Run 的当前进程 Prepare 状态。
 
 1. 列出 Profile ID 和最新 Version；
 2. 创建新 Draft；
@@ -311,7 +319,7 @@ data/screening_profiles/<screening_profile_id>/versions/<N>.json
 - 没有内容变化时不创建新 Version；
 - 删除过的历史 Criterion ID 不会被重新分配。
 
-Prepare 会验证该 Profile 的最新 Version 并把 ID 返回主菜单。Run 启动时再次加载最新 Version、校验 digest，并把 `screening_profile_id`、Version 和 digest 绑定到该 Run。交互进程退出后，Prepare 状态不会跨进程保留；非交互运行改用 `--screening-profile-id`。
+R15 Preset 始终绑定保存时明确选择的精确 Profile ID + Version；新 Profile Version 不会自动替换任何 Preset binding。Quick Start/Choose-Preset 在 Summary 前再次加载该精确 Version，绝不以 latest 替代。Advanced Prepare 仍只对当前进程的 Existing manual Am7 Run 生效；非交互运行改用 `--screening-profile-id`。
 
 ## Screening Rules
 
@@ -338,7 +346,7 @@ C001 OR C003
 C001 AND (C002 OR C003)
 ```
 
-规则中的 ID 必须能在本次 Profile 返回的 Criterion Boolean 中找到。请在真实 Run 前人工核对拼写；当前实现只在创建 Run-bound RuleSet 时确认表达式非空，完整 token、语法和引用校验会在第一次 Decision 求值时发生，错误会成为 Run 级异常，而不是把候选人标成 `rejected`。
+规则中的 ID 必须能在本次 Profile 返回的 Criterion Boolean 中找到。R15 Preset 的 Create/Save 和 Summary resolution 会以完整的 `false` Criterion Mapping 执行 R06 验证；错误不会被修复或替代。Advanced/manual 与非交互路径保留既有 Run-bound RuleSet 行为；无论哪条路径，Rule 错误都不是业务 `rejected`。
 
 ### 多条 Rule 的固定 ANY 语义
 
@@ -361,7 +369,7 @@ Ocria 是像素坐标自动化工具。校准决定程序在哪些矩形内随�
 
 ### Calibration Profile：可复用的 11 个点击区域
 
-主菜单选项 `2`（也可独立运行 `python calibration_template.py`）会引导创建完整模板：
+主菜单选项 `5. Calibration`（也可独立运行 `python calibration_template.py`）会引导创建完整模板：
 
 | 阶段 | 字段 | 用途 |
 | --- | --- | --- |
@@ -583,6 +591,7 @@ Run storage 初始化失败会阻止开始动作；正式 screen evidence 写入
 | `logs/ocr_calibration_preview.png` | 最近一次 OCR 正文选区预览；固定文件名，会覆盖 |
 | `config/ai_provider.json` | AI Provider 配置和明文 API Key |
 | `calibration_profiles/*.json` | 可复用点击区域模板 |
+| `data/screening_presets.json` | R15 ScreeningPreset collection 与最近一次 Confirm 的五项 Run settings；不含 API Key、校准、邮件或 Legacy 关键词 |
 | `data/screening_profiles/<id>/versions/*.json` | 不可变 ScreeningProfile Version |
 
 `data/ocr_runs` 可能含简历原文、OCR box 和故障上下文；`config/ai_provider.json` 含密钥。它们虽然由当前 `.gitignore` 排除，仍需由操作者负责访问控制、备份、保留周期和安全删除。
@@ -631,7 +640,7 @@ Python 与 one-dir executable 的参数相同：
 
 缺少任一项会在操作 BOSS 前返回 2。为了可读性与意图明确，自动化命令应显式使用 `--auto`，不要靠 Legacy `--keywords` 或模板名的副作用触发。
 
-如果没有触发非交互，程序进入启动菜单。此时已传入的 Profile ID/Rule 不会替代“先 Prepare Profile、再逐行输入 Rule”的菜单流程；动作模式、邮箱和 duration 也由交互提示决定。`--no-forward`、`--no-batch-filter` 与 `--simple-mouse` 等运行开关仍会生效。
+如果没有触发非交互，程序进入启动菜单。此时已传入的 Profile ID/Rule 不会替代 R15 的 Preset 选择与 Confirm，也不会替代 Advanced manual Run 的 Prepare/逐行 Rule 路径；没有 `--screening-preset`。正常 Preset 路径中的确认值优先于 CLI 的 Action/duration，只有 `--no-forward`、`--no-batch-filter` 与 `--simple-mouse` 等既有安全/物理运行开关仍按其既有语义生效。
 
 ### 参数解析注意事项
 
@@ -747,6 +756,7 @@ Legacy 关键词解析、历史 `detect_keywords()` 和部分旧 console/docstri
 | [`ocr_normalization.py`](ocr_normalization.py) | Unicode/空白规范化、阅读顺序和同屏几何重复处理 |
 | [`ocr_similarity.py`](ocr_similarity.py) | 跨屏相似性、有效新增文字分类与聚合投影 |
 | [`ai_provider_config.py`](ai_provider_config.py) / [`ai_provider_cli.py`](ai_provider_cli.py) | 本地 Provider 配置 schema/store、staged CLI、状态与 Connection Verification |
+| [`screening_preset.py`](screening_preset.py) / [`run_configuration.py`](run_configuration.py) / [`screening_preset_cli.py`](screening_preset_cli.py) | R15 Preset/last-used state、精确 Profile/Rule/Provider resolution、UUID-free Summary 与正常启动 UX |
 | [`llm_provider_runtime.py`](llm_provider_runtime.py) | OpenAI-compatible Client、Provider 操作、模型列表、非推理检查和 Completion 错误边界 |
 | [`screening_profile.py`](screening_profile.py) / [`screening_profile_cli.py`](screening_profile_cli.py) | Criterion、immutable Version、digest、Profile store 和 Human Draft/Save/Prepare 流程 |
 | [`screening_rule_engine.py`](screening_rule_engine.py) | `AND`/`OR` parser、优先级、Boolean 输入验证和多 Rule ANY 求值 |

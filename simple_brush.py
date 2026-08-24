@@ -77,6 +77,19 @@ from screening_rule_engine import (
     ScreeningRuleValidationError,
 )
 from screening_profile_cli import run_screening_profile_configuration
+from screening_preset_cli import (
+    choose_advanced_action,
+    choose_preset_and_run,
+    choose_startup_action as _choose_r15_startup_action,
+    quick_start,
+    run_screening_preset_management,
+)
+from run_configuration import (
+    ResolvedRunConfiguration,
+    build_screening_rule_set,
+    parse_duration_seconds as _parse_r15_duration_seconds,
+)
+from screening_preset import ScreeningPresetStore
 from ocr_detector import (
     DYNAMIC_END_DEFAULT_MODE,
     DYNAMIC_END_VERSION,
@@ -216,9 +229,7 @@ def prompt_screening_rule_expressions() -> Tuple[str, ...]:
 def _build_screening_rule_set(
     expressions: Tuple[str, ...],
 ) -> ScreeningRuleSet:
-    return ScreeningRuleSet(tuple(
-        ScreeningRule(expression) for expression in expressions
-    ))
+    return build_screening_rule_set(expressions)
 
 # 修复 Windows 终端 UTF-8 输出
 try:
@@ -1305,27 +1316,8 @@ listener = keyboard.Listener(on_press=on_press)
 
 # ─── 用户交互输入 ───────────────────────────────────
 def choose_startup_action():
-    """Prompt an interactive user to run, configure, calibrate, or exit."""
-    while True:
-        raw = input(
-            '\n请选择操作：\n\n'
-            '1. 开始运行 Ocria Am7\n'
-            '2. 创建或更新校准模板\n'
-            '3. AI Provider Configuration\n'
-            '4. ScreeningProfile Configuration\n'
-            '0. 退出\n> '
-        ).strip()
-        if raw == '1':
-            return 'run'
-        if raw == '2':
-            return 'calibrate'
-        if raw == '3':
-            return 'ai_provider_config'
-        if raw == '4':
-            return 'screening_profile_config'
-        if raw == '0':
-            return 'exit'
-        print('  输入无效，请输入 1、2、3、4 或 0。')
+    """Compatibility wrapper for the frozen R15 normal-startup menu."""
+    return _choose_r15_startup_action()
 
 
 def launch_calibration_template():
@@ -1341,13 +1333,9 @@ def launch_calibration_template():
 
 
 def parse_duration_seconds(raw_value):
-    """Parse an optional non-negative integer duration in seconds."""
-    value = '' if raw_value is None else str(raw_value).strip()
-    if not value:
-        return 0
-    if not value.isascii() or not value.isdigit():
-        raise ValueError('运行时间必须为 0、正整数秒数或留空')
-    return int(value)
+    """Compatibility wrapper for the shared R15 duration parser."""
+    value = '' if raw_value is None else str(raw_value)
+    return _parse_r15_duration_seconds(value)
 
 
 def parse_action_mode_choice(raw):
@@ -1614,6 +1602,106 @@ def keyword_rule_sources():
     return [rule.source for rule in forward_keywords]
 
 
+def _prepare_interactive_runtime_inputs(
+    *,
+    action_mode_value: str,
+    no_forward: bool,
+    duration_seconds_value: int | None,
+    batch_filter_enabled_choice: bool | None,
+) -> None:
+    """Prepare existing post-confirm action and Calibration inputs."""
+    global backup_email, run_duration_seconds, action_mode
+    global focus_restore_calibration_requested
+    global forward_click_calibration_requested
+    global batch_filter_calibration_requested
+    global selected_calibration_profile
+
+    action_mode = action_mode_value
+    no_batch_filter = batch_filter_enabled_choice is False
+    if action_mode == ACTION_MODE_FORWARD and not no_forward:
+        backup_email = input('\n请输入备选邮箱（最近联系中无邮箱时兜底）:\n> ').strip()
+        print(
+            '  备选邮箱已提供: '
+            f'{"是" if backup_email else "否"}'
+        )
+    else:
+        backup_email = ""
+
+    template_loaded = False
+    selected_profile = prompt_calibration_profile_selection()
+    if selected_profile is not None:
+        try:
+            template_loaded = load_calibration_profile_into_runtime(
+                selected_profile,
+                no_batch_filter=no_batch_filter,
+                action_mode_value=action_mode,
+            )
+            print('  校准模板区域已加载，本次将使用模板参数')
+            if no_batch_filter:
+                print('  自动筛选归位已禁用，模板筛选区域不会启用')
+        except Exception as exc:
+            print(f'  校准模板加载失败：{exc}')
+            print('  将继续使用旧手动校准流程')
+            selected_calibration_profile = None
+            template_loaded = False
+
+    def prepare_duration() -> None:
+        global run_duration_seconds
+        if duration_seconds_value is not None:
+            run_duration_seconds = duration_seconds_value
+            return
+        while True:
+            duration_raw = input('\n请输入本次运行时间（秒，留空或 0 表示持续运行）:\n> ')
+            try:
+                run_duration_seconds = parse_duration_seconds(duration_raw)
+                return
+            except ValueError as exc:
+                print(f'  输入错误：{exc}')
+
+    if template_loaded:
+        prepare_duration()
+        print(f'  运行时间: {run_duration_seconds or "持续运行"}')
+        print()
+        return
+
+    if action_mode == ACTION_MODE_FAVORITE:
+        # 收藏模式也需要详情页安全空白区；无模板时在首位详情稳定后校准。
+        focus_restore_calibration_requested = True
+        forward_click_calibration_requested = False
+        print('  将在第一位候选人详情页打开后校准安全焦点恢复区域')
+    elif action_mode == ACTION_MODE_FORWARD and not no_forward:
+        calibrate_forward = input(
+            '\n是否校准完整邮件转发点击区域（包含焦点恢复区域）？[y/N]\n> '
+        ).strip().lower()
+        calibrate_requested = calibrate_forward in ('y', 'yes')
+        focus_restore_calibration_requested = calibrate_requested
+        forward_click_calibration_requested = calibrate_requested
+        if calibrate_requested:
+            print('  将在第一位候选人详情页打开后进行完整转发点击区域校准')
+        else:
+            print('  完整转发点击将使用默认区域')
+    else:
+        focus_restore_calibration_requested = False
+        forward_click_calibration_requested = False
+
+    if no_batch_filter:
+        batch_filter_calibration_requested = False
+        print('  自动筛选归位已禁用，本次运行使用旧首位候选人流程')
+    else:
+        calibrate_batch_filter = input(
+            '\n是否校准“最近没看过”筛选和首位候选人区域？[y/N]\n> '
+        ).strip().lower()
+        batch_filter_calibration_requested = calibrate_batch_filter in ('y', 'yes')
+        if batch_filter_calibration_requested:
+            print('  将在候选人列表页依次校准四个自动筛选归位区域')
+        else:
+            print('  本次运行使用旧首位候选人流程')
+
+    prepare_duration()
+    print(f'  运行时间: {run_duration_seconds or "持续运行"}')
+    print()
+
+
 def get_user_input(
     keywords_str='',
     email_str='',
@@ -1689,90 +1777,12 @@ def get_user_input(
             print(f'  关键词规则格式错误：{exc}')
             print('  格式示例："Python"; "短剧" and not "销售"')
 
-    if action_mode == ACTION_MODE_FORWARD and not no_forward:
-        backup_email = input('\n请输入备选邮箱（最近联系中无邮箱时兜底）:\n> ').strip()
-        print(
-            '  备选邮箱已提供: '
-            f'{"是" if backup_email else "否"}'
-        )
-    else:
-        backup_email = ""
-
-    template_loaded = False
-    selected_profile = prompt_calibration_profile_selection()
-    if selected_profile is not None:
-        try:
-            template_loaded = load_calibration_profile_into_runtime(
-                selected_profile,
-                no_batch_filter=no_batch_filter,
-                action_mode_value=action_mode,
-            )
-            print('  校准模板区域已加载，本次将使用模板参数')
-            if no_batch_filter:
-                print('  自动筛选归位已禁用，模板筛选区域不会启用')
-        except Exception as exc:
-            print(f'  校准模板加载失败：{exc}')
-            print('  将继续使用旧手动校准流程')
-            selected_calibration_profile = None
-            template_loaded = False
-
-    if template_loaded:
-        while True:
-            duration_raw = input('\n请输入本次运行时间（秒，留空或 0 表示持续运行）:\n> ')
-            try:
-                run_duration_seconds = parse_duration_seconds(duration_raw)
-                break
-            except ValueError as exc:
-                print(f'  输入错误：{exc}')
-
-        print(f'  运行时间: {run_duration_seconds or "持续运行"}')
-        print()
-        return
-
-    if action_mode == ACTION_MODE_FAVORITE:
-        # 收藏模式也需要详情页安全空白区；无模板时在首位详情稳定后校准。
-        focus_restore_calibration_requested = True
-        forward_click_calibration_requested = False
-        print('  将在第一位候选人详情页打开后校准安全焦点恢复区域')
-    elif action_mode == ACTION_MODE_FORWARD and not no_forward:
-        calibrate_forward = input(
-            '\n是否校准完整邮件转发点击区域（包含焦点恢复区域）？[y/N]\n> '
-        ).strip().lower()
-        calibrate_requested = calibrate_forward in ('y', 'yes')
-        focus_restore_calibration_requested = calibrate_requested
-        forward_click_calibration_requested = calibrate_requested
-        if calibrate_requested:
-            print('  将在第一位候选人详情页打开后进行完整转发点击区域校准')
-        else:
-            print('  完整转发点击将使用默认区域')
-    else:
-        focus_restore_calibration_requested = False
-        forward_click_calibration_requested = False
-
-    if no_batch_filter:
-        batch_filter_calibration_requested = False
-        print('  自动筛选归位已禁用，本次运行使用旧首位候选人流程')
-    else:
-        calibrate_batch_filter = input(
-            '\n是否校准“最近没看过”筛选和首位候选人区域？[y/N]\n> '
-        ).strip().lower()
-        batch_filter_calibration_requested = calibrate_batch_filter in ('y', 'yes')
-        if batch_filter_calibration_requested:
-            print('  将在候选人列表页依次校准四个自动筛选归位区域')
-        else:
-            print('  本次运行使用旧首位候选人流程')
-
-    while True:
-        duration_raw = input('\n请输入本次运行时间（秒，留空或 0 表示持续运行）:\n> ')
-        try:
-            run_duration_seconds = parse_duration_seconds(duration_raw)
-            break
-        except ValueError as exc:
-            print(f'  输入错误：{exc}')
-
-    print(f'  运行时间: {run_duration_seconds or "持续运行"}')
-
-    print()
+    _prepare_interactive_runtime_inputs(
+        action_mode_value=action_mode,
+        no_forward=no_forward,
+        duration_seconds_value=None,
+        batch_filter_enabled_choice=False if no_batch_filter else None,
+    )
 
 
 # ─── 窗口操作 ───────────────────────────────────────
@@ -3832,11 +3842,19 @@ def _process_finalized_candidate(
 def run(
     screening_profile_id: Optional[str] = None,
     *,
-    run_bound_rule_set: ScreeningRuleSet,
+    run_bound_rule_set: ScreeningRuleSet | None = None,
+    resolved_run_configuration: ResolvedRunConfiguration | None = None,
 ):
-    if not isinstance(run_bound_rule_set, ScreeningRuleSet):
+    if resolved_run_configuration is not None:
+        if screening_profile_id is not None or run_bound_rule_set is not None:
+            raise TypeError("resolved Run configuration cannot be mixed with advanced setup")
+        if type(resolved_run_configuration) is not ResolvedRunConfiguration:
+            raise TypeError("resolved_run_configuration must be a ResolvedRunConfiguration")
+    elif not isinstance(run_bound_rule_set, ScreeningRuleSet):
         raise TypeError("run_bound_rule_set must be a ScreeningRuleSet")
+
     global stop_event, stop_reason, forward_consecutive, no_forward_mode, simple_mouse_enabled, action_mode
+    global forward_keywords, forward_enabled, run_duration_seconds
     global ocr_record_store, current_candidate_builder
     global candidate_record_sequence, recorded_observation_ids
     stop_event = False
@@ -3854,34 +3872,81 @@ def run(
     # ── 交互/参数输入 ──
     try:
         cli_args = parse_args()
-        no_forward_mode = cli_args['no_forward']
         simple_mouse_enabled = bool(cli_args.get('simple_mouse', False))
-        get_user_input(
-            keywords_str=cli_args['keywords'],
-            email_str=cli_args['email'],
-            duration_str=cli_args['duration_seconds'],
-            auto=cli_args['auto'],
-            no_forward=no_forward_mode,
-            no_batch_filter=cli_args.get('no_batch_filter', False),
-            action_mode_value=cli_args.get('action_mode'),
-            calibration_profile_name=cli_args.get('calibration_profile', ''),
-        )
     except ValueError as exc:
         print(f'[错误] {exc}')
         return 2
 
-    selected_profile_id = (
-        screening_profile_id
-        if screening_profile_id is not None
-        else cli_args.get('screening_profile_id', '')
-    )
-    if not selected_profile_id:
-        print('[错误] 运行需要 --screening-profile-id 或已准备的 ScreeningProfile。')
-        return 2
-    try:
-        profile_version = ScreeningProfileStore().load_latest(
-            selected_profile_id
+    if resolved_run_configuration is not None:
+        profile_version = resolved_run_configuration.exact_screening_profile_version
+        run_bound_rule_set = resolved_run_configuration.run_bound_screening_rule_set
+        run_ai_provider_config = (
+            resolved_run_configuration.current_complete_ai_provider_config
         )
+        action_mode = resolved_run_configuration.action_mode
+        run_duration_seconds = resolved_run_configuration.duration_seconds
+        no_forward_mode = resolved_run_configuration.no_forward
+        forward_keywords = []
+        forward_enabled = False
+        _prepare_interactive_runtime_inputs(
+            action_mode_value=action_mode,
+            no_forward=no_forward_mode,
+            duration_seconds_value=run_duration_seconds,
+            batch_filter_enabled_choice=(
+                resolved_run_configuration.batch_filter_enabled
+            ),
+        )
+    else:
+        no_forward_mode = cli_args['no_forward']
+        try:
+            get_user_input(
+                keywords_str=cli_args['keywords'],
+                email_str=cli_args['email'],
+                duration_str=cli_args['duration_seconds'],
+                auto=cli_args['auto'],
+                no_forward=no_forward_mode,
+                no_batch_filter=cli_args.get('no_batch_filter', False),
+                action_mode_value=cli_args.get('action_mode'),
+                calibration_profile_name=cli_args.get('calibration_profile', ''),
+            )
+        except ValueError as exc:
+            print(f'[错误] {exc}')
+            return 2
+        selected_profile_id = (
+            screening_profile_id
+            if screening_profile_id is not None
+            else cli_args.get('screening_profile_id', '')
+        )
+        if not selected_profile_id:
+            print('[错误] 运行需要 --screening-profile-id 或已准备的 ScreeningProfile。')
+            return 2
+        try:
+            profile_version = ScreeningProfileStore().load_latest(
+                selected_profile_id
+            )
+        except (
+            ScreeningProfileIOError,
+            ScreeningProfileValidationError,
+            ValueError,
+        ) as exc:
+            print(f'[错误] ScreeningProfile 无法用于运行：{exc}')
+            return 2
+
+        try:
+            config_result = AIProviderConfigStore().load()
+        except AIProviderConfigIOError as exc:
+            print(f'[错误] AI Provider 配置无法读取：{exc}')
+            return 2
+        if (
+            config_result.status is not AIProviderConfigLoadStatus.VALID
+            or config_result.config is None
+        ):
+            detail = config_result.error or config_result.status.value
+            print(f'[错误] AI Provider 配置无法用于运行：{detail}')
+            return 2
+        run_ai_provider_config = config_result.config
+
+    try:
         actual_digest = criteria_digest(profile_version.criteria)
         if actual_digest != profile_version.criteria_digest:
             raise ScreeningProfileValidationError(
@@ -3899,20 +3964,6 @@ def run(
     ) as exc:
         print(f'[错误] ScreeningProfile 无法用于运行：{exc}')
         return 2
-
-    try:
-        config_result = AIProviderConfigStore().load()
-    except AIProviderConfigIOError as exc:
-        print(f'[错误] AI Provider 配置无法读取：{exc}')
-        return 2
-    if (
-        config_result.status is not AIProviderConfigLoadStatus.VALID
-        or config_result.config is None
-    ):
-        detail = config_result.error or config_result.status.value
-        print(f'[错误] AI Provider 配置无法用于运行：{detail}')
-        return 2
-    run_ai_provider_config = config_result.config
 
     initial_store = initialize_run_ocr_storage(screening_profile_binding)
     if initial_store is None or not initial_store.enabled:
@@ -4346,39 +4397,72 @@ def main():
             run_bound_rule_set=run_bound_rule_set,
         )
 
+    preset_store = ScreeningPresetStore()
+    profile_store = ScreeningProfileStore()
+    provider_store = AIProviderConfigStore()
     prepared_screening_profile_id: Optional[str] = None
     while True:
         action = choose_startup_action()
-        if action == 'run':
-            if prepared_screening_profile_id is None:
-                print(
-                    '请先在 ScreeningProfile Configuration 中准备一个 Profile，'
-                    '再开始运行。'
-                )
-                continue
-            raw_rule_expressions = prompt_screening_rule_expressions()
-            try:
-                run_bound_rule_set = _build_screening_rule_set(
-                    raw_rule_expressions
-                )
-            except ScreeningRuleValidationError as exc:
-                print(f'[错误] Screening Rule 无法用于运行：{exc}')
-                continue
-            return run(
-                screening_profile_id=prepared_screening_profile_id,
-                run_bound_rule_set=run_bound_rule_set,
-            )
         if action == 'exit':
             return 0
-        if action == 'ai_provider_config':
+        run_result = []
+
+        def run_resolved(configuration):
+            run_result.append(run(resolved_run_configuration=configuration))
+
+        if action == 'quick_start':
+            if quick_start(
+                preset_store=preset_store,
+                profile_store=profile_store,
+                provider_store=provider_store,
+                cli_args=cli_args,
+                on_confirm=run_resolved,
+            ):
+                return run_result[0] if run_result else 0
+            continue
+        if action == 'choose_preset':
+            if choose_preset_and_run(
+                preset_store=preset_store,
+                profile_store=profile_store,
+                provider_store=provider_store,
+                cli_args=cli_args,
+                on_confirm=run_resolved,
+            ):
+                return run_result[0] if run_result else 0
+            continue
+        if action == 'preset_management':
+            run_screening_preset_management(preset_store, profile_store)
+            continue
+        if action == 'provider_configuration':
             run_ai_provider_configuration()
             continue
-        if action == 'screening_profile_config':
-            prepared_profile_id = run_screening_profile_configuration()
+        if action == 'calibration':
+            launch_calibration_template()
+            continue
+        advanced_action = choose_advanced_action()
+        if advanced_action == 'return':
+            continue
+        if advanced_action == 'profile_management':
+            prepared_profile_id = run_screening_profile_configuration(profile_store)
             if prepared_profile_id is not None:
                 prepared_screening_profile_id = prepared_profile_id
             continue
-        launch_calibration_template()
+        if prepared_screening_profile_id is None:
+            print(
+                '请先在 Advanced ScreeningProfile Management 中准备一个 Profile，'
+                '再开始手动运行。'
+            )
+            continue
+        raw_rule_expressions = prompt_screening_rule_expressions()
+        try:
+            run_bound_rule_set = _build_screening_rule_set(raw_rule_expressions)
+        except ScreeningRuleValidationError as exc:
+            print(f'[错误] Screening Rule 无法用于运行：{exc}')
+            continue
+        return run(
+            screening_profile_id=prepared_screening_profile_id,
+            run_bound_rule_set=run_bound_rule_set,
+        )
 
 
 if __name__ == '__main__':

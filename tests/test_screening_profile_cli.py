@@ -39,6 +39,18 @@ class ScreeningProfileCliTests(unittest.TestCase):
             self.store.add_criterion(draft, criterion_text)
         return self.store.save_draft(draft)
 
+    def _run_draft_editor(self, store, inputs, *, screening_profile_id=None):
+        output = io.StringIO()
+        with (
+            patch("builtins.input", side_effect=inputs),
+            redirect_stdout(output),
+        ):
+            version = cli.run_screening_profile_draft_editor(
+                store,
+                screening_profile_id=screening_profile_id,
+            )
+        return version, output.getvalue()
+
     def test_list_profiles_and_latest_versions(self):
         first = self._new_saved_profile("first")
         second = self._new_saved_profile("second")
@@ -158,6 +170,41 @@ class ScreeningProfileCliTests(unittest.TestCase):
             "simple_brush",
         ):
             self.assertNotIn(forbidden_name, source)
+
+    def test_draft_editor_returns_the_exact_newly_saved_version(self):
+        version, output = self._run_draft_editor(
+            self.store,
+            ["4", "Python", "8"],
+        )
+
+        self.assertIsNotNone(version)
+        self.assertEqual(version.profile_version, 1)
+        self.assertEqual(
+            self.store.load_version(
+                version.screening_profile_id,
+                version.profile_version,
+            ),
+            version,
+        )
+        self.assertIn("Saved Profile", output)
+
+    def test_draft_editor_uses_latest_only_and_no_op_save_returns_none(self):
+        version_one = self._new_saved_profile("first")
+
+        with patch.object(
+            self.store,
+            "create_draft_from_latest",
+            wraps=self.store.create_draft_from_latest,
+        ) as create_draft_from_latest:
+            version, output = self._run_draft_editor(
+                self.store,
+                ["8"],
+                screening_profile_id=version_one.screening_profile_id,
+            )
+
+        self.assertIsNone(version)
+        create_draft_from_latest.assert_called_once_with(version_one.screening_profile_id)
+        self.assertIn("No content changes; no new Version was created.", output)
 
 
 if __name__ == "__main__":

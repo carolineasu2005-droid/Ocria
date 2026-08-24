@@ -7832,13 +7832,13 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
 
 
 class StartupMenuTests(unittest.TestCase):
-    def test_prepared_profile_config_dispatches_and_run_receives_prepared_id(self):
+    def test_advanced_profile_management_dispatches_and_manual_run_receives_prepared_id(self):
         prepared_profile_id = "sp_0123456789abcdef0123456789abcdef"
         with (
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
             patch(
                 "builtins.input",
-                side_effect=["4", "1", "C001", ""],
+                side_effect=["6", "2", "6", "1", "C001", ""],
             ) as user_input,
             patch.object(simple_brush, "run", return_value=0) as run,
             patch.object(simple_brush, "run_ai_provider_configuration") as run_ai_provider_configuration,
@@ -7851,14 +7851,8 @@ class StartupMenuTests(unittest.TestCase):
         ):
             self.assertEqual(simple_brush.main(), 0)
 
-        self.assertIn("开始运行 Ocria Am7", user_input.call_args_list[0].args[0])
-        self.assertIn("创建或更新校准模板", user_input.call_args_list[0].args[0])
-        self.assertIn("AI Provider Configuration", user_input.call_args_list[0].args[0])
-        self.assertIn(
-            "ScreeningProfile Configuration",
-            user_input.call_args_list[0].args[0],
-        )
-        configure_profile.assert_called_once_with()
+        self.assertIn("Select action", user_input.call_args_list[0].args[0])
+        configure_profile.assert_called_once()
         run.assert_called_once()
         self.assertEqual(
             run.call_args.kwargs["screening_profile_id"],
@@ -7871,10 +7865,10 @@ class StartupMenuTests(unittest.TestCase):
         run_ai_provider_configuration.assert_not_called()
         openai.assert_not_called()
 
-    def test_start_without_prepared_profile_returns_to_menu_without_running(self):
+    def test_advanced_manual_run_without_prepared_profile_returns_to_menu(self):
         with (
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
-            patch("builtins.input", side_effect=["1", "0"]),
+            patch("builtins.input", side_effect=["6", "1", "0"]),
             patch.object(simple_brush, "run") as run,
             patch("builtins.print") as output,
         ):
@@ -7883,18 +7877,18 @@ class StartupMenuTests(unittest.TestCase):
         run.assert_not_called()
         self.assertTrue(
             any(
-                "先在 ScreeningProfile Configuration 中准备" in str(call.args)
+                "先在 Advanced ScreeningProfile Management 中准备" in str(call.args)
                 for call in output.call_args_list
             )
         )
 
-    def test_terminal_run_then_new_startup_exposes_profile_configuration(self):
+    def test_terminal_run_then_new_startup_exposes_advanced_profile_management(self):
         prepared_profile_id = "sp_0123456789abcdef0123456789abcdef"
         with (
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
             patch(
                 "builtins.input",
-                side_effect=["4", "1", "C001", "", "4", "0"],
+                side_effect=["6", "2", "6", "1", "C001", "", "6", "2", "0"],
             ),
             patch.object(simple_brush, "run", return_value=0) as run,
             patch.object(
@@ -7916,7 +7910,7 @@ class StartupMenuTests(unittest.TestCase):
     def test_ai_provider_configuration_dispatches_then_returns_to_startup_menu(self):
         with (
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
-            patch("builtins.input", side_effect=["3", "0"]) as user_input,
+            patch("builtins.input", side_effect=["4", "0"]) as user_input,
             patch.object(simple_brush, "run_ai_provider_configuration") as run_ai_provider_configuration,
             patch.object(simple_brush, "run") as run,
             patch("llm_provider_runtime.OpenAI") as openai,
@@ -7927,13 +7921,13 @@ class StartupMenuTests(unittest.TestCase):
         run.assert_not_called()
         openai.assert_not_called()
         self.assertEqual(user_input.call_count, 2)
-        self.assertIn("AI Provider Configuration", user_input.call_args_list[0].args[0])
-        self.assertIn("AI Provider Configuration", user_input.call_args_list[1].args[0])
+        self.assertEqual(user_input.call_args_list[0].args[0], "Select action: ")
+        self.assertEqual(user_input.call_args_list[1].args[0], "Select action: ")
 
     def test_template_generator_success_returns_to_startup_menu(self):
         with (
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
-            patch("builtins.input", side_effect=["2", "0"]),
+            patch("builtins.input", side_effect=["5", "0"]),
             patch.object(simple_brush, "calibration_template_main", return_value=0) as calibrate,
             patch.object(simple_brush, "run") as run,
             patch.object(simple_brush, "run_ai_provider_configuration") as run_ai_provider_configuration,
@@ -7949,7 +7943,7 @@ class StartupMenuTests(unittest.TestCase):
     def test_template_generator_cancel_returns_to_startup_menu(self):
         with (
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
-            patch("builtins.input", side_effect=["2", "0"]),
+            patch("builtins.input", side_effect=["5", "0"]),
             patch.object(simple_brush, "calibration_template_main", return_value=2) as calibrate,
         ):
             self.assertEqual(simple_brush.main(), 0)
@@ -7958,7 +7952,7 @@ class StartupMenuTests(unittest.TestCase):
     def test_template_generator_exception_is_reported_then_returns_to_menu(self):
         with (
             patch.object(simple_brush.sys, "argv", ["simple_brush.py"]),
-            patch("builtins.input", side_effect=["2", "0"]),
+            patch("builtins.input", side_effect=["5", "0"]),
             patch.object(simple_brush, "calibration_template_main", side_effect=RuntimeError("boom")),
             patch("builtins.print") as output,
         ):
@@ -7988,17 +7982,17 @@ class StartupMenuTests(unittest.TestCase):
         ):
             self.assertEqual(simple_brush.choose_startup_action(), "exit")
         self.assertEqual(user_input.call_count, 2)
-        output.assert_called_once_with("  输入无效，请输入 1、2、3、4 或 0。")
+        self.assertIn(call("Invalid action."), output.call_args_list)
 
     def test_ai_provider_configuration_menu_choice_returns_its_public_action(self):
-        with patch("builtins.input", return_value="3"):
-            self.assertEqual(simple_brush.choose_startup_action(), "ai_provider_config")
-
-    def test_screening_profile_configuration_menu_choice_returns_its_public_action(self):
         with patch("builtins.input", return_value="4"):
+            self.assertEqual(simple_brush.choose_startup_action(), "provider_configuration")
+
+    def test_advanced_menu_choice_returns_its_public_action(self):
+        with patch("builtins.input", return_value="6"):
             self.assertEqual(
                 simple_brush.choose_startup_action(),
-                "screening_profile_config",
+                "advanced",
             )
 
     def test_noninteractive_options_bypass_startup_menu(self):
