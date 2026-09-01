@@ -11,6 +11,12 @@ from typing import Callable, Iterable, List, Optional, Protocol, Sequence, Tuple
 from uuid import uuid4
 
 from ocr_calibration import ScreenRegion
+from platform_services.screen_metrics import (
+    CaptureFrameInvariant,
+    CaptureGeometryInvariantError,
+    observe_capture,
+    select_primary_mss_monitor,
+)
 from ocr_normalization import (
     DEFAULT_OCR_NORMALIZATION_CONFIG,
     NORMALIZATION_COMPLETED,
@@ -895,16 +901,119 @@ class ObservationCallbackFailure:
 class MSSScreenCapture:
     """Capture only physical pixels visible inside the selected rectangle."""
 
-    def capture(self, region: ScreenRegion):
+    def __init__(self, *, mss_factory=None, numpy_module=None):
+        self._mss_factory = mss_factory
+        self._numpy_module = numpy_module
+        self.frame_invariant = None
+        self.initial_measurement = None
+        self.last_capture_metrics = None
+
+    def _dependencies(self):
         try:
-            import mss
-            import numpy as np
+            if self._mss_factory is None:
+                import mss
+
+                mss_factory = mss.MSS
+            else:
+                mss_factory = self._mss_factory
+            if self._numpy_module is None:
+                import numpy as numpy_module
+            else:
+                numpy_module = self._numpy_module
         except ImportError as exc:
             raise RuntimeError("mss and NumPy are required for screen capture") from exc
-        with mss.MSS() as sct:
-            shot = sct.grab(region.as_mss_monitor())
+        return mss_factory, numpy_module
+
+    @staticmethod
+    def _primary_region(capture) -> ScreenRegion:
+        monitor = select_primary_mss_monitor(capture.monitors)
+        return ScreenRegion(
+            left=int(monitor["left"]),
+            top=int(monitor["top"]),
+            width=int(monitor["width"]),
+            height=int(monitor["height"]),
+        )
+
+    @staticmethod
+    def _grab_observation(capture, numpy_module, region):
+        screenshot = capture.grab(region.as_mss_monitor())
+        array = numpy_module.asarray(screenshot)
+        metrics = observe_capture(region, screenshot, array)
+        return screenshot, array, metrics
+
+    def _establish_with_session(self, capture, numpy_module):
+        primary = self._primary_region(capture)
+        _screenshot, _array, metrics = self._grab_observation(
+            capture,
+            numpy_module,
+            primary,
+        )
+        self.frame_invariant = CaptureFrameInvariant.establish(metrics)
+        self.initial_measurement = metrics
+        logger.info(
+            "event=capture_geometry_invariant result=passed stage=established "
+            "requested_width=%s requested_height=%s frame_width=%s "
+            "frame_height=%s ndarray_shape=%s scale_x=%.6f scale_y=%.6f",
+            metrics.requested_bounds.width,
+            metrics.requested_bounds.height,
+            metrics.screenshot_size[0],
+            metrics.screenshot_size[1],
+            metrics.ndarray_shape,
+            metrics.capture_scale_x,
+            metrics.capture_scale_y,
+        )
+        return metrics
+
+    def establish_geometry_invariant(self):
+        """Measure and bind the expected MSS relation for this process session."""
+
+        mss_factory, numpy_module = self._dependencies()
+        try:
+            with mss_factory() as capture:
+                return self._establish_with_session(capture, numpy_module)
+        except CaptureGeometryInvariantError as exc:
+            logger.error(
+                "event=capture_geometry_invariant result=failed "
+                "stage=establish reason=%s",
+                str(exc).replace(" ", "_"),
+            )
+            raise
+
+    def capture(self, region: ScreenRegion):
+        mss_factory, numpy_module = self._dependencies()
+        try:
+            with mss_factory() as capture:
+                if self.frame_invariant is None:
+                    self._establish_with_session(capture, numpy_module)
+                _screenshot, array, metrics = self._grab_observation(
+                    capture,
+                    numpy_module,
+                    region,
+                )
+            self.frame_invariant.validate(metrics)
+            self.last_capture_metrics = metrics
+        except CaptureGeometryInvariantError as exc:
+            logger.error(
+                "event=capture_geometry_invariant result=failed "
+                "stage=capture reason=%s",
+                str(exc).replace(" ", "_"),
+            )
+            raise
+
+        logger.info(
+            "event=capture_geometry_invariant result=passed stage=capture "
+            "requested_width=%s requested_height=%s frame_width=%s "
+            "frame_height=%s ndarray_shape=%s scale_x=%.6f scale_y=%.6f",
+            metrics.requested_bounds.width,
+            metrics.requested_bounds.height,
+            metrics.screenshot_size[0],
+            metrics.screenshot_size[1],
+            metrics.ndarray_shape,
+            metrics.capture_scale_x,
+            metrics.capture_scale_y,
+        )
         # Drop alpha. MSS byte order is BGRA, which RapidOCR accepts as BGR.
-        return np.asarray(shot)[:, :, :3].copy()
+        return array[:, :, :3].copy()
 
 
 class RapidOCRBackend:

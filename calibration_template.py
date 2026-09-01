@@ -203,9 +203,13 @@ def create_calibration_profile_interactive(
     return EXIT_SUCCESS
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(
+    argv: Optional[list[str]] = None,
+    *,
+    select_region: Callable[..., ScreenRegion] = select_screen_region,
+) -> int:
     _ = argv
-    return create_calibration_profile_interactive()
+    return create_calibration_profile_interactive(select_region=select_region)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,16 @@
 """Mac development entry point for calibration and one-region RapidOCR tests."""
 
 import argparse
+import logging
 from pathlib import Path
 import sys
 
+import platform_services
 from ocr_calibration import CalibrationCancelled, save_region_preview, select_screen_region
 from ocr_detector import MSSScreenCapture, OCRKeywordDetector, RapidOCRBackend
+
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args():
@@ -32,6 +37,13 @@ def main() -> int:
     except CalibrationCancelled:
         print("OCR calibration cancelled")
         return 2
+
+    if not platform_services.bring_boss_foreground(logger):
+        print(
+            "BOSS Chrome focus could not be restored after calibration",
+            file=sys.stderr,
+        )
+        return 3
 
     capture = MSSScreenCapture()
     print(f"Selected region: {region}")

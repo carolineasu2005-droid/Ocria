@@ -97,6 +97,10 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             "forward_keywords",
             "stop_event",
             "stop_reason",
+            "mac_fresh_calibration_policy_active",
+            "mac_fresh_region_ids",
+            "mac_initial_candidate_region",
+            "mac_screen_metrics_snapshot",
         )
         self.saved = {name: getattr(simple_brush, name) for name in names}
         simple_brush.ocr_record_store = None
@@ -128,8 +132,22 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
                 model="test-model",
             ),
         )
+        self.permissions_patcher = patch.object(
+            simple_brush,
+            "ensure_permissions",
+            return_value=Mock(all_required=True),
+        )
+        self.permissions_patcher.start()
+        self.macos_runtime_patcher = patch.object(
+            simple_brush,
+            "is_macos_runtime",
+            return_value=False,
+        )
+        self.macos_runtime_patcher.start()
 
     def tearDown(self):
+        self.macos_runtime_patcher.stop()
+        self.permissions_patcher.stop()
         for name, value in self.saved.items():
             setattr(simple_brush, name, value)
 
@@ -1176,8 +1194,8 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
                 "calibration_profile": "",
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(
                 simple_brush,
                 "ensure_ocr_region_calibrated",
@@ -1309,8 +1327,8 @@ class Stage0MainFlowIntegrationTests(unittest.TestCase):
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(
                 simple_brush,
                 "ensure_ocr_region_calibrated",

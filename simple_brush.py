@@ -9,28 +9,34 @@ BOSS 直聘推荐牛人自动刷简历 v4 —— 键盘翻页 + 智能邮件转�
 4. 每位候选人详情页停留 12-18 秒（随机），期间随机滚动
 5. 停留期间检测详情页内容，命中任意关键词规则则触发邮件转发
 6. 转发完成后右键恢复键盘焦点，继续用右方向键翻页
-7. 每 100 人自动 F5 刷新
+7. 每 100 人自动 Command+R 刷新
 8. ESC 停止 / 空格暂停
 """
 import sys
 import io
-import os
-import ctypes
-from ctypes import wintypes
 import time
 import random
 import math
 import logging
+import platform
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-import win32gui
-import win32con
-import win32clipboard
-import win32process
 import pyautogui
-from pynput import keyboard
+
+import platform_services
+from platform_services import (
+    GlobalHotkeyMonitor,
+    clear_selection,
+    copy,
+    ensure_permissions,
+    format_permission_failure,
+    read_clipboard_text,
+    refresh_browser,
+    select_all,
+)
+from platform_services.screen_metrics import collect_screen_metrics
 
 from ocr_calibration import (
     CalibrationCancelled,
@@ -554,7 +560,8 @@ def region_around(x, y, radius):
     )
 
 
-# 坐标由用户手动从 1920×1080 截图读出（2026-06-30 校准）
+# Legacy Windows-only fallback coordinates read from a 1920×1080 screenshot.
+# ``begin_mac_fresh_calibration_policy`` clears them before Mac automation.
 # 转发牛人图标（候选人详情页右上角最右边的第3个图标）
 FORWARD_ICON_X   = 1670
 FORWARD_ICON_Y   = 260
@@ -724,6 +731,13 @@ favorite_button_region = None
 # 校准模板选择状态（模板区域注入后供现有流程读取）
 selected_calibration_profile = None
 
+# MAC-R05 safety state. Object identity distinguishes regions created by the
+# current Tk calibration session from equal-valued defaults/stored profiles.
+mac_fresh_calibration_policy_active = False
+mac_fresh_region_ids = {}
+mac_initial_candidate_region = None
+mac_screen_metrics_snapshot = None
+
 # OCR 状态（每次运行只初始化、校准一次）
 ocr_backend = None
 ocr_capture = None
@@ -737,6 +751,241 @@ ocr_record_store = None
 current_candidate_builder = None
 candidate_record_sequence = 0
 recorded_observation_ids: Dict[int, ScanObservation] = {}
+
+
+class CalibrationRuntimeAbort(RuntimeError):
+    """Stop automation when calibration lifecycle safety cannot be verified."""
+
+
+def request_calibration_runtime_stop(reason):
+    """Record one fail-closed calibration stop without issuing input."""
+
+    global stop_event, stop_reason
+    if stop_reason is None:
+        stop_reason = reason
+    stop_event = True
+
+
+def is_macos_runtime():
+    """Return whether the current runtime must use the MAC-R05 policy."""
+
+    return platform.system() == "Darwin"
+
+
+def reset_mac_fresh_calibration_policy():
+    """Clear process-local Mac coordinate authorization at run startup."""
+
+    global mac_fresh_calibration_policy_active
+    global mac_fresh_region_ids
+    global mac_initial_candidate_region
+    global mac_screen_metrics_snapshot
+
+    mac_fresh_calibration_policy_active = False
+    mac_fresh_region_ids = {}
+    mac_initial_candidate_region = None
+    mac_screen_metrics_snapshot = None
+
+
+def begin_mac_fresh_calibration_policy():
+    """Reject all default/stored coordinates and require this-run regions."""
+
+    global mac_fresh_calibration_policy_active
+    global mac_fresh_region_ids
+    global mac_initial_candidate_region
+    global mac_screen_metrics_snapshot
+    global forward_click_regions
+    global forward_click_calibration_requested
+    global forward_click_calibration_attempted
+    global batch_filter_regions
+    global batch_filter_enabled
+    global batch_filter_calibration_requested
+    global batch_filter_calibration_attempted
+    global focus_restore_region
+    global focus_restore_calibration_requested
+    global focus_restore_calibration_attempted
+    global favorite_button_region
+
+    if not is_macos_runtime():
+        return False
+
+    use_batch_filter = bool(
+        batch_filter_enabled or batch_filter_calibration_requested
+    )
+    mac_fresh_calibration_policy_active = True
+    mac_fresh_region_ids = {}
+    mac_initial_candidate_region = None
+    mac_screen_metrics_snapshot = None
+
+    # Values may remain in user profile files, but cannot enter Mac automation.
+    forward_click_regions = None
+    batch_filter_regions = None
+    batch_filter_enabled = False
+    focus_restore_region = None
+    favorite_button_region = None
+
+    batch_filter_calibration_requested = use_batch_filter
+    batch_filter_calibration_attempted = False
+    focus_restore_calibration_requested = True
+    focus_restore_calibration_attempted = False
+    forward_click_calibration_requested = bool(
+        action_mode == ACTION_MODE_FORWARD and not no_forward_mode
+    )
+    forward_click_calibration_attempted = False
+    logger.info(
+        "event=mac_calibration_policy result=fresh_required "
+        "stored_regions=ignored windows_defaults=ignored "
+        "batch_filter_required=%s forward_required=%s "
+        "focus_restore_required=true ocr_required=true",
+        str(batch_filter_calibration_requested).lower(),
+        str(forward_click_calibration_requested).lower(),
+    )
+    return True
+
+
+def _mark_fresh_mac_region(region):
+    if mac_fresh_calibration_policy_active and region is not None:
+        # Keep a strong identity reference so a later object cannot reuse an
+        # authorized ``id`` after an interrupted multi-step calibration.
+        mac_fresh_region_ids[id(region)] = region
+    return region
+
+
+def _require_fresh_mac_region(region, purpose):
+    if not mac_fresh_calibration_policy_active:
+        return True
+    if (
+        region is not None
+        and mac_fresh_region_ids.get(id(region)) is region
+    ):
+        return True
+    logger.error(
+        "event=mac_calibration_policy result=blocked purpose=%s "
+        "reason=region_not_fresh",
+        purpose,
+    )
+    request_calibration_runtime_stop("mac_fresh_calibration_required")
+    raise CalibrationRuntimeAbort(
+        f"fresh macOS calibration is required for {purpose}"
+    )
+
+
+def ensure_mac_coordinate_session_ready():
+    """Measure geometry and establish the capture invariant before automation."""
+
+    global mac_screen_metrics_snapshot
+
+    if not mac_fresh_calibration_policy_active:
+        return True
+    if (
+        mac_screen_metrics_snapshot is not None
+        and ocr_capture is not None
+        and getattr(ocr_capture, "frame_invariant", None) is not None
+    ):
+        return True
+    try:
+        snapshot = collect_screen_metrics(pyautogui_module=pyautogui)
+        pyautogui_width, pyautogui_height = snapshot.pyautogui_size
+        primary = snapshot.mss_primary_monitor
+        if pyautogui_width <= 0 or pyautogui_height <= 0:
+            raise RuntimeError("PyAutoGUI screen dimensions are invalid")
+        if ocr_capture is None:
+            raise RuntimeError("OCR screen capture is unavailable")
+        capture_metrics = ocr_capture.establish_geometry_invariant()
+        mac_screen_metrics_snapshot = snapshot
+    except Exception as exc:
+        logger.error(
+            "event=screen_metrics result=failed error_type=%s",
+            type(exc).__name__,
+        )
+        request_calibration_runtime_stop("screen_geometry_validation_failed")
+        return False
+
+    native = snapshot.native_screen
+    logger.info(
+        "event=screen_metrics result=success "
+        "pyautogui_width=%s pyautogui_height=%s "
+        "pyautogui_x=%s pyautogui_y=%s "
+        "mss_primary_left=%s mss_primary_top=%s "
+        "mss_primary_width=%s mss_primary_height=%s "
+        "native_frame_left=%s native_frame_top=%s "
+        "native_frame_width=%s native_frame_height=%s "
+        "backing_scale_factor=%.6f",
+        pyautogui_width,
+        pyautogui_height,
+        snapshot.pyautogui_position.x,
+        snapshot.pyautogui_position.y,
+        primary.left,
+        primary.top,
+        primary.width,
+        primary.height,
+        native.frame.left,
+        native.frame.top,
+        native.frame.width,
+        native.frame.height,
+        native.backing_scale_factor,
+    )
+    logger.info(
+        "event=coordinate_scale_observation "
+        "mss_to_pyautogui_scale_x=%.6f "
+        "mss_to_pyautogui_scale_y=%.6f "
+        "capture_scale_x=%.6f capture_scale_y=%.6f",
+        primary.width / pyautogui_width,
+        primary.height / pyautogui_height,
+        capture_metrics.capture_scale_x,
+        capture_metrics.capture_scale_y,
+    )
+    return True
+
+
+def restore_browser_after_calibration():
+    """Reacquire and verify BOSS after the Tk overlay has been destroyed."""
+
+    try:
+        restored = bring_boss_foreground()
+    except Exception as exc:
+        logger.error(
+            "event=browser_focus_restore stage=post_calibration "
+            "result=failed error_type=%s",
+            type(exc).__name__,
+        )
+        request_calibration_runtime_stop("browser_focus_restore_failed")
+        return False
+    if restored:
+        logger.info(
+            "event=browser_focus_restore stage=post_calibration result=success"
+        )
+        return True
+    logger.error(
+        "event=browser_focus_restore stage=post_calibration result=failed"
+    )
+    request_calibration_runtime_stop("browser_focus_restore_failed")
+    return False
+
+
+def select_screen_region_with_browser_restore(*args, **kwargs):
+    """Select one region, then cross the verified browser-focus barrier."""
+
+    try:
+        region = select_screen_region(*args, **kwargs)
+    except CalibrationCancelled:
+        if not restore_browser_after_calibration():
+            raise CalibrationRuntimeAbort(
+                "browser focus restoration failed after calibration cancellation"
+            )
+        raise
+    except Exception as exc:
+        restored = restore_browser_after_calibration()
+        if restored:
+            request_calibration_runtime_stop("calibration_overlay_failed")
+        raise CalibrationRuntimeAbort(
+            "calibration overlay failed; automation stopped"
+        ) from exc
+
+    if not restore_browser_after_calibration():
+        raise CalibrationRuntimeAbort(
+            "browser focus restoration failed after calibration"
+        )
+    return _mark_fresh_mac_region(region)
 
 
 @dataclass(frozen=True)
@@ -1288,30 +1537,50 @@ def close_run_ocr_storage(status: RunStatus) -> None:
 # ─── 安全控制 ───────────────────────────────────────
 _programmatic_esc = False  # 程序按的 ESC，不触发停止
 
-def on_press(key):
-    global stop_event, stop_reason, paused
-    if key == keyboard.Key.esc:
-        if _programmatic_esc:
-            return True  # 程序触发的 ESC，忽略
-        if (
-            ocr_calibration_in_progress
-            or focus_restore_calibration_in_progress
-            or forward_click_calibration_in_progress
-            or batch_filter_calibration_in_progress
-        ):
-            return True  # 交给 Tk 校准窗口处理，只取消校准，不停止浏览
-        if stop_reason is None:
-            stop_reason = 'esc'
-            logger.info('⚡ 收到 ESC，准备停止')
-        stop_event = True
-        return False
-    if key == keyboard.Key.space:
-        paused = not paused
-        logger.info(f'{"▶ 继续" if not paused else "⏸ 暂停"}')
+def handle_global_escape():
+    """Preserve the existing cooperative ESC stop semantics."""
+    global stop_event, stop_reason
+    if _programmatic_esc:
+        return True
+    if (
+        ocr_calibration_in_progress
+        or focus_restore_calibration_in_progress
+        or forward_click_calibration_in_progress
+        or batch_filter_calibration_in_progress
+    ):
+        return True  # 交给 Tk 校准窗口处理，只取消校准，不停止浏览
+    if stop_reason is None:
+        stop_reason = 'esc'
+        logger.info('⚡ 收到 ESC，准备停止')
+    stop_event = True
+    return False
 
 
-listener = keyboard.Listener(on_press=on_press)
-# 注意：listener.start() 在 run() 中调用，避免 exe 闪退
+def handle_global_space():
+    """Toggle the existing cooperative pause state once per physical press."""
+    global paused
+    paused = not paused
+    logger.info(f'{"▶ 继续" if not paused else "⏸ 暂停"}')
+
+
+def handle_global_hotkey_failure(reason):
+    """Request a safe stop if the native monitor dies after startup."""
+    global stop_event, stop_reason
+    if stop_reason is None:
+        stop_reason = 'hotkey_monitor_failed'
+    stop_event = True
+    logger.error(
+        'event=global_hotkey_monitor_runtime result=failed reason=%s',
+        reason,
+    )
+
+
+hotkey_monitor = GlobalHotkeyMonitor(
+    on_escape=handle_global_escape,
+    on_space=handle_global_space,
+    on_failure=handle_global_hotkey_failure,
+    logger=logger,
+)
 
 
 # ─── 用户交互输入 ───────────────────────────────────
@@ -1323,7 +1592,9 @@ def choose_startup_action():
 def launch_calibration_template():
     """Run the existing template generator and always return to this process."""
     try:
-        calibration_template_main()
+        calibration_template_main(
+            select_region=select_screen_region_with_browser_restore,
+        )
     except KeyboardInterrupt:
         print('\n校准模板流程已取消，未保存不完整模板。')
     except Exception as exc:
@@ -1787,89 +2058,9 @@ def get_user_input(
 
 # ─── 窗口操作 ───────────────────────────────────────
 
-SUPPORTED_BOSS_BROWSERS = {
-    'chrome.exe': 'Chrome',
-    'msedge.exe': 'Edge',
-}
-
-
-def get_window_process_name(hwnd):
-    """Return the executable name for a top-level Windows window."""
-    handle = None
-    try:
-        _, process_id = win32process.GetWindowThreadProcessId(hwnd)
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, process_id)
-        if not handle:
-            return ''
-        size = wintypes.DWORD(32768)
-        buffer = ctypes.create_unicode_buffer(size.value)
-        if not ctypes.windll.kernel32.QueryFullProcessImageNameW(
-            handle, 0, buffer, ctypes.byref(size)
-        ):
-            return ''
-        return os.path.basename(buffer.value).lower()
-    except Exception:
-        return ''
-    finally:
-        if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
-
-
-def is_boss_browser_window(title, process_name):
-    """Reject unrelated apps whose title merely contains the word BOSS."""
-    return (
-        process_name in SUPPORTED_BOSS_BROWSERS
-        and ('BOSS' in title or 'zhipin' in title.lower())
-    )
-
-
 def bring_boss_foreground():
-    """将 BOSS 直聘浏览器窗口置顶，优先 Chrome，其次 Edge。"""
-    chrome_windows = []
-    edge_windows = []
-
-    def cb(hwnd, _):
-        if not win32gui.IsWindowVisible(hwnd):
-            return True
-        title = win32gui.GetWindowText(hwnd)
-        process_name = get_window_process_name(hwnd)
-        if is_boss_browser_window(title, process_name):
-            candidate = (hwnd, title, SUPPORTED_BOSS_BROWSERS[process_name])
-            if process_name == 'chrome.exe':
-                chrome_windows.append(candidate)
-            else:
-                edge_windows.append(candidate)
-        return True
-
-    win32gui.EnumWindows(cb, None)
-
-    if chrome_windows:
-        hwnd, title, browser = chrome_windows[0]
-    elif edge_windows:
-        hwnd, title, browser = edge_windows[0]
-    else:
-        logger.error('❌ 找不到 BOSS 直聘 Chrome / Edge 窗口')
-        return False
-
-    if win32gui.IsIconic(hwnd):
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        time.sleep(0.3)
-
-    try:
-        win32gui.SetForegroundWindow(hwnd)
-        time.sleep(0.5)
-        logger.info(f'✅ BOSS {browser} 已置顶: {title}')
-        return True
-    except Exception as e:
-        logger.error(
-            '❌ 置顶失败 browser=%s error_type=%s', browser, type(e).__name__
-        )
-        return False
-
-
-def bring_edge_foreground():
-    """兼容旧调用入口。"""
-    return bring_boss_foreground()
+    """Acquire the eligible BOSS Chrome window through the macOS service."""
+    return platform_services.bring_boss_foreground(logger)
 
 
 # ─── 基础工具 ───────────────────────────────────────
@@ -2249,6 +2440,7 @@ def random_point_in_inner_region(region, ratio=0.6):
 
 def click_in_region(region):
     """Click one random point inside a region without adding a second offset."""
+    _require_fresh_mac_region(region, "region_click")
     x, y = random_point_in_region(region)
     human_click(
         x,
@@ -2265,6 +2457,7 @@ def perform_favorite_action():
         logger.warning('收藏按钮区域未校准，跳过收藏点击以避免盲点')
         return False
 
+    _require_fresh_mac_region(favorite_button_region, "favorite_click")
     x, y = random_point_in_inner_region(favorite_button_region)
     human_click(
         x,
@@ -2285,6 +2478,7 @@ def restore_candidate_page_focus_after_favorite():
 
 def restore_candidate_detail_focus():
     """Restore candidate-detail focus through the calibrated safe region."""
+    _require_fresh_mac_region(focus_restore_region, "focus_restore")
     restored = True
     for attempt in range(1, 3):
         try:
@@ -2313,21 +2507,8 @@ def restore_candidate_page_focus():
 
 
 def get_clipboard_text():
-    """读取剪贴板文本（CF_UNICODETEXT）。失败返回空字符串。"""
-    try:
-        win32clipboard.OpenClipboard()
-        if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
-            data = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-        else:
-            data = ""
-        win32clipboard.CloseClipboard()
-        return data
-    except Exception:
-        try:
-            win32clipboard.CloseClipboard()
-        except Exception:
-            pass
-        return ""
+    """Compatibility entry point for safe macOS clipboard text reads."""
+    return read_clipboard_text()
 
 
 def type_text_human(text):
@@ -2422,8 +2603,11 @@ def ensure_ocr_region_calibrated():
     logger.info('请框选主显示器上的候选人详情正文区域；按 Esc 取消校准。')
     ocr_calibration_in_progress = True
     try:
-        region = select_screen_region()
+        region = select_screen_region_with_browser_restore()
+        _require_fresh_mac_region(region, "ocr_capture")
         preview = save_region_preview(region, OCR_PREVIEW_PATH, ocr_capture.capture)
+    except CalibrationRuntimeAbort:
+        raise
     except CalibrationCancelled:
         logger.warning('🛡 OCR 校准已取消，本次运行禁用自动转发并继续浏览')
         return False
@@ -2510,6 +2694,51 @@ def reset_batch_filter_calibration():
     batch_filter_enabled = False
 
 
+def ensure_initial_candidate_region_calibrated():
+    """Calibrate the non-filtered first-card click for this Mac run."""
+
+    global mac_initial_candidate_region
+
+    if not mac_fresh_calibration_policy_active:
+        return mac_initial_candidate_region
+    if (
+        mac_initial_candidate_region is not None
+        and mac_fresh_region_ids.get(id(mac_initial_candidate_region))
+        is mac_initial_candidate_region
+    ):
+        return mac_initial_candidate_region
+    try:
+        mac_initial_candidate_region = select_screen_region_with_browser_restore(
+            min_size=20,
+            instruction='框选首位候选人卡片内部安全区域 · Esc 停止运行',
+            subtitle='Mac 本次运行新鲜校准 · 只框选，不会立即点击',
+        )
+        logger.info(
+            "event=mac_calibration_policy result=fresh_region_ready "
+            "purpose=initial_candidate"
+        )
+        return mac_initial_candidate_region
+    except CalibrationRuntimeAbort:
+        raise
+    except CalibrationCancelled:
+        mac_initial_candidate_region = None
+        request_calibration_runtime_stop("mac_fresh_calibration_cancelled")
+        logger.warning(
+            "event=mac_calibration_policy result=blocked "
+            "purpose=initial_candidate reason=cancelled"
+        )
+        return None
+    except Exception as exc:
+        mac_initial_candidate_region = None
+        request_calibration_runtime_stop("mac_fresh_calibration_failed")
+        logger.error(
+            "event=mac_calibration_policy result=blocked "
+            "purpose=initial_candidate reason=failed error_type=%s",
+            type(exc).__name__,
+        )
+        return None
+
+
 def close_batch_filter_panel_after_calibration():
     """Best-effort close of the filter panel without stopping the run."""
     global _programmatic_esc
@@ -2539,12 +2768,12 @@ def ensure_batch_filter_regions_calibrated():
     panel_close_attempted = False
 
     try:
-        first_candidate = select_screen_region(
+        first_candidate = select_screen_region_with_browser_restore(
             min_size=20,
             instruction='框选首位候选人卡片内部安全区域 · Esc 使用旧流程',
             subtitle='校准 1/4 · 只框选，不会打开候选人详情',
         )
-        open_filter = select_screen_region(
+        open_filter = select_screen_region_with_browser_restore(
             min_size=12,
             instruction='框选“打开筛选”按钮内部安全区域 · Esc 使用旧流程',
             subtitle='校准 2/4 · 程序将用该区域打开筛选面板',
@@ -2556,12 +2785,12 @@ def ensure_batch_filter_regions_calibrated():
         if not human_delay(0.5, 1.0):
             raise RuntimeError('打开筛选面板的等待被中断')
 
-        unseen_filter = select_screen_region(
+        unseen_filter = select_screen_region_with_browser_restore(
             min_size=12,
             instruction='框选“最近没看过”选项内部安全区域 · Esc 使用旧流程',
             subtitle='校准 3/4 · 只框选，不会选择该筛选项',
         )
-        confirm_filter = select_screen_region(
+        confirm_filter = select_screen_region_with_browser_restore(
             min_size=12,
             instruction='框选“筛选确定”按钮内部安全区域 · Esc 使用旧流程',
             subtitle='校准 4/4 · 只框选，不会应用筛选',
@@ -2580,6 +2809,8 @@ def ensure_batch_filter_regions_calibrated():
         batch_filter_regions = calibrated_regions
         batch_filter_enabled = True
         logger.info('✅ 自动筛选归位区域校准完成')
+    except CalibrationRuntimeAbort:
+        raise
     except CalibrationCancelled:
         batch_filter_regions = None
         batch_filter_enabled = False
@@ -2594,7 +2825,11 @@ def ensure_batch_filter_regions_calibrated():
             exc_info=False,
         )
     finally:
-        if panel_may_be_open and not panel_close_attempted:
+        if (
+            panel_may_be_open
+            and not panel_close_attempted
+            and not stop_event
+        ):
             try:
                 close_batch_filter_panel_after_calibration()
             except Exception as exc:
@@ -2633,7 +2868,7 @@ def ensure_forward_click_regions_calibrated():
     forward_click_calibration_attempted = True
     forward_click_calibration_in_progress = True
     try:
-        forward_icon = select_screen_region(
+        forward_icon = select_screen_region_with_browser_restore(
             min_size=12,
             instruction='框选详情页右上角“转发牛人”图标内部安全区域 · Esc 使用全部默认区域',
             subtitle='校准 1/5 · 程序将用该区域打开转发弹窗',
@@ -2642,7 +2877,7 @@ def ensure_forward_click_regions_calibrated():
         if not human_delay(0.8, 1.2):
             raise RuntimeError('打开转发弹窗的等待被中断')
 
-        email_tab = select_screen_region(
+        email_tab = select_screen_region_with_browser_restore(
             min_size=12,
             instruction='框选弹窗左侧“邮件转发” Tab 内部安全区域 · Esc 使用全部默认区域',
             subtitle='校准 2/5 · 程序将用该区域进入邮件转发界面',
@@ -2651,17 +2886,17 @@ def ensure_forward_click_regions_calibrated():
         if not human_delay(0.5, 0.8):
             raise RuntimeError('切换邮件转发 Tab 的等待被中断')
 
-        input_box = select_screen_region(
+        input_box = select_screen_region_with_browser_restore(
             min_size=12,
             instruction='框选邮箱输入框内部安全点击区域 · Esc 使用全部默认区域',
             subtitle='校准 3/5 · 只框选，不会输入内容',
         )
-        recent_email = select_screen_region(
+        recent_email = select_screen_region_with_browser_restore(
             min_size=12,
             instruction='框选“最近联系”中第一个邮箱标签内部安全区域 · Esc 使用全部默认区域',
             subtitle='校准 4/5 · 只框选，不会触发转发',
         )
-        forward_button = select_screen_region(
+        forward_button = select_screen_region_with_browser_restore(
             min_size=12,
             instruction='框选右下角“转发”按钮内部安全区域 · Esc 使用全部默认区域',
             subtitle='校准 5/5 · 只框选，程序绝不点击此按钮',
@@ -2675,25 +2910,45 @@ def ensure_forward_click_regions_calibrated():
             forward_button=forward_button,
         )
         logger.info('✅ 完整转发点击区域校准完成')
+    except CalibrationRuntimeAbort:
+        raise
     except CalibrationCancelled:
-        forward_click_regions = DEFAULT_FORWARD_CLICK_REGIONS
-        logger.warning('完整转发点击区域校准已取消，本次运行全部使用默认区域')
-    except Exception as exc:
-        forward_click_regions = DEFAULT_FORWARD_CLICK_REGIONS
-        logger.exception(
-            '完整转发点击区域校准失败，本次运行全部使用默认区域 '
-            'error_type=%s',
-            type(exc).__name__,
-            exc_info=False,
-        )
-    finally:
-        try:
-            close_forward_dialog_after_calibration()
-        except Exception as exc:
+        if mac_fresh_calibration_policy_active:
+            forward_click_regions = None
+            request_calibration_runtime_stop("mac_fresh_calibration_cancelled")
             logger.warning(
-                '校准后关闭转发弹窗失败，继续本次运行 error_type=%s',
+                "event=mac_calibration_policy result=blocked "
+                "purpose=forward_regions reason=cancelled"
+            )
+        else:
+            forward_click_regions = DEFAULT_FORWARD_CLICK_REGIONS
+            logger.warning('完整转发点击区域校准已取消，本次运行全部使用默认区域')
+    except Exception as exc:
+        if mac_fresh_calibration_policy_active:
+            forward_click_regions = None
+            request_calibration_runtime_stop("mac_fresh_calibration_failed")
+            logger.error(
+                "event=mac_calibration_policy result=blocked "
+                "purpose=forward_regions reason=failed error_type=%s",
                 type(exc).__name__,
             )
+        else:
+            forward_click_regions = DEFAULT_FORWARD_CLICK_REGIONS
+            logger.exception(
+                '完整转发点击区域校准失败，本次运行全部使用默认区域 '
+                'error_type=%s',
+                type(exc).__name__,
+                exc_info=False,
+            )
+    finally:
+        if not stop_event:
+            try:
+                close_forward_dialog_after_calibration()
+            except Exception as exc:
+                logger.warning(
+                    '校准后关闭转发弹窗失败，继续本次运行 error_type=%s',
+                    type(exc).__name__,
+                )
         forward_click_calibration_in_progress = False
 
     return forward_click_regions
@@ -2713,7 +2968,7 @@ def ensure_focus_restore_region_calibrated():
     focus_restore_calibration_attempted = True
     focus_restore_calibration_in_progress = True
     try:
-        focus_restore_region = select_screen_region(
+        focus_restore_region = select_screen_region_with_browser_restore(
             min_size=20,
             instruction='拖动框选候选人详情页空白区域 · Esc 使用默认区域',
             subtitle='第一版仅支持主显示器',
@@ -2725,16 +2980,35 @@ def ensure_focus_restore_region_calibrated():
             focus_restore_region.width,
             focus_restore_region.height,
         )
+    except CalibrationRuntimeAbort:
+        raise
     except CalibrationCancelled:
-        focus_restore_region = DEFAULT_FOCUS_RESTORE_REGION
-        logger.warning('焦点恢复区域校准已取消，本次运行使用默认区域')
+        if mac_fresh_calibration_policy_active:
+            focus_restore_region = None
+            request_calibration_runtime_stop("mac_fresh_calibration_cancelled")
+            logger.warning(
+                "event=mac_calibration_policy result=blocked "
+                "purpose=focus_restore reason=cancelled"
+            )
+        else:
+            focus_restore_region = DEFAULT_FOCUS_RESTORE_REGION
+            logger.warning('焦点恢复区域校准已取消，本次运行使用默认区域')
     except Exception as exc:
-        focus_restore_region = DEFAULT_FOCUS_RESTORE_REGION
-        logger.exception(
-            '焦点恢复区域校准失败，本次运行使用默认区域 error_type=%s',
-            type(exc).__name__,
-            exc_info=False,
-        )
+        if mac_fresh_calibration_policy_active:
+            focus_restore_region = None
+            request_calibration_runtime_stop("mac_fresh_calibration_failed")
+            logger.error(
+                "event=mac_calibration_policy result=blocked "
+                "purpose=focus_restore reason=failed error_type=%s",
+                type(exc).__name__,
+            )
+        else:
+            focus_restore_region = DEFAULT_FOCUS_RESTORE_REGION
+            logger.exception(
+                '焦点恢复区域校准失败，本次运行使用默认区域 error_type=%s',
+                type(exc).__name__,
+                exc_info=False,
+            )
     finally:
         focus_restore_calibration_in_progress = False
 
@@ -2749,7 +3023,7 @@ def ensure_favorite_button_region_calibrated():
         return favorite_button_region
 
     try:
-        favorite_button_region = select_screen_region(
+        favorite_button_region = select_screen_region_with_browser_restore(
             min_size=12,
             instruction='框选“收藏”按钮内部安全区域 · Esc 取消收藏区域校准',
             subtitle='调用校准模板前，请确保 Boss 页面窗口位置、大小、缩放状态与校准时基本一致',
@@ -2762,6 +3036,8 @@ def ensure_favorite_button_region_calibrated():
             favorite_button_region.height,
         )
         return favorite_button_region
+    except CalibrationRuntimeAbort:
+        raise
     except CalibrationCancelled:
         favorite_button_region = None
         logger.warning('收藏按钮区域校准已取消，本次不会盲点收藏按钮')
@@ -2986,11 +3262,11 @@ def forward_one_candidate():
         time.sleep(0.1)
         if stop_event:
             return False
-        pyautogui.hotkey('ctrl', 'a')
+        select_all()
         time.sleep(0.05)
         if stop_event:
             return False
-        pyautogui.hotkey('ctrl', 'c')
+        copy()
         time.sleep(0.08)
         if stop_event:
             return False
@@ -3013,11 +3289,11 @@ def forward_one_candidate():
                 time.sleep(0.1)
                 if stop_event:
                     return False
-                pyautogui.hotkey('ctrl', 'a')
+                select_all()
                 time.sleep(0.05)
                 if stop_event:
                     return False
-                pyautogui.press('delete')
+                clear_selection()
                 time.sleep(0.05)
                 if stop_event or not type_text_human(backup_email):
                     return False
@@ -3055,6 +3331,13 @@ def forward_one_candidate():
 def click_first_candidate(x, y):
     """在鼠标当前位置点击一次，打开第一位候选人详情"""
     if stop_event:
+        return False
+    if mac_fresh_calibration_policy_active:
+        logger.error(
+            "event=mac_calibration_policy result=blocked "
+            "purpose=legacy_candidate_point reason=not_session_region"
+        )
+        request_calibration_runtime_stop("mac_fresh_calibration_required")
         return False
     logger.info(f'🖱️ 点击第一位候选人: ({x}, {y})')
     pyautogui.click(x, y, duration=0)
@@ -3107,6 +3390,16 @@ def open_first_candidate_for_batch(legacy_point=None):
     """Open the first candidate through the calibrated or legacy path."""
     if batch_filter_enabled:
         return apply_batch_filter_and_open_first_candidate()
+    if mac_fresh_calibration_policy_active:
+        if mac_initial_candidate_region is None:
+            logger.error(
+                "event=mac_calibration_policy result=blocked "
+                "purpose=initial_candidate reason=region_missing"
+            )
+            request_calibration_runtime_stop("mac_fresh_calibration_required")
+            return False
+        click_in_region(mac_initial_candidate_region)
+        return safe_wait(CLICK_WAIT_SECONDS)
     if legacy_point is None:
         logger.error('旧首位候选人坐标未就绪，停止本轮运行')
         return False
@@ -3653,11 +3946,11 @@ def confirm_candidate_switch(
 
 
 def refresh_page(reason='已查看 100 位'):
-    """按 F5 刷新页面"""
+    """Refresh the active browser tab with the macOS semantic input action."""
     if stop_event:
         return False
-    logger.info(f'🔄 {reason}，按 F5 刷新页面')
-    pyautogui.press('f5')
+    logger.info(f'🔄 {reason}，按 Command+R 刷新页面')
+    refresh_browser()
     return safe_wait(REFRESH_WAIT_SECONDS)
 
 
@@ -3864,6 +4157,7 @@ def run(
     reset_focus_restore_calibration()
     reset_forward_click_calibration()
     reset_batch_filter_calibration()
+    reset_mac_fresh_calibration_policy()
     ocr_record_store = None
     current_candidate_builder = None
     candidate_record_sequence = 0
@@ -3982,15 +4276,49 @@ def run(
         close_run_ocr_storage(RunStatus.ERROR)
         return 2
 
+    # ── 原生权限是所有屏幕读取和自动控制的硬启动边界。 ──
+    try:
+        permission_report = ensure_permissions(
+            request_missing=True,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.error(
+            'event=permission_gate result=blocked '
+            'missing=unknown error_type=%s',
+            type(exc).__name__,
+        )
+        print(
+            '[错误] macOS 权限检查失败，自动控制尚未启动。\n'
+            '请检查系统权限后重新运行 Ocria。'
+        )
+        close_run_ocr_storage(RunStatus.ERROR)
+        return 2
+    if not permission_report.all_required:
+        print('\n' + format_permission_failure(permission_report))
+        close_run_ocr_storage(RunStatus.ERROR)
+        return 2
+
     # 提前初始化并复用 OCR 引擎；校准仍延迟到第一位详情打开之后。
     initialize_ocr()
 
-    # ── 启动键盘监听（必须在交互输入之后，避免 exe 中 input() 冲突） ──
+    # ── 启动原生全局安全热键；失败时不得进入自动鼠标流程。 ──
     try:
-        listener.start()
-    except Exception:
+        hotkey_ready = hotkey_monitor.start()
+    except Exception as exc:
+        logger.error(
+            'event=global_hotkey_monitor_start result=failed '
+            'reason=unexpected_error error_type=%s',
+            type(exc).__name__,
+        )
+        hotkey_ready = False
+    if not hotkey_ready:
+        logger.error(
+            'event=runtime_start result=failed '
+            'reason=global_hotkey_monitor_unavailable'
+        )
         close_run_ocr_storage(RunStatus.ERROR)
-        raise
+        return 2
 
     logger.info('\n' + '=' * 50)
     logger.info('Ocria Am7 启动')
@@ -4010,13 +4338,17 @@ def run(
     logger.info('=' * 50)
 
     try:
-        foreground_ready = bring_edge_foreground()
-    except Exception:
+        foreground_ready = bring_boss_foreground()
+    except BaseException:
+        hotkey_monitor.stop()
         close_run_ocr_storage(RunStatus.ERROR)
         raise
     if not foreground_ready:
+        hotkey_monitor.stop()
         close_run_ocr_storage(RunStatus.COMPLETED)
         return 0
+
+    begin_mac_fresh_calibration_policy()
 
     run_timer = None
     total_viewed = 0
@@ -4031,27 +4363,42 @@ def run(
 
         if batch_filter_enabled:
             legacy_point = None
+            if not ensure_mac_coordinate_session_ready():
+                return 0
             if not open_first_candidate_for_batch():
                 return 0
         else:
-            logger.info(
-                f'\n请将鼠标移到第一位候选人卡片上，'
-                f'{COUNTDOWN_SECONDS} 秒后开始...'
-            )
-            if not safe_wait(COUNTDOWN_SECONDS):
-                return 0
+            if mac_fresh_calibration_policy_active:
+                if ensure_initial_candidate_region_calibrated() is None:
+                    return 0
+                if not ensure_mac_coordinate_session_ready():
+                    return 0
+                legacy_point = None
+                if not open_first_candidate_for_batch():
+                    return 0
+            else:
+                logger.info(
+                    f'\n请将鼠标移到第一位候选人卡片上，'
+                    f'{COUNTDOWN_SECONDS} 秒后开始...'
+                )
+                if not safe_wait(COUNTDOWN_SECONDS):
+                    return 0
 
-            click_x, click_y = pyautogui.position()
-            logger.info(f'📍 固定点击位置: ({click_x}, {click_y})')
-            legacy_point = (click_x, click_y)
-            if not open_first_candidate_for_batch(legacy_point):
-                return 0
+                click_x, click_y = pyautogui.position()
+                logger.info(f'📍 固定点击位置: ({click_x}, {click_y})')
+                legacy_point = (click_x, click_y)
+                if not open_first_candidate_for_batch(legacy_point):
+                    return 0
 
         # 首位详情稳定后完成既有运行期校准；这些启动准备不计入运行时间。
         if focus_restore_calibration_requested:
             ensure_focus_restore_region_calibrated()
+            if stop_event:
+                return 0
         if forward_click_calibration_requested:
             ensure_forward_click_regions_calibrated()
+            if stop_event:
+                return 0
         if action_mode == ACTION_MODE_FAVORITE:
             if ensure_favorite_button_region_calibrated() is None:
                 return 0
@@ -4348,6 +4695,7 @@ def run(
         run_exception_type = type(e).__name__
         logger.error('运行异常 error_type=%s', run_exception_type)
     finally:
+        hotkey_monitor.stop()
         previous_candidate_context = None
         finalize_active_candidate_for_stop(run_exception_type)
         if run_timer is not None:
@@ -4475,7 +4823,7 @@ if __name__ == '__main__':
     finally:
         stop_event = True
         try:
-            listener.stop()
+            hotkey_monitor.stop()
         finally:
             close_file_logging(file_log_handler)
     if exit_code:

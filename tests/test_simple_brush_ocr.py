@@ -22,6 +22,7 @@ from calibration_profiles import CalibrationProfileError, REQUIRED_AREA_FIELDS
 from ocr_detector import DetectionResult, ScanObservation, ScreenFingerprint
 from ocr_candidate import CandidateOcrBuilder
 from ocr_records import CandidateOcrDocument, CaptureStatus, CaptureType, RunStatus
+from platform_services import browser_window as browser_window_service
 from screening_profile import (
     Criterion,
     ScreeningProfileIOError,
@@ -81,6 +82,55 @@ def not_loaded_observation():
         ocr_box_count=2,
         ocr_text_length=5,
     )
+
+
+def mac_chrome_window(
+    element,
+    title,
+    *,
+    title_state=None,
+    fullscreen=True,
+    focused=False,
+    main=False,
+    application_active=False,
+    window_order=0,
+):
+    if title_state is None:
+        if title is None:
+            title_state = browser_window_service.TitleState.UNAVAILABLE
+            title = ""
+        elif not str(title).strip():
+            title_state = browser_window_service.TitleState.EMPTY
+            title = ""
+        else:
+            title_state = browser_window_service.TitleState.PRESENT
+    return browser_window_service.ChromeWindow(
+        application="chrome-app",
+        application_element="ax-chrome-app",
+        element=element,
+        title=title,
+        title_state=title_state,
+        minimized=False,
+        fullscreen=fullscreen,
+        focused=focused,
+        main=main,
+        application_active=application_active,
+        application_order=0,
+        window_order=window_order,
+    )
+
+
+def mac_browser_api(*enumerations):
+    api = Mock()
+    api.is_available.return_value = True
+    api.running_applications.return_value = ["chrome-app"]
+    api.accessibility_trusted.return_value = True
+    api.enumerate_windows.side_effect = [list(value) for value in enumerations]
+    api.activate_application.return_value = True
+    api.raise_and_focus_window.return_value = True
+    api.verify_activation.return_value = True
+    api.elements_equal.side_effect = lambda left, right: left == right
+    return api
 
 
 def sample_batch_filter_regions():
@@ -976,6 +1026,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "focus_restore_calibration_in_progress",
                 "favorite_button_region",
                 "selected_calibration_profile",
+                "mac_fresh_calibration_policy_active",
+                "mac_fresh_region_ids",
+                "mac_initial_candidate_region",
+                "mac_screen_metrics_snapshot",
                 "ocr_backend",
                 "ocr_capture",
                 "ocr_detector",
@@ -1004,6 +1058,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         simple_brush.reset_focus_restore_calibration()
         simple_brush.favorite_button_region = None
         simple_brush.selected_calibration_profile = None
+        simple_brush.reset_mac_fresh_calibration_policy()
         simple_brush.stop_event = False
         simple_brush.stop_reason = None
         simple_brush.paused = False
@@ -1059,8 +1114,41 @@ class SimpleBrushOCRTests(unittest.TestCase):
             return_value=self.r13_store,
         )
         self.r13_store_factory_patcher.start()
+        self.permissions_patcher = patch.object(
+            simple_brush,
+            "ensure_permissions",
+            return_value=Mock(all_required=True),
+        )
+        self.permissions_patcher.start()
+        self.scan_profiles_patcher = patch.object(
+            simple_brush,
+            "scan_profiles",
+            return_value=Mock(profiles=[], invalid_profiles=[]),
+        )
+        self.scan_profiles_patcher.start()
+        self.original_calibration_browser_restore = (
+            simple_brush.restore_browser_after_calibration
+        )
+        self.calibration_browser_restore_patcher = patch.object(
+            simple_brush,
+            "restore_browser_after_calibration",
+            return_value=True,
+        )
+        self.calibration_browser_restore_patcher.start()
+        # Existing tests intentionally retain the pre-MAC-R05/Windows path;
+        # dedicated tests below opt into the Mac-only fresh-session policy.
+        self.macos_runtime_patcher = patch.object(
+            simple_brush,
+            "is_macos_runtime",
+            return_value=False,
+        )
+        self.macos_runtime_patcher.start()
 
     def tearDown(self):
+        self.macos_runtime_patcher.stop()
+        self.calibration_browser_restore_patcher.stop()
+        self.scan_profiles_patcher.stop()
+        self.permissions_patcher.stop()
         self.r13_store_factory_patcher.stop()
         self.ocr_store_factory_patcher.stop()
         simple_brush.run = self.original_run
@@ -1068,6 +1156,142 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.screening_profile_store_patcher.stop()
         for name, value in self.saved.items():
             setattr(simple_brush, name, value)
+
+    def test_mac_policy_rejects_windows_defaults_and_stored_regions(self):
+        stored = simple_brush.ScreenRegion(10, 20, 30, 40)
+        simple_brush.forward_click_regions = simple_brush.DEFAULT_FORWARD_CLICK_REGIONS
+        simple_brush.focus_restore_region = stored
+        simple_brush.batch_filter_regions = simple_brush.BatchFilterRegions(
+            first_candidate=stored,
+            open_filter=stored,
+            unseen_filter=stored,
+            confirm_filter=stored,
+        )
+        simple_brush.batch_filter_enabled = True
+        simple_brush.action_mode = simple_brush.ACTION_MODE_FORWARD
+        simple_brush.no_forward_mode = False
+
+        with patch.object(simple_brush, "is_macos_runtime", return_value=True):
+            self.assertTrue(simple_brush.begin_mac_fresh_calibration_policy())
+
+        self.assertIsNone(simple_brush.forward_click_regions)
+        self.assertIsNone(simple_brush.focus_restore_region)
+        self.assertIsNone(simple_brush.batch_filter_regions)
+        self.assertTrue(simple_brush.batch_filter_calibration_requested)
+        self.assertTrue(simple_brush.forward_click_calibration_requested)
+        self.assertTrue(simple_brush.focus_restore_calibration_requested)
+        self.assertNotIn(id(stored), simple_brush.mac_fresh_region_ids)
+
+    def test_mac_stored_region_cannot_click_without_this_session_identity(self):
+        stored = simple_brush.ScreenRegion(10, 20, 30, 40)
+        with patch.object(simple_brush, "is_macos_runtime", return_value=True):
+            simple_brush.begin_mac_fresh_calibration_policy()
+        with patch.object(simple_brush, "human_click") as click:
+            with self.assertRaises(simple_brush.CalibrationRuntimeAbort):
+                simple_brush.click_in_region(stored)
+        click.assert_not_called()
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "mac_fresh_calibration_required")
+
+    def test_mac_region_selected_this_session_is_usable(self):
+        fresh = simple_brush.ScreenRegion(10, 20, 30, 40)
+        with patch.object(simple_brush, "is_macos_runtime", return_value=True):
+            simple_brush.begin_mac_fresh_calibration_policy()
+        with (
+            patch.object(simple_brush, "select_screen_region", return_value=fresh),
+            patch.object(simple_brush, "restore_browser_after_calibration", return_value=True),
+        ):
+            selected = simple_brush.select_screen_region_with_browser_restore()
+        with (
+            patch.object(simple_brush, "random_point_in_region", return_value=(15, 25)),
+            patch.object(simple_brush, "human_click") as click,
+        ):
+            simple_brush.click_in_region(selected)
+        click.assert_called_once_with(
+            15,
+            25,
+            offset=0,
+            region_width=30,
+            region_height=40,
+        )
+
+    def test_mac_automation_without_calibration_blocks_before_input(self):
+        with patch.object(simple_brush, "is_macos_runtime", return_value=True):
+            simple_brush.begin_mac_fresh_calibration_policy()
+        with (
+            patch.object(simple_brush.pyautogui, "click") as click,
+            patch.object(simple_brush.pyautogui, "moveTo") as move,
+            patch.object(simple_brush.pyautogui, "scroll") as scroll,
+        ):
+            self.assertFalse(simple_brush.open_first_candidate_for_batch())
+        click.assert_not_called()
+        move.assert_not_called()
+        scroll.assert_not_called()
+
+    def test_mac_fresh_initial_candidate_region_allows_open(self):
+        fresh = simple_brush.ScreenRegion(10, 20, 30, 40)
+        with patch.object(simple_brush, "is_macos_runtime", return_value=True):
+            simple_brush.begin_mac_fresh_calibration_policy()
+        simple_brush.mac_initial_candidate_region = simple_brush._mark_fresh_mac_region(
+            fresh
+        )
+        with (
+            patch.object(simple_brush, "click_in_region") as click,
+            patch.object(simple_brush, "safe_wait", return_value=True),
+        ):
+            self.assertTrue(simple_brush.open_first_candidate_for_batch())
+        click.assert_called_once_with(fresh)
+
+    def test_mac_coordinate_session_measurement_establishes_invariant(self):
+        snapshot = Mock()
+        snapshot.pyautogui_size = (1440, 900)
+        snapshot.pyautogui_position = Mock(x=100, y=200)
+        snapshot.mss_primary_monitor = Mock(
+            left=0,
+            top=0,
+            width=1440,
+            height=900,
+        )
+        snapshot.native_screen = Mock(
+            frame=Mock(left=0.0, top=0.0, width=1440.0, height=900.0),
+            backing_scale_factor=2.0,
+        )
+        capture_metrics = Mock(capture_scale_x=1.0, capture_scale_y=1.0)
+        capture = Mock()
+        capture.frame_invariant = None
+        capture.establish_geometry_invariant.return_value = capture_metrics
+        simple_brush.ocr_capture = capture
+        with patch.object(simple_brush, "is_macos_runtime", return_value=True):
+            simple_brush.begin_mac_fresh_calibration_policy()
+        with patch.object(
+            simple_brush,
+            "collect_screen_metrics",
+            return_value=snapshot,
+        ) as collect:
+            self.assertTrue(simple_brush.ensure_mac_coordinate_session_ready())
+
+        collect.assert_called_once_with(pyautogui_module=simple_brush.pyautogui)
+        capture.establish_geometry_invariant.assert_called_once_with()
+        self.assertIs(simple_brush.mac_screen_metrics_snapshot, snapshot)
+
+    def test_mac_coordinate_session_failure_blocks_before_automation(self):
+        with patch.object(simple_brush, "is_macos_runtime", return_value=True):
+            simple_brush.begin_mac_fresh_calibration_policy()
+        with (
+            patch.object(
+                simple_brush,
+                "collect_screen_metrics",
+                side_effect=RuntimeError("geometry unavailable"),
+            ),
+            patch.object(simple_brush.pyautogui, "click") as click,
+            patch.object(simple_brush.pyautogui, "moveTo") as move,
+            patch.object(simple_brush.pyautogui, "scroll") as scroll,
+        ):
+            self.assertFalse(simple_brush.ensure_mac_coordinate_session_ready())
+        click.assert_not_called()
+        move.assert_not_called()
+        scroll.assert_not_called()
+        self.assertEqual(simple_brush.stop_reason, "screen_geometry_validation_failed")
 
     def test_summary_fail_open_still_saves_candidate_without_page_actions(self):
         store = Mock(enabled=True, run_id="summary-fail-open-run")
@@ -1205,10 +1429,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
             initialize_ocr = stack.enter_context(
                 patch.object(simple_brush, "initialize_ocr")
             )
-            stack.enter_context(patch.object(simple_brush.listener, "start"))
+            stack.enter_context(patch.object(simple_brush.hotkey_monitor, "start"))
             stack.enter_context(patch.object(
                 simple_brush,
-                "bring_edge_foreground",
+                "bring_boss_foreground",
                 return_value=True,
             ))
             position = stack.enter_context(patch.object(
@@ -1216,8 +1440,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "position",
                 return_value=(10, 20),
             ))
-            press = stack.enter_context(
-                patch.object(simple_brush.pyautogui, "press")
+            refresh_input = stack.enter_context(
+                patch.object(simple_brush, "refresh_browser")
             )
             open_first = stack.enter_context(patch.object(
                 simple_brush,
@@ -1322,7 +1546,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             "initialize_ocr": initialize_ocr,
             "ensure_ocr": ensure_ocr,
             "position": position,
-            "press": press,
+            "refresh_input": refresh_input,
             "open_first": open_first,
             "wait": wait,
             "detect_keywords": detect_keywords,
@@ -1483,10 +1707,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 side_effect=configure_input,
             ))
             stack.enter_context(patch.object(simple_brush, "initialize_ocr"))
-            stack.enter_context(patch.object(simple_brush.listener, "start"))
+            stack.enter_context(patch.object(simple_brush.hotkey_monitor, "start"))
             stack.enter_context(patch.object(
                 simple_brush,
-                "bring_edge_foreground",
+                "bring_boss_foreground",
                 return_value=True,
             ))
             stack.enter_context(patch.object(
@@ -2667,10 +2891,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 side_effect=configure_input,
             ),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
+            patch.object(simple_brush.hotkey_monitor, "start"),
             patch.object(
                 simple_brush,
-                "bring_edge_foreground",
+                "bring_boss_foreground",
                 return_value=True,
             ),
             patch.object(simple_brush, "safe_wait", return_value=True),
@@ -2778,10 +3002,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 side_effect=configure_input,
             ),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
+            patch.object(simple_brush.hotkey_monitor, "start"),
             patch.object(
                 simple_brush,
-                "bring_edge_foreground",
+                "bring_boss_foreground",
                 return_value=True,
             ),
             patch.object(simple_brush, "safe_wait", return_value=True),
@@ -3280,14 +3504,14 @@ class SimpleBrushOCRTests(unittest.TestCase):
 
     def test_refresh_page_default_call_keeps_normal_message_and_wait(self):
         with (
-            patch.object(simple_brush.pyautogui, "press") as press,
+            patch.object(simple_brush, "refresh_browser") as refresh,
             patch.object(simple_brush, "safe_wait", return_value=True) as wait,
             patch.object(simple_brush.logger, "info") as info,
         ):
             self.assertTrue(simple_brush.refresh_page())
 
-        info.assert_called_once_with('🔄 已查看 100 位，按 F5 刷新页面')
-        press.assert_called_once_with('f5')
+        info.assert_called_once_with('🔄 已查看 100 位，按 Command+R 刷新页面')
+        refresh.assert_called_once_with()
         wait.assert_called_once_with(simple_brush.REFRESH_WAIT_SECONDS)
 
     def test_recover_detail_page_preserves_navigation_event_order(self):
@@ -3302,9 +3526,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             regions.first_candidate: "first_candidate",
         }
 
-        def press(key):
-            self.assertEqual(key, 'f5')
-            events.append('f5')
+        def refresh():
+            events.append('command_r')
 
         def wait(seconds):
             if seconds == simple_brush.REFRESH_WAIT_SECONDS:
@@ -3328,7 +3551,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             events.append(region_names[region])
 
         with (
-            patch.object(simple_brush.pyautogui, "press", side_effect=press),
+            patch.object(simple_brush, "refresh_browser", side_effect=refresh),
             patch.object(simple_brush, "safe_wait", side_effect=wait),
             patch.object(simple_brush, "human_delay", side_effect=delay),
             patch.object(simple_brush, "click_in_region", side_effect=click),
@@ -3339,7 +3562,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                'f5',
+                'command_r',
                 'refresh_wait',
                 'open_filter',
                 'filter_wait',
@@ -3502,7 +3725,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush.logger, "info") as info,
             patch.object(simple_brush.logger, "error") as error,
         ):
-            simple_brush.on_press(simple_brush.keyboard.Key.esc)
+            simple_brush.handle_global_escape()
             simple_brush.request_timed_stop()
             simple_brush.request_load_failed_stop(1, 0, 3, "refresh_failed", 1)
 
@@ -3518,7 +3741,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush.logger, "error") as error,
         ):
             simple_brush.request_timed_stop()
-            simple_brush.on_press(simple_brush.keyboard.Key.esc)
+            simple_brush.handle_global_escape()
             simple_brush.request_load_failed_stop(1, 0, 3, "refresh_failed", 1)
 
         self.assertEqual(simple_brush.stop_reason, "run_duration_elapsed")
@@ -3533,7 +3756,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         ):
             simple_brush.request_load_failed_stop(1, 0, 3, "refresh_failed", 1)
             simple_brush.request_timed_stop()
-            simple_brush.on_press(simple_brush.keyboard.Key.esc)
+            simple_brush.handle_global_escape()
 
         self.assertEqual(simple_brush.stop_reason, "load_failed")
         info.assert_not_called()
@@ -3876,7 +4099,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         calls["error"].assert_called_once()
         self.assertEqual(simple_brush.stop_reason, "candidate_switch_failed")
 
-    def test_exhaustion_triggers_exactly_one_f5_and_filter_reopen(self):
+    def test_exhaustion_triggers_exactly_one_command_r_and_filter_reopen(self):
         calls = self.run_load_gate_candidate(
             capture_sequence=[
                 not_loaded_observation(),
@@ -3893,7 +4116,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         calls["refresh"].assert_called_once_with(
             reason='详情页加载检测重试耗尽'
         )
-        calls["press"].assert_called_once_with('f5')
+        calls["refresh_input"].assert_called_once_with()
         calls["apply_reopen"].assert_called_once_with()
         self.assertEqual(
             calls["wait"].call_args_list,
@@ -3933,7 +4156,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         calls["refresh"].assert_called_once_with(
             reason='详情页加载检测重试耗尽'
         )
-        calls["press"].assert_called_once_with('f5')
+        calls["refresh_input"].assert_called_once_with()
         calls["apply_reopen"].assert_called_once_with()
         calls["view"].assert_not_called()
         self.assertTrue(simple_brush.stop_event)
@@ -4123,6 +4346,118 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ],
         )
         self.assertEqual(click.call_args_list, [focus_call, focus_call])
+
+    def test_legacy_clipboard_entry_delegates_to_macos_reader(self):
+        with patch.object(
+            simple_brush,
+            "read_clipboard_text",
+            return_value="recent@example.com",
+        ) as read:
+            self.assertEqual(
+                simple_brush.get_clipboard_text(),
+                "recent@example.com",
+            )
+
+        read.assert_called_once_with()
+
+    def test_forward_recent_contact_uses_semantic_input_in_order(self):
+        events = []
+        with (
+            patch.object(simple_brush, "click_in_region"),
+            patch.object(simple_brush, "human_click"),
+            patch.object(
+                simple_brush,
+                "random_point_in_region",
+                return_value=(500, 400),
+            ),
+            patch.object(simple_brush, "human_delay", return_value=True),
+            patch.object(
+                simple_brush,
+                "select_all",
+                side_effect=lambda: events.append("select_all"),
+            ),
+            patch.object(
+                simple_brush,
+                "copy",
+                side_effect=lambda: events.append("copy"),
+            ),
+            patch.object(
+                simple_brush,
+                "read_clipboard_text",
+                side_effect=lambda: (
+                    events.append("read_clipboard_text")
+                    or "recent@example.com"
+                ),
+            ),
+            patch.object(simple_brush.time, "sleep"),
+        ):
+            self.assertTrue(simple_brush.forward_one_candidate())
+
+        self.assertEqual(
+            events,
+            ["select_all", "copy", "read_clipboard_text"],
+        )
+
+    def test_forward_backup_replacement_uses_semantic_input_in_order(self):
+        events = []
+        simple_brush.backup_email = "backup@example.com"
+
+        def type_backup(text):
+            events.append("type_text_human")
+            self.assertEqual(text, simple_brush.backup_email)
+            return True
+
+        with (
+            patch.object(simple_brush, "click_in_region"),
+            patch.object(simple_brush, "human_click"),
+            patch.object(
+                simple_brush,
+                "random_point_in_region",
+                return_value=(500, 400),
+            ),
+            patch.object(simple_brush, "human_delay", return_value=True),
+            patch.object(
+                simple_brush,
+                "select_all",
+                side_effect=lambda: events.append("select_all"),
+            ),
+            patch.object(
+                simple_brush,
+                "copy",
+                side_effect=lambda: events.append("copy"),
+            ),
+            patch.object(
+                simple_brush,
+                "read_clipboard_text",
+                side_effect=lambda: (
+                    events.append("read_clipboard_text") or ""
+                ),
+            ),
+            patch.object(
+                simple_brush,
+                "clear_selection",
+                side_effect=lambda: events.append("clear_selection"),
+            ),
+            patch.object(
+                simple_brush,
+                "type_text_human",
+                side_effect=type_backup,
+            ),
+            patch.object(simple_brush.time, "sleep"),
+        ):
+            self.assertTrue(simple_brush.forward_one_candidate())
+
+        self.assertEqual(
+            events,
+            [
+                "select_all",
+                "copy",
+                "read_clipboard_text",
+                "select_all",
+                "clear_selection",
+                "type_text_human",
+            ],
+        )
 
     def test_forward_restores_focus_after_success(self):
         with (
@@ -4386,16 +4721,15 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ) as choose_point,
             patch.object(simple_brush, "human_delay", return_value=True),
             patch.object(simple_brush, "get_clipboard_text", return_value="test@example.com"),
-            patch.object(simple_brush.pyautogui, "hotkey") as hotkey,
+            patch.object(simple_brush, "select_all") as select_all,
+            patch.object(simple_brush, "copy") as copy,
             patch.object(simple_brush.time, "sleep"),
         ):
             self.assertTrue(simple_brush.forward_one_candidate())
 
         self.assertEqual(region_click.call_count, 5)
-        self.assertEqual(
-            hotkey.call_args_list,
-            [call("ctrl", "a"), call("ctrl", "c")],
-        )
+        select_all.assert_called_once_with()
+        copy.assert_called_once_with()
         self.assertEqual(
             choose_point.call_args_list,
             [
@@ -4464,9 +4798,135 @@ class SimpleBrushOCRTests(unittest.TestCase):
 
     def test_calibration_escape_does_not_stop_browsing(self):
         simple_brush.ocr_calibration_in_progress = True
-        result = simple_brush.on_press(simple_brush.keyboard.Key.esc)
+        result = simple_brush.handle_global_escape()
         self.assertTrue(result)
         self.assertFalse(simple_brush.stop_event)
+
+    def test_post_calibration_barrier_restores_before_any_input_can_continue(self):
+        region = simple_brush.ScreenRegion(100, 200, 300, 400)
+        events = []
+
+        def select_region():
+            events.append("calibration_return")
+            return region
+
+        def restore_browser():
+            events.append("browser_restore")
+            return True
+
+        with (
+            patch.object(
+                simple_brush,
+                "select_screen_region",
+                side_effect=select_region,
+            ),
+            patch.object(
+                simple_brush,
+                "restore_browser_after_calibration",
+                side_effect=restore_browser,
+            ),
+            patch.object(simple_brush, "human_click") as human_click,
+            patch.object(simple_brush, "click_in_region") as region_click,
+            patch.object(simple_brush.pyautogui, "moveTo") as move,
+            patch.object(simple_brush.pyautogui, "click") as click,
+            patch.object(simple_brush.pyautogui, "scroll") as scroll,
+            patch.object(simple_brush.pyautogui, "press") as press,
+            patch.object(simple_brush.pyautogui, "hotkey") as hotkey,
+        ):
+            result = simple_brush.select_screen_region_with_browser_restore()
+
+        self.assertEqual(result, region)
+        self.assertEqual(events, ["calibration_return", "browser_restore"])
+        for action in (
+            human_click,
+            region_click,
+            move,
+            click,
+            scroll,
+            press,
+            hotkey,
+        ):
+            action.assert_not_called()
+
+    def test_post_calibration_restore_failure_blocks_runtime_and_input(self):
+        region = simple_brush.ScreenRegion(100, 200, 300, 400)
+        with (
+            patch.object(
+                simple_brush,
+                "select_screen_region",
+                return_value=region,
+            ),
+            patch.object(
+                simple_brush,
+                "restore_browser_after_calibration",
+                side_effect=self.original_calibration_browser_restore,
+            ),
+            patch.object(
+                simple_brush,
+                "bring_boss_foreground",
+                return_value=False,
+            ),
+            patch.object(simple_brush, "human_click") as human_click,
+            patch.object(simple_brush, "click_in_region") as region_click,
+            patch.object(simple_brush.pyautogui, "scroll") as scroll,
+            patch.object(simple_brush.pyautogui, "press") as press,
+            patch.object(simple_brush.pyautogui, "hotkey") as hotkey,
+        ):
+            with self.assertRaises(simple_brush.CalibrationRuntimeAbort):
+                simple_brush.select_screen_region_with_browser_restore()
+
+        for action in (human_click, region_click, scroll, press, hotkey):
+            action.assert_not_called()
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(
+            simple_brush.stop_reason,
+            "browser_focus_restore_failed",
+        )
+
+    def test_calibration_cancel_restores_browser_and_preserves_cancel(self):
+        with (
+            patch.object(
+                simple_brush,
+                "select_screen_region",
+                side_effect=simple_brush.CalibrationCancelled(),
+            ),
+            patch.object(
+                simple_brush,
+                "restore_browser_after_calibration",
+                return_value=True,
+            ) as restore,
+        ):
+            with self.assertRaises(simple_brush.CalibrationCancelled):
+                simple_brush.select_screen_region_with_browser_restore()
+
+        restore.assert_called_once_with()
+        self.assertFalse(simple_brush.stop_event)
+
+    def test_browser_restore_reacquires_through_normal_browser_entry(self):
+        with patch.object(
+            simple_brush,
+            "bring_boss_foreground",
+            return_value=True,
+        ) as bring:
+            self.assertTrue(self.original_calibration_browser_restore())
+
+        bring.assert_called_once_with()
+        self.assertFalse(simple_brush.stop_event)
+
+    def test_browser_restore_service_failure_requests_safe_stop(self):
+        with patch.object(
+            simple_brush,
+            "bring_boss_foreground",
+            return_value=False,
+        ) as bring:
+            self.assertFalse(self.original_calibration_browser_restore())
+
+        bring.assert_called_once_with()
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(
+            simple_brush.stop_reason,
+            "browser_focus_restore_failed",
+        )
 
     def test_focus_restore_default_region_includes_original_boundaries(self):
         self.assertEqual(
@@ -4616,7 +5076,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.assertFalse(simple_brush.forward_click_calibration_in_progress)
         self.assertFalse(simple_brush.stop_event)
 
-    def test_failed_forward_click_calibration_falls_back_without_stopping(self):
+    def test_failed_forward_click_calibration_stops_without_input(self):
         simple_brush.forward_click_calibration_requested = True
         with (
             patch.object(
@@ -4626,16 +5086,15 @@ class SimpleBrushOCRTests(unittest.TestCase):
             ),
             patch.object(simple_brush, "click_in_region") as click,
             patch.object(simple_brush, "close_forward_dialog_after_calibration") as close,
-            patch.object(simple_brush.logger, "exception") as log_exception,
         ):
-            result = simple_brush.ensure_forward_click_regions_calibrated()
+            with self.assertRaises(simple_brush.CalibrationRuntimeAbort):
+                simple_brush.ensure_forward_click_regions_calibrated()
 
-        self.assertEqual(result, simple_brush.DEFAULT_FORWARD_CLICK_REGIONS)
         click.assert_not_called()
-        close.assert_called_once_with()
-        log_exception.assert_called_once()
+        close.assert_not_called()
         self.assertFalse(simple_brush.forward_click_calibration_in_progress)
-        self.assertFalse(simple_brush.stop_event)
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "calibration_overlay_failed")
 
     def test_forward_click_calibration_is_skipped_when_not_requested(self):
         with (
@@ -4651,7 +5110,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
 
     def test_forward_click_calibration_escape_does_not_stop_browsing(self):
         simple_brush.forward_click_calibration_in_progress = True
-        result = simple_brush.on_press(simple_brush.keyboard.Key.esc)
+        result = simple_brush.handle_global_escape()
         self.assertTrue(result)
         self.assertFalse(simple_brush.stop_event)
 
@@ -4900,7 +5359,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
                     click.assert_called_once_with(regions[1])
                     close_panel.assert_called_once_with()
 
-    def test_batch_filter_calibration_exception_before_open_does_not_press_escape(self):
+    def test_batch_filter_calibration_exception_stops_without_input(self):
         simple_brush.batch_filter_calibration_requested = True
         with (
             patch.object(
@@ -4913,16 +5372,15 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 simple_brush,
                 "close_batch_filter_panel_after_calibration",
             ) as close_panel,
-            patch.object(simple_brush.logger, "exception") as log_exception,
         ):
-            result = simple_brush.ensure_batch_filter_regions_calibrated()
+            with self.assertRaises(simple_brush.CalibrationRuntimeAbort):
+                simple_brush.ensure_batch_filter_regions_calibrated()
 
-        self.assertIsNone(result)
         self.assertFalse(simple_brush.batch_filter_enabled)
         click.assert_not_called()
         close_panel.assert_not_called()
-        log_exception.assert_called_once()
-        self.assertFalse(simple_brush.stop_event)
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "calibration_overlay_failed")
 
     def test_batch_filter_calibration_wait_interruption_closes_and_falls_back(self):
         first = simple_brush.ScreenRegion(10, 20, 24, 24)
@@ -4985,7 +5443,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
 
     def test_batch_filter_calibration_escape_does_not_stop_browsing(self):
         simple_brush.batch_filter_calibration_in_progress = True
-        result = simple_brush.on_press(simple_brush.keyboard.Key.esc)
+        result = simple_brush.handle_global_escape()
         self.assertTrue(result)
         self.assertFalse(simple_brush.stop_event)
 
@@ -5421,7 +5879,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         self.assertFalse(simple_brush.focus_restore_calibration_in_progress)
         self.assertFalse(simple_brush.stop_event)
 
-    def test_failed_focus_restore_calibration_keeps_default_region(self):
+    def test_failed_focus_restore_calibration_stops_runtime(self):
         simple_brush.focus_restore_calibration_requested = True
         simple_brush.focus_restore_region = simple_brush.ScreenRegion(1, 2, 3, 4)
         with (
@@ -5430,13 +5888,13 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "select_screen_region",
                 side_effect=RuntimeError("overlay failed"),
             ),
-            patch.object(simple_brush.logger, "exception") as log_exception,
         ):
-            region = simple_brush.ensure_focus_restore_region_calibrated()
-        self.assertEqual(region, simple_brush.DEFAULT_FOCUS_RESTORE_REGION)
+            with self.assertRaises(simple_brush.CalibrationRuntimeAbort):
+                simple_brush.ensure_focus_restore_region_calibrated()
         self.assertTrue(simple_brush.focus_restore_calibration_attempted)
         self.assertFalse(simple_brush.focus_restore_calibration_in_progress)
-        log_exception.assert_called_once()
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "calibration_overlay_failed")
 
     def test_favorite_button_calibration_selects_when_missing(self):
         calibrated = simple_brush.ScreenRegion(left=1200, top=240, width=80, height=32)
@@ -5474,19 +5932,19 @@ class SimpleBrushOCRTests(unittest.TestCase):
         select.assert_called_once()
         self.assertFalse(simple_brush.stop_event)
 
-    def test_failed_favorite_button_calibration_fails_safely(self):
+    def test_failed_favorite_button_calibration_stops_runtime(self):
         with (
             patch.object(
                 simple_brush,
                 "select_screen_region",
                 side_effect=RuntimeError("overlay failed"),
             ),
-            patch.object(simple_brush.logger, "exception") as log_exception,
         ):
-            region = simple_brush.ensure_favorite_button_region_calibrated()
-        self.assertIsNone(region)
+            with self.assertRaises(simple_brush.CalibrationRuntimeAbort):
+                simple_brush.ensure_favorite_button_region_calibrated()
         self.assertIsNone(simple_brush.favorite_button_region)
-        log_exception.assert_called_once()
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(simple_brush.stop_reason, "calibration_overlay_failed")
 
     def test_favorite_button_calibration_does_not_call_forward_calibration(self):
         calibrated = simple_brush.ScreenRegion(left=1200, top=240, width=80, height=32)
@@ -5554,7 +6012,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
 
     def test_focus_restore_calibration_escape_does_not_stop_browsing(self):
         simple_brush.focus_restore_calibration_in_progress = True
-        result = simple_brush.on_press(simple_brush.keyboard.Key.esc)
+        result = simple_brush.handle_global_escape()
         self.assertTrue(result)
         self.assertFalse(simple_brush.stop_event)
 
@@ -6131,12 +6589,12 @@ class SimpleBrushOCRTests(unittest.TestCase):
             simple_brush.sys,
             "argv",
             ["simple_brush.py", "--duration-seconds", "invalid", "--auto"],
-        ), patch.object(simple_brush, "bring_edge_foreground") as bring_edge:
+        ), patch.object(simple_brush, "bring_boss_foreground") as bring_boss:
             self.assertEqual(
                 simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
                 2,
             )
-        bring_edge.assert_not_called()
+        bring_boss.assert_not_called()
 
     def test_run_noninteractive_bad_calibration_profile_returns_error(self):
         with (
@@ -6157,13 +6615,13 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "load_profile",
                 side_effect=CalibrationProfileError("cannot read profile: missing"),
             ),
-            patch.object(simple_brush, "bring_edge_foreground") as bring_edge,
+            patch.object(simple_brush, "bring_boss_foreground") as bring_boss,
         ):
             self.assertEqual(
                 simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
                 2,
             )
-        bring_edge.assert_not_called()
+        bring_boss.assert_not_called()
 
     def test_run_passes_cli_action_mode_to_user_input(self):
         def configure_input(**kwargs):
@@ -6185,8 +6643,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "calibration_profile": "main",
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input) as user_input,
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=False),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=False),
         ):
             self.assertEqual(
                 simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
@@ -6226,24 +6684,24 @@ class SimpleBrushOCRTests(unittest.TestCase):
             simple_brush.sys,
             "argv",
             ["simple_brush.py", "--keywords", "Python;短剧", "--auto"],
-        ), patch.object(simple_brush, "bring_edge_foreground") as bring_edge:
+        ), patch.object(simple_brush, "bring_boss_foreground") as bring_boss:
             self.assertEqual(
                 simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
                 2,
             )
-        bring_edge.assert_not_called()
+        bring_boss.assert_not_called()
 
-    def test_auto_mode_rejects_pure_not_branch_before_opening_edge(self):
+    def test_auto_mode_rejects_pure_not_branch_before_opening_browser(self):
         with patch.object(
             simple_brush.sys,
             "argv",
             ["simple_brush.py", "--keywords", 'not "销售" or "短剧"', "--auto"],
-        ), patch.object(simple_brush, "bring_edge_foreground") as bring_edge:
+        ), patch.object(simple_brush, "bring_boss_foreground") as bring_boss:
             self.assertEqual(
                 simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
                 2,
             )
-        bring_edge.assert_not_called()
+        bring_boss.assert_not_called()
 
     def test_interactive_keyword_rules_retry_invalid_input(self):
         with patch(
@@ -6377,8 +6835,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(simple_brush, "safe_wait", return_value=True),
             patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(simple_brush, "click_first_candidate", side_effect=open_detail),
@@ -6425,6 +6883,418 @@ class SimpleBrushOCRTests(unittest.TestCase):
         ensure_forward.assert_called_once_with()
         ensure_ocr.assert_called_once_with()
 
+    def test_run_stops_when_post_calibration_browser_restore_fails(self):
+        region = simple_brush.ScreenRegion(100, 200, 300, 400)
+
+        def configure_input(**_kwargs):
+            simple_brush.focus_restore_calibration_requested = True
+
+        with (
+            patch.object(simple_brush, "parse_args", return_value={
+                "keywords": "",
+                "email": "",
+                "duration_seconds": "",
+                "no_forward": True,
+                "no_batch_filter": False,
+                "simple_mouse": False,
+                "auto": False,
+                "action_mode": None,
+                "calibration_profile": "",
+                "screening_profile_id": "",
+            }),
+            patch.object(
+                simple_brush,
+                "get_user_input",
+                side_effect=configure_input,
+            ),
+            patch.object(simple_brush, "initialize_ocr"),
+            patch.object(
+                simple_brush.hotkey_monitor,
+                "start",
+                return_value=True,
+            ),
+            patch.object(simple_brush.hotkey_monitor, "stop") as stop_hotkey,
+            patch.object(
+                simple_brush,
+                "bring_boss_foreground",
+                side_effect=[True, False],
+            ) as bring,
+            patch.object(
+                simple_brush,
+                "restore_browser_after_calibration",
+                side_effect=self.original_calibration_browser_restore,
+            ),
+            patch.object(simple_brush, "safe_wait", return_value=True),
+            patch.object(
+                simple_brush.pyautogui,
+                "position",
+                return_value=(10, 20),
+            ),
+            patch.object(
+                simple_brush,
+                "click_first_candidate",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "select_screen_region",
+                return_value=region,
+            ),
+            patch.object(
+                simple_brush,
+                "ensure_ocr_region_calibrated",
+            ) as ensure_ocr,
+            patch.object(simple_brush, "start_run_timer") as start_timer,
+            patch.object(simple_brush, "view_candidate") as view_candidate,
+            patch.object(simple_brush, "human_click") as human_click,
+            patch.object(simple_brush, "click_in_region") as region_click,
+            patch.object(simple_brush.pyautogui, "scroll") as scroll,
+            patch.object(simple_brush.pyautogui, "press") as press,
+            patch.object(simple_brush.pyautogui, "hotkey") as hotkey,
+        ):
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
+
+        self.assertEqual(bring.call_count, 2)
+        ensure_ocr.assert_not_called()
+        start_timer.assert_not_called()
+        view_candidate.assert_not_called()
+        for action in (human_click, region_click, scroll, press, hotkey):
+            action.assert_not_called()
+        stop_hotkey.assert_called_once_with()
+        self.run_ocr_store.close.assert_called_once_with(RunStatus.ERROR)
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(
+            simple_brush.stop_reason,
+            "browser_focus_restore_failed",
+        )
+
+    def test_startup_continues_after_two_phase_fullscreen_discovery(self):
+        initial = mac_chrome_window("fullscreen", "")
+        confirmed = mac_chrome_window(
+            "fullscreen",
+            "BOSS直聘 - Google Chrome",
+            focused=True,
+            application_active=True,
+        )
+        api = mac_browser_api([initial], [confirmed])
+
+        def acquire():
+            return browser_window_service.bring_boss_foreground(
+                simple_brush.logger,
+                native_api=api,
+            )
+
+        with (
+            patch.object(simple_brush, "parse_args", return_value={
+                "keywords": "",
+                "email": "",
+                "duration_seconds": "",
+                "no_forward": True,
+                "no_batch_filter": False,
+                "simple_mouse": False,
+                "auto": False,
+                "action_mode": None,
+                "calibration_profile": "",
+                "screening_profile_id": "",
+            }),
+            patch.object(simple_brush, "get_user_input"),
+            patch.object(simple_brush, "initialize_ocr"),
+            patch.object(
+                simple_brush.hotkey_monitor,
+                "start",
+                return_value=True,
+            ),
+            patch.object(simple_brush.hotkey_monitor, "stop"),
+            patch.object(
+                simple_brush,
+                "bring_boss_foreground",
+                side_effect=acquire,
+            ),
+            patch.object(
+                simple_brush,
+                "safe_wait",
+                return_value=False,
+            ) as safe_wait,
+            patch.object(simple_brush, "click_first_candidate") as click,
+        ):
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
+
+        safe_wait.assert_called_once_with(simple_brush.COUNTDOWN_SECONDS)
+        click.assert_not_called()
+        self.assertEqual(api.enumerate_windows.call_count, 2)
+        self.assertEqual(api.activate_application.call_count, 2)
+
+    def test_startup_fullscreen_confirmation_failure_blocks_candidate_automation(self):
+        initial = mac_chrome_window("fullscreen", "")
+        unrelated = mac_chrome_window(
+            "fullscreen",
+            "YouTube - Google Chrome",
+            focused=True,
+        )
+        api = mac_browser_api([initial], [unrelated])
+
+        def acquire():
+            return browser_window_service.bring_boss_foreground(
+                simple_brush.logger,
+                native_api=api,
+            )
+
+        with (
+            patch.object(simple_brush, "parse_args", return_value={
+                "keywords": "",
+                "email": "",
+                "duration_seconds": "",
+                "no_forward": True,
+                "no_batch_filter": False,
+                "simple_mouse": False,
+                "auto": False,
+                "action_mode": None,
+                "calibration_profile": "",
+                "screening_profile_id": "",
+            }),
+            patch.object(simple_brush, "get_user_input"),
+            patch.object(simple_brush, "initialize_ocr"),
+            patch.object(
+                simple_brush.hotkey_monitor,
+                "start",
+                return_value=True,
+            ),
+            patch.object(simple_brush.hotkey_monitor, "stop") as stop_hotkey,
+            patch.object(
+                simple_brush,
+                "bring_boss_foreground",
+                side_effect=acquire,
+            ),
+            patch.object(simple_brush, "safe_wait") as safe_wait,
+            patch.object(simple_brush, "click_first_candidate") as click,
+            patch.object(simple_brush, "view_candidate") as view,
+            patch.object(simple_brush, "human_click") as human_click,
+            patch.object(simple_brush, "click_in_region") as region_click,
+            patch.object(simple_brush.pyautogui, "scroll") as scroll,
+            patch.object(simple_brush.pyautogui, "press") as press,
+            patch.object(simple_brush.pyautogui, "hotkey") as hotkey,
+        ):
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
+
+        safe_wait.assert_not_called()
+        click.assert_not_called()
+        view.assert_not_called()
+        for action in (human_click, region_click, scroll, press, hotkey):
+            action.assert_not_called()
+        stop_hotkey.assert_called_once_with()
+
+    def test_post_calibration_uses_two_phase_fullscreen_reacquisition(self):
+        region = simple_brush.ScreenRegion(100, 200, 300, 400)
+        initial_confirmed = mac_chrome_window(
+            "fullscreen",
+            "BOSS直聘 - Google Chrome",
+            focused=True,
+        )
+        restore_probe = mac_chrome_window("fullscreen", "")
+        restore_confirmed = mac_chrome_window(
+            "fullscreen",
+            "BOSS直聘 - Google Chrome",
+            focused=True,
+            application_active=True,
+        )
+        api = mac_browser_api(
+            [initial_confirmed],
+            [restore_probe],
+            [restore_confirmed],
+        )
+        events = []
+
+        def configure_input(**_kwargs):
+            simple_brush.focus_restore_calibration_requested = True
+
+        def acquire():
+            result = browser_window_service.bring_boss_foreground(
+                simple_brush.logger,
+                native_api=api,
+            )
+            events.append("browser_ready" if result else "browser_failed")
+            return result
+
+        def stop_after_restore():
+            events.append("ocr_after_restore")
+            return False
+
+        with (
+            patch.object(simple_brush, "parse_args", return_value={
+                "keywords": "",
+                "email": "",
+                "duration_seconds": "",
+                "no_forward": True,
+                "no_batch_filter": False,
+                "simple_mouse": False,
+                "auto": False,
+                "action_mode": None,
+                "calibration_profile": "",
+                "screening_profile_id": "",
+            }),
+            patch.object(
+                simple_brush,
+                "get_user_input",
+                side_effect=configure_input,
+            ),
+            patch.object(simple_brush, "initialize_ocr"),
+            patch.object(
+                simple_brush.hotkey_monitor,
+                "start",
+                return_value=True,
+            ),
+            patch.object(simple_brush.hotkey_monitor, "stop"),
+            patch.object(
+                simple_brush,
+                "bring_boss_foreground",
+                side_effect=acquire,
+            ),
+            patch.object(
+                simple_brush,
+                "restore_browser_after_calibration",
+                side_effect=self.original_calibration_browser_restore,
+            ),
+            patch.object(simple_brush, "safe_wait", return_value=True),
+            patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
+            patch.object(
+                simple_brush,
+                "click_first_candidate",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "select_screen_region",
+                return_value=region,
+            ),
+            patch.object(
+                simple_brush,
+                "ensure_ocr_region_calibrated",
+                side_effect=stop_after_restore,
+            ) as ensure_ocr,
+            patch.object(simple_brush, "start_run_timer") as start_timer,
+        ):
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
+
+        self.assertEqual(
+            events,
+            ["browser_ready", "browser_ready", "ocr_after_restore"],
+        )
+        self.assertEqual(api.enumerate_windows.call_count, 3)
+        ensure_ocr.assert_called_once_with()
+        start_timer.assert_not_called()
+
+    def test_post_calibration_fullscreen_ambiguity_fails_closed(self):
+        region = simple_brush.ScreenRegion(100, 200, 300, 400)
+        initial_confirmed = mac_chrome_window(
+            "fullscreen",
+            "BOSS直聘 - Google Chrome",
+            focused=True,
+        )
+        first_unknown = mac_chrome_window("first-fullscreen", "")
+        second_unknown = mac_chrome_window("second-fullscreen", None)
+        api = mac_browser_api(
+            [initial_confirmed],
+            [first_unknown, second_unknown],
+        )
+
+        def configure_input(**_kwargs):
+            simple_brush.focus_restore_calibration_requested = True
+
+        def acquire():
+            return browser_window_service.bring_boss_foreground(
+                simple_brush.logger,
+                native_api=api,
+            )
+
+        with (
+            patch.object(simple_brush, "parse_args", return_value={
+                "keywords": "",
+                "email": "",
+                "duration_seconds": "",
+                "no_forward": True,
+                "no_batch_filter": False,
+                "simple_mouse": False,
+                "auto": False,
+                "action_mode": None,
+                "calibration_profile": "",
+                "screening_profile_id": "",
+            }),
+            patch.object(
+                simple_brush,
+                "get_user_input",
+                side_effect=configure_input,
+            ),
+            patch.object(simple_brush, "initialize_ocr"),
+            patch.object(
+                simple_brush.hotkey_monitor,
+                "start",
+                return_value=True,
+            ),
+            patch.object(simple_brush.hotkey_monitor, "stop") as stop_hotkey,
+            patch.object(
+                simple_brush,
+                "bring_boss_foreground",
+                side_effect=acquire,
+            ),
+            patch.object(
+                simple_brush,
+                "restore_browser_after_calibration",
+                side_effect=self.original_calibration_browser_restore,
+            ),
+            patch.object(simple_brush, "safe_wait", return_value=True),
+            patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
+            patch.object(
+                simple_brush,
+                "click_first_candidate",
+                return_value=True,
+            ),
+            patch.object(
+                simple_brush,
+                "select_screen_region",
+                return_value=region,
+            ),
+            patch.object(
+                simple_brush,
+                "ensure_ocr_region_calibrated",
+            ) as ensure_ocr,
+            patch.object(simple_brush, "start_run_timer") as start_timer,
+            patch.object(simple_brush, "view_candidate") as view_candidate,
+            patch.object(simple_brush, "human_click") as human_click,
+            patch.object(simple_brush, "click_in_region") as region_click,
+            patch.object(simple_brush.pyautogui, "scroll") as scroll,
+            patch.object(simple_brush.pyautogui, "press") as press,
+            patch.object(simple_brush.pyautogui, "hotkey") as hotkey,
+        ):
+            self.assertEqual(
+                simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
+                0,
+            )
+
+        self.assertEqual(api.enumerate_windows.call_count, 2)
+        ensure_ocr.assert_not_called()
+        start_timer.assert_not_called()
+        view_candidate.assert_not_called()
+        for action in (human_click, region_click, scroll, press, hotkey):
+            action.assert_not_called()
+        stop_hotkey.assert_called_once_with()
+        self.assertTrue(simple_brush.stop_event)
+        self.assertEqual(
+            simple_brush.stop_reason,
+            "browser_focus_restore_failed",
+        )
+
     def test_run_interactive_favorite_calibrates_before_viewing(self):
         events = []
 
@@ -6452,8 +7322,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(simple_brush, "safe_wait", return_value=True),
             patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(simple_brush, "click_first_candidate", side_effect=record("detail")),
@@ -6531,8 +7401,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 wraps=simple_brush.get_user_input,
             ),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(simple_brush, "safe_wait", return_value=True),
             patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(simple_brush, "click_first_candidate", side_effect=record("detail")),
@@ -6594,8 +7464,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(simple_brush, "safe_wait", return_value=True),
             patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(simple_brush, "click_first_candidate", side_effect=open_detail),
@@ -6636,8 +7506,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(simple_brush, "safe_wait", return_value=True),
             patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(simple_brush, "click_first_candidate", return_value=True),
@@ -6672,8 +7542,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             }),
             patch.object(simple_brush, "get_user_input", wraps=simple_brush.get_user_input),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(simple_brush, "safe_wait", return_value=True),
             patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(simple_brush, "click_first_candidate", return_value=True),
@@ -6710,8 +7580,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(simple_brush, "safe_wait", return_value=True),
             patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(simple_brush, "click_first_candidate", return_value=False),
@@ -6776,8 +7646,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(
                 simple_brush,
                 "ensure_batch_filter_regions_calibrated",
@@ -6876,8 +7746,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(
                 simple_brush,
                 "ensure_batch_filter_regions_calibrated",
@@ -6949,8 +7819,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(
                 simple_brush,
                 "ensure_batch_filter_regions_calibrated",
@@ -7074,8 +7944,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "auto": False,
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(
                 simple_brush,
                 "apply_batch_filter_and_open_first_candidate",
@@ -7140,8 +8010,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "auto": False,
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(
                 simple_brush,
                 "apply_batch_filter_and_open_first_candidate",
@@ -7198,8 +8068,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "auto": False,
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(
                 simple_brush,
                 "apply_batch_filter_and_open_first_candidate",
@@ -7248,8 +8118,8 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "auto": False,
             }),
             patch.object(simple_brush, "get_user_input", side_effect=configure_input),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(simple_brush, "safe_wait", return_value=True),
             patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(
@@ -7310,10 +8180,10 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 "argv",
                 ["simple_brush.py", "--duration-seconds", "5", "--auto"],
             ),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
             patch.object(simple_brush, "start_run_timer") as start_timer,
             patch.object(simple_brush, "safe_wait", return_value=False),
-            patch.object(simple_brush.listener, "start"),
+            patch.object(simple_brush.hotkey_monitor, "start"),
         ):
             self.assertEqual(
                 simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
@@ -7327,6 +8197,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
             patch.object(simple_brush.pyautogui, "click") as click,
             patch.object(simple_brush.pyautogui, "press") as press,
             patch.object(simple_brush.pyautogui, "scroll") as scroll,
+            patch.object(simple_brush, "refresh_browser") as refresh,
         ):
             self.assertFalse(simple_brush.click_first_candidate(10, 20))
             self.assertFalse(simple_brush.next_candidate())
@@ -7335,6 +8206,7 @@ class SimpleBrushOCRTests(unittest.TestCase):
         click.assert_not_called()
         press.assert_not_called()
         scroll.assert_not_called()
+        refresh.assert_not_called()
 
     def test_ocr_time_is_deducted_from_stay_budget(self):
         self.assertEqual(simple_brush.remaining_stay_seconds(12.0, 100.0, 107.5), 4.5)
@@ -7357,94 +8229,6 @@ class SimpleBrushOCRTests(unittest.TestCase):
                 randint.assert_called_once_with(600, 1000)
                 scroll.assert_called_once_with(-steps)
 
-class BossBrowserWindowTests(unittest.TestCase):
-    def test_window_match_accepts_supported_boss_titles(self):
-        for process_name, title in (
-            ('chrome.exe', 'BOSS直聘 - Google Chrome'),
-            ('chrome.exe', '职位详情 - zhipin - Google Chrome'),
-            ('msedge.exe', 'BOSS直聘 - Microsoft Edge'),
-            ('msedge.exe', '职位详情 - zhipin - Microsoft Edge'),
-        ):
-            with self.subTest(process_name=process_name, title=title):
-                self.assertTrue(simple_brush.is_boss_browser_window(title, process_name))
-
-    def test_window_match_rejects_unrelated_titles_or_processes(self):
-        for process_name, title in (
-            ('chrome.exe', 'New Tab - Google Chrome'),
-            ('msedge.exe', 'New Tab - Microsoft Edge'),
-            ('firefox.exe', 'BOSS直聘 - Mozilla Firefox'),
-            ('notepad.exe', 'BOSS notes'),
-            ('code.exe', 'BossOCR.spec - BOSSOCR - Visual Studio Code'),
-        ):
-            with self.subTest(process_name=process_name, title=title):
-                self.assertFalse(simple_brush.is_boss_browser_window(title, process_name))
-
-    def _bring_foreground(self, windows):
-        def enum_windows(callback, _):
-            for hwnd, _title, _process_name in windows:
-                callback(hwnd, None)
-
-        titles = {hwnd: title for hwnd, title, _process_name in windows}
-        processes = {hwnd: process_name for hwnd, _title, process_name in windows}
-        patches = ExitStack()
-        mocks = (
-            patches.enter_context(
-                patch.object(simple_brush.win32gui, 'EnumWindows', side_effect=enum_windows)
-            ),
-            patches.enter_context(
-                patch.object(simple_brush.win32gui, 'IsWindowVisible', return_value=True)
-            ),
-            patches.enter_context(
-                patch.object(simple_brush.win32gui, 'GetWindowText', side_effect=titles.__getitem__)
-            ),
-            patches.enter_context(
-                patch.object(simple_brush, 'get_window_process_name', side_effect=processes.__getitem__)
-            ),
-            patches.enter_context(
-                patch.object(simple_brush.win32gui, 'IsIconic', return_value=False)
-            ),
-            patches.enter_context(patch.object(simple_brush.win32gui, 'SetForegroundWindow')),
-            patches.enter_context(patch.object(simple_brush.time, 'sleep')),
-        )
-        return patches, mocks
-
-    def test_bring_boss_foreground_prefers_chrome_over_edge_regardless_of_enum_order(self):
-        windows = [
-            (101, 'BOSS直聘 - Microsoft Edge', 'msedge.exe'),
-            (202, 'BOSS直聘 - Google Chrome', 'chrome.exe'),
-        ]
-        patches, mocks = self._bring_foreground(windows)
-        with patches:
-            self.assertTrue(simple_brush.bring_boss_foreground())
-        mocks[5].assert_called_once_with(202)
-
-    def test_bring_boss_foreground_uses_edge_when_chrome_is_absent(self):
-        windows = [(101, 'BOSS直聘 - Microsoft Edge', 'msedge.exe')]
-        patches, mocks = self._bring_foreground(windows)
-        with patches:
-            self.assertTrue(simple_brush.bring_boss_foreground())
-        mocks[5].assert_called_once_with(101)
-
-    def test_bring_boss_foreground_uses_chrome_when_edge_is_absent(self):
-        windows = [(202, 'BOSS直聘 - Google Chrome', 'chrome.exe')]
-        patches, mocks = self._bring_foreground(windows)
-        with patches:
-            self.assertTrue(simple_brush.bring_boss_foreground())
-        mocks[5].assert_called_once_with(202)
-
-    def test_bring_boss_foreground_returns_false_without_matching_window(self):
-        windows = [(101, 'New Tab - Microsoft Edge', 'msedge.exe')]
-        patches, mocks = self._bring_foreground(windows)
-        with patches:
-            self.assertFalse(simple_brush.bring_boss_foreground())
-        mocks[5].assert_not_called()
-
-    def test_bring_edge_foreground_delegates_to_new_compatibility_function(self):
-        with patch.object(simple_brush, 'bring_boss_foreground', return_value=True) as bring_boss:
-            self.assertTrue(simple_brush.bring_edge_foreground())
-        bring_boss.assert_called_once_with()
-
-
 class ScreeningProfileRunFreezeTests(unittest.TestCase):
     def setUp(self):
         self.profile_version = sample_screening_profile_version()
@@ -7458,6 +8242,10 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                 "batch_filter_regions",
                 "ocr_record_store",
                 "paused",
+                "mac_fresh_calibration_policy_active",
+                "mac_fresh_region_ids",
+                "mac_initial_candidate_region",
+                "mac_screen_metrics_snapshot",
             )
         }
         self.ai_provider_config_store_patcher = patch.object(
@@ -7470,8 +8258,22 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
         self.ai_provider_config_store.return_value.load.return_value = (
             valid_ai_provider_config_result()
         )
+        self.permissions_patcher = patch.object(
+            simple_brush,
+            "ensure_permissions",
+            return_value=Mock(all_required=True),
+        )
+        self.permissions_patcher.start()
+        self.macos_runtime_patcher = patch.object(
+            simple_brush,
+            "is_macos_runtime",
+            return_value=False,
+        )
+        self.macos_runtime_patcher.start()
 
     def tearDown(self):
+        self.macos_runtime_patcher.stop()
+        self.permissions_patcher.stop()
         self.ai_provider_config_store_patcher.stop()
         for name, value in self.saved.items():
             setattr(simple_brush, name, value)
@@ -7499,8 +8301,8 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
             patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
             patch.object(simple_brush, "create_ocr_record_store") as create_store,
             patch.object(simple_brush, "initialize_ocr") as initialize_ocr,
-            patch.object(simple_brush.listener, "start") as listener_start,
-            patch.object(simple_brush, "bring_edge_foreground") as foreground,
+            patch.object(simple_brush.hotkey_monitor, "start") as listener_start,
+            patch.object(simple_brush, "bring_boss_foreground") as foreground,
         ):
             self.assertNotEqual(
                 simple_brush.run(run_bound_rule_set=sample_run_bound_rule_set()),
@@ -7533,8 +8335,8 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                 patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
                 patch.object(simple_brush, "create_ocr_record_store") as create_store,
                 patch.object(simple_brush, "initialize_ocr") as initialize_ocr,
-                patch.object(simple_brush.listener, "start") as listener_start,
-                patch.object(simple_brush, "bring_edge_foreground") as foreground,
+                patch.object(simple_brush.hotkey_monitor, "start") as listener_start,
+                patch.object(simple_brush, "bring_boss_foreground") as foreground,
                 patch.object(simple_brush, "view_candidate") as view,
                 patch.object(
                     simple_brush,
@@ -7563,7 +8365,7 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                 view.assert_not_called()
                 configure_profile.assert_not_called()
 
-    def test_binding_store_creation_precedes_ocr_listener_and_browser(self):
+    def test_permission_gate_precedes_ocr_hotkey_and_browser(self):
         events = []
         store = Mock(
             enabled=True,
@@ -7623,17 +8425,26 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
             ) as create_r13,
             patch.object(
                 simple_brush,
+                "ensure_permissions",
+                side_effect=lambda **_kwargs: (
+                    events.append("permissions")
+                    or Mock(all_required=True)
+                ),
+            ) as permission_gate,
+            patch.object(
+                simple_brush,
                 "initialize_ocr",
                 side_effect=lambda: events.append("ocr"),
             ),
             patch.object(
-                simple_brush.listener,
+                simple_brush.hotkey_monitor,
                 "start",
-                side_effect=lambda: events.append("listener"),
+                side_effect=lambda: events.append("hotkey") or True,
             ),
+            patch.object(simple_brush.hotkey_monitor, "stop") as monitor_stop,
             patch.object(
                 simple_brush,
-                "bring_edge_foreground",
+                "bring_boss_foreground",
                 side_effect=lambda: events.append("browser") or False,
             ),
             patch.object(
@@ -7641,6 +8452,10 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                 "run_screening_profile_configuration",
             ) as configure_profile,
             patch.object(simple_brush, "view_candidate") as view,
+            patch.object(simple_brush.pyautogui, "click") as click,
+            patch.object(simple_brush.pyautogui, "press") as press,
+            patch.object(simple_brush.pyautogui, "hotkey") as hotkey,
+            patch.object(simple_brush.pyautogui, "scroll") as scroll,
         ):
             profile_store.return_value.load_latest.side_effect = load_latest
             self.assertEqual(
@@ -7658,8 +8473,9 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                 "config",
                 "store",
                 "r13_store",
+                "permissions",
                 "ocr",
-                "listener",
+                "hotkey",
                 "browser",
             ],
         )
@@ -7667,9 +8483,148 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
             run_dir=store.run_dir,
             run_id=store.run_id,
         )
+        permission_gate.assert_called_once_with(
+            request_missing=True,
+            logger=simple_brush.logger,
+        )
         store.close.assert_called_once_with(RunStatus.COMPLETED)
+        monitor_stop.assert_called_once_with()
         configure_profile.assert_not_called()
         view.assert_not_called()
+        click.assert_not_called()
+        press.assert_not_called()
+        hotkey.assert_not_called()
+        scroll.assert_not_called()
+
+    def test_each_missing_permission_blocks_all_automation_startup(self):
+        for missing_permission in (
+            "screen_recording",
+            "accessibility",
+            "input_monitoring",
+        ):
+            with self.subTest(permission=missing_permission):
+                store = Mock(
+                    enabled=True,
+                    run_id=f"blocked-{missing_permission}",
+                    run_dir=Path("synthetic-r13-run"),
+                )
+                report = Mock(all_required=False)
+                with (
+                    patch.object(
+                        simple_brush,
+                        "parse_args",
+                        return_value=self.cli_args(),
+                    ),
+                    patch.object(simple_brush, "get_user_input"),
+                    patch.object(
+                        simple_brush,
+                        "ScreeningProfileStore",
+                    ) as profile_store,
+                    patch.object(
+                        simple_brush,
+                        "create_ocr_record_store",
+                        return_value=store,
+                    ),
+                    patch.object(
+                        simple_brush,
+                        "AIScreeningRecordStore",
+                    ),
+                    patch.object(
+                        simple_brush,
+                        "ensure_permissions",
+                        return_value=report,
+                    ) as permission_gate,
+                    patch.object(
+                        simple_brush,
+                        "format_permission_failure",
+                        return_value=(
+                            "macOS 权限检查未通过："
+                            f"{missing_permission}；自动控制尚未启动。"
+                        ),
+                    ) as format_failure,
+                    patch.object(simple_brush, "initialize_ocr") as initialize_ocr,
+                    patch.object(
+                        simple_brush.hotkey_monitor,
+                        "start",
+                    ) as hotkey_start,
+                    patch.object(
+                        simple_brush,
+                        "bring_boss_foreground",
+                    ) as foreground,
+                    patch.object(simple_brush, "view_candidate") as view,
+                    patch.object(simple_brush.pyautogui, "click") as click,
+                    patch.object(simple_brush.pyautogui, "press") as press,
+                    patch.object(simple_brush.pyautogui, "hotkey") as hotkey,
+                    patch.object(simple_brush.pyautogui, "scroll") as scroll,
+                    patch("builtins.print") as printed,
+                ):
+                    profile_store.return_value.load_latest.return_value = (
+                        self.profile_version
+                    )
+                    self.assertEqual(
+                        simple_brush.run(
+                            screening_profile_id=self.profile_id,
+                            run_bound_rule_set=sample_run_bound_rule_set(),
+                        ),
+                        2,
+                    )
+
+                permission_gate.assert_called_once_with(
+                    request_missing=True,
+                    logger=simple_brush.logger,
+                )
+                format_failure.assert_called_once_with(report)
+                printed.assert_called_once()
+                store.close.assert_called_once_with(RunStatus.ERROR)
+                initialize_ocr.assert_not_called()
+                hotkey_start.assert_not_called()
+                foreground.assert_not_called()
+                view.assert_not_called()
+                click.assert_not_called()
+                press.assert_not_called()
+                hotkey.assert_not_called()
+                scroll.assert_not_called()
+
+    def test_hotkey_start_failure_aborts_before_browser_or_mouse_automation(self):
+        store = Mock(
+            enabled=True,
+            run_id="bound-run",
+            run_dir=Path("synthetic-r13-run"),
+        )
+        r13_store = Mock(spec=AIScreeningRecordStore)
+
+        with (
+            patch.object(simple_brush, "parse_args", return_value=self.cli_args()),
+            patch.object(simple_brush, "get_user_input"),
+            patch.object(simple_brush, "ScreeningProfileStore") as profile_store,
+            patch.object(simple_brush, "create_ocr_record_store", return_value=store),
+            patch.object(simple_brush, "AIScreeningRecordStore", return_value=r13_store),
+            patch.object(simple_brush, "initialize_ocr") as initialize_ocr,
+            patch.object(simple_brush.hotkey_monitor, "start", return_value=False),
+            patch.object(simple_brush, "bring_boss_foreground") as foreground,
+            patch.object(simple_brush, "view_candidate") as view,
+            patch.object(simple_brush.pyautogui, "click") as click,
+            patch.object(simple_brush.pyautogui, "press") as press,
+            patch.object(simple_brush.pyautogui, "hotkey") as hotkey,
+            patch.object(simple_brush.pyautogui, "scroll") as scroll,
+        ):
+            profile_store.return_value.load_latest.return_value = self.profile_version
+            self.assertEqual(
+                simple_brush.run(
+                    screening_profile_id=self.profile_id,
+                    run_bound_rule_set=sample_run_bound_rule_set(),
+                ),
+                2,
+            )
+
+        initialize_ocr.assert_called_once_with()
+        store.close.assert_called_once_with(RunStatus.ERROR)
+        foreground.assert_not_called()
+        view.assert_not_called()
+        click.assert_not_called()
+        press.assert_not_called()
+        hotkey.assert_not_called()
+        scroll.assert_not_called()
 
     def test_initial_store_failure_stops_before_ocr_listener_browser_and_view(self):
         for store_result in (None, Mock(enabled=False, run_id="disabled")):
@@ -7684,8 +8639,8 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                     return_value=store_result,
                 ),
                 patch.object(simple_brush, "initialize_ocr") as initialize_ocr,
-                patch.object(simple_brush.listener, "start") as listener_start,
-                patch.object(simple_brush, "bring_edge_foreground") as foreground,
+                patch.object(simple_brush.hotkey_monitor, "start") as listener_start,
+                patch.object(simple_brush, "bring_boss_foreground") as foreground,
                 patch.object(simple_brush, "view_candidate") as view,
             ):
                 profile_store.return_value.load_latest.return_value = (
@@ -7723,8 +8678,8 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
                 ),
             ),
             patch.object(simple_brush, "initialize_ocr") as initialize_ocr,
-            patch.object(simple_brush.listener, "start") as listener_start,
-            patch.object(simple_brush, "bring_edge_foreground") as foreground,
+            patch.object(simple_brush.hotkey_monitor, "start") as listener_start,
+            patch.object(simple_brush, "bring_boss_foreground") as foreground,
             patch.object(simple_brush, "view_candidate") as view,
         ):
             profile_store.return_value.load_latest.return_value = self.profile_version
@@ -7766,8 +8721,10 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
             patch.object(simple_brush, "create_ocr_record_store", return_value=store),
             patch.object(simple_brush, "AIScreeningRecordStore", return_value=r13_store),
             patch.object(simple_brush, "initialize_ocr"),
-            patch.object(simple_brush.listener, "start"),
-            patch.object(simple_brush, "bring_edge_foreground", return_value=True),
+            patch.object(simple_brush.hotkey_monitor, "start"),
+            patch.object(simple_brush, "bring_boss_foreground", return_value=True),
+            patch.object(simple_brush, "safe_wait", return_value=True),
+            patch.object(simple_brush.pyautogui, "position", return_value=(10, 20)),
             patch.object(simple_brush, "open_first_candidate_for_batch", return_value=True),
             patch.object(simple_brush, "ensure_ocr_region_calibrated", return_value=True),
             patch.object(simple_brush, "start_run_timer", return_value=None),
@@ -7825,7 +8782,7 @@ class ScreeningProfileRunFreezeTests(unittest.TestCase):
             simple_brush,
             "run_screening_profile_configuration",
         ) as configure_profile:
-            simple_brush.on_press(simple_brush.keyboard.Key.space)
+            simple_brush.handle_global_space()
 
         self.assertTrue(simple_brush.paused)
         configure_profile.assert_not_called()
@@ -7935,7 +8892,11 @@ class StartupMenuTests(unittest.TestCase):
         ):
             self.assertEqual(simple_brush.main(), 0)
 
-        calibrate.assert_called_once_with()
+        calibrate.assert_called_once_with(
+            select_region=(
+                simple_brush.select_screen_region_with_browser_restore
+            ),
+        )
         run.assert_not_called()
         run_ai_provider_configuration.assert_not_called()
         openai.assert_not_called()
@@ -7947,7 +8908,11 @@ class StartupMenuTests(unittest.TestCase):
             patch.object(simple_brush, "calibration_template_main", return_value=2) as calibrate,
         ):
             self.assertEqual(simple_brush.main(), 0)
-        calibrate.assert_called_once_with()
+        calibrate.assert_called_once_with(
+            select_region=(
+                simple_brush.select_screen_region_with_browser_restore
+            ),
+        )
 
     def test_template_generator_exception_is_reported_then_returns_to_menu(self):
         with (
